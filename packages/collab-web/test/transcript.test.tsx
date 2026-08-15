@@ -55,6 +55,7 @@ function renderTranscript(props: {
 	entries?: readonly SessionEntry[];
 	activeTools?: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
+	onEditLastUserMessage?: (text: string) => void;
 }): string {
 	return renderToStaticMarkup(
 		<Transcript
@@ -63,6 +64,7 @@ function renderTranscript(props: {
 			streamDone={true}
 			activeTools={props.activeTools ?? new Map()}
 			working={props.working}
+			onEditLastUserMessage={props.onEditLastUserMessage}
 		/>,
 	);
 }
@@ -143,5 +145,65 @@ describe("Transcript message Markdown", () => {
 
 		expect(countElements(html, ".tr-row--user .tr-md code")).toBe(1);
 		expect(countElements(html, ".tr-row--user .tr-md strong")).toBe(1);
+	});
+
+	it("shows time and copy actions for user prompts but edits only the final prompt", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "older-user",
+				parentId: null,
+				timestamp: "2026-07-15T14:24:00Z",
+				message: { role: "user", content: "older prompt", timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "latest-user",
+				parentId: "older-user",
+				timestamp: "2026-07-15T14:25:00Z",
+				message: { role: "user", content: "latest prompt", timestamp: 2 },
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false, onEditLastUserMessage: () => {} });
+
+		expect(countElements(html, ".tr-message-time")).toBe(2);
+		expect(countElements(html, 'button[title="copy message"]')).toBe(2);
+		expect(countElements(html, 'button[title="edit and resend"]')).toBe(1);
+	});
+
+	it("treats the newest collab prompt as the editable final user prompt", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "imported-user",
+				parentId: null,
+				timestamp: "2026-07-15T14:24:00Z",
+				message: { role: "user", content: "imported prompt", timestamp: 1 },
+			},
+			{
+				type: "custom_message",
+				id: "latest-collab-user",
+				parentId: "imported-user",
+				timestamp: "2026-07-15T14:25:00Z",
+				customType: "collab-prompt",
+				content: "latest shell prompt",
+				details: { from: "guest" },
+				display: true,
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false, onEditLastUserMessage: () => {} });
+		const importedStart = html.indexOf("imported prompt");
+		const latestStart = html.indexOf("latest shell prompt");
+		const editButton = 'title="edit and resend"';
+
+		expect(importedStart).toBeGreaterThanOrEqual(0);
+		expect(latestStart).toBeGreaterThan(importedStart);
+		expect(html.slice(importedStart, latestStart)).not.toContain(editButton);
+		expect(html.slice(latestStart)).toContain(editButton);
+		expect(countElements(html, ".tr-message-time")).toBe(2);
+		expect(countElements(html, 'button[title="copy message"]')).toBe(2);
+		expect(countElements(html, 'button[title="edit and resend"]')).toBe(1);
 	});
 });

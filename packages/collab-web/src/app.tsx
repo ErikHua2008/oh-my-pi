@@ -342,6 +342,7 @@ interface SessionProps {
 
 function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode {
 	const snap = useGuestSnapshot(client);
+	const [composerPrefill, setComposerPrefill] = useState<string | undefined>(undefined);
 	const [railOpen, setRailOpen] = useState(false);
 	const [railOverlay, setRailOverlay] = useState(() => window.matchMedia("(max-width: 1024px)").matches);
 	const [settingsOpen, setSettingsOpen] = useState(false);
@@ -485,6 +486,7 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 							activeTools={snap.activeTools}
 							working={snap.working}
 							host={toolHost}
+							onEditLastUserMessage={setComposerPrefill}
 						/>
 					</div>
 				</section>
@@ -517,7 +519,12 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 			{snap.phase === "ended" ? (
 				<Banners phase={snap.phase} endedReason={snap.endedReason} onRejoin={onRejoin} onNewLink={onLeave} />
 			) : (
-				<Composer client={client} snapshot={snap} />
+				<Composer
+					client={client}
+					snapshot={snap}
+					prefill={composerPrefill}
+					onPrefillConsumed={() => setComposerPrefill(undefined)}
+				/>
 			)}
 			{drawerAgent && (
 				<>

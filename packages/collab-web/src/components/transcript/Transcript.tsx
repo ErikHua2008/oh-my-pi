@@ -1,8 +1,16 @@
-import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
-import { ChevronRight } from "lucide-react";
+import {
+	type AssistantMessage,
+	COLLAB_PROMPT_MESSAGE_TYPE,
+	type ImageContent,
+	type SessionEntry,
+	type TextContent,
+	type ToolResultMessage,
+} from "@oh-my-pi/pi-wire";
+import { Check, ChevronRight, Copy, Pencil } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ActiveTool } from "../../lib/client";
+import { copyText } from "../../lib/desktop-bridge";
 import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
@@ -18,6 +26,8 @@ export interface TranscriptProps {
 	compact?: boolean; // dense variant for the agent drawer
 	/** Sub-session drill-down capabilities forwarded to tool renderers. */
 	host?: ToolRenderHost;
+	/** Opens the composer with the final user prompt for editing and re-sending. */
+	onEditLastUserMessage?: (text: string) => void;
 }
 
 function Row({
@@ -98,6 +108,109 @@ function MsgContent({ content }: { content: string | readonly (TextContent | Ima
 	);
 }
 
+function messageText(content: string | readonly (TextContent | ImageContent)[]): string {
+	if (typeof content === "string") return content;
+	return content
+		.filter((block): block is TextContent => block.type === "text")
+		.map(block => block.text)
+		.join("\n");
+}
+
+function isUserPromptEntry(entry: SessionEntry): boolean {
+	return (
+		(entry.type === "message" && entry.message.role === "user") ||
+		(entry.type === "custom_message" && entry.customType === COLLAB_PROMPT_MESSAGE_TYPE)
+	);
+}
+
+function messageTime(timestamp: string): string {
+	const parsed = Date.parse(timestamp);
+	if (Number.isNaN(parsed)) return timestamp;
+	return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }).format(parsed);
+}
+
+function MessageActions({
+	timestamp,
+	text,
+	canEdit,
+	onEdit,
+}: {
+	timestamp: string;
+	text: string;
+	canEdit: boolean;
+	onEdit?: () => void;
+}): ReactNode {
+	const [copied, setCopied] = useState(false);
+	const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+	useEffect(() => {
+		return () => {
+			if (timerRef.current !== undefined) clearTimeout(timerRef.current);
+		};
+	}, []);
+
+	if (text.length === 0) return <span className="tr-message-time">{messageTime(timestamp)}</span>;
+
+	const copy = (): void => {
+		void copyText(text)
+			.then(() => {
+				setCopied(true);
+				timerRef.current = setTimeout(() => setCopied(false), 1200);
+			})
+			.catch(() => {
+				// Clipboard permissions are best-effort; keep the transcript usable.
+			});
+	};
+
+	return (
+		<div className="tr-message-actions">
+			<span className="tr-message-time">{messageTime(timestamp)}</span>
+			<button
+				type="button"
+				className="tr-message-action"
+				onClick={copy}
+				title="copy message"
+				aria-label="copy message"
+			>
+				{copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
+			</button>
+			{canEdit && onEdit !== undefined && (
+				<button
+					type="button"
+					className="tr-message-action"
+					onClick={onEdit}
+					title="edit and resend"
+					aria-label="edit and resend"
+				>
+					<Pencil size={15} aria-hidden="true" />
+				</button>
+			)}
+		</div>
+	);
+}
+
+function UserMessage({
+	content,
+	timestamp,
+	canEdit,
+	onEdit,
+}: {
+	content: string | readonly (TextContent | ImageContent)[];
+	timestamp: string;
+	canEdit: boolean;
+	onEdit?: () => void;
+}): ReactNode {
+	const text = messageText(content);
+	return (
+		<div className="tr-user-message">
+			<div className="tr-user-bubble">
+				<MsgContent content={content} />
+			</div>
+			<MessageActions timestamp={timestamp} text={text} canEdit={canEdit} onEdit={onEdit} />
+		</div>
+	);
+}
+
 function AssistantBody({
 	message,
 	results,
@@ -163,12 +276,22 @@ interface EntryRowProps {
 	entry: SessionEntry;
 	results: ReadonlyMap<string, ToolResultMessage>;
 	active: ReadonlyMap<string, ActiveTool>;
+	lastUserEntryId: string | undefined;
+	working: boolean;
+	onEditLastUserMessage?: (text: string) => void;
 	host?: ToolRenderHost;
 }
 
 /** Re-render only when the entry itself or one of its tool pairings changed. */
 function entryRowEqual(prev: EntryRowProps, next: EntryRowProps): boolean {
-	if (prev.entry !== next.entry || prev.host !== next.host) return false;
+	if (
+		prev.entry !== next.entry ||
+		prev.host !== next.host ||
+		prev.lastUserEntryId !== next.lastUserEntryId ||
+		prev.working !== next.working ||
+		prev.onEditLastUserMessage !== next.onEditLastUserMessage
+	)
+		return false;
 	const e = next.entry;
 	if (e.type !== "message" || e.message.role !== "assistant") return true;
 	for (const block of e.message.content) {
@@ -179,7 +302,15 @@ function entryRowEqual(prev: EntryRowProps, next: EntryRowProps): boolean {
 	return true;
 }
 
-const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryRowProps): ReactNode {
+const EntryRow = memo(function EntryRow({
+	entry,
+	results,
+	active,
+	lastUserEntryId,
+	working,
+	onEditLastUserMessage,
+	host,
+}: EntryRowProps): ReactNode {
 	switch (entry.type) {
 		case "message": {
 			const msg = entry.message;
@@ -187,7 +318,12 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 				case "user":
 					return (
 						<Row kind="user" speaker="host" title={entry.timestamp}>
-							<MsgContent content={msg.content} />
+							<UserMessage
+								content={msg.content}
+								timestamp={entry.timestamp}
+								canEdit={entry.id === lastUserEntryId && onEditLastUserMessage !== undefined && !working}
+								onEdit={() => onEditLastUserMessage?.(messageText(msg.content))}
+							/>
 						</Row>
 					);
 				case "assistant":
@@ -202,7 +338,7 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 			}
 		}
 		case "custom_message": {
-			if (entry.customType === "collab-prompt") {
+			if (entry.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
 				const details = entry.details;
 				const from =
 					details !== null &&
@@ -212,7 +348,12 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 						: "guest";
 				return (
 					<Row kind="user" speaker={from} title={entry.timestamp}>
-						<MsgContent content={entry.content} />
+						<UserMessage
+							content={entry.content}
+							timestamp={entry.timestamp}
+							canEdit={entry.id === lastUserEntryId && onEditLastUserMessage !== undefined && !working}
+							onEdit={() => onEditLastUserMessage?.(messageText(entry.content))}
+						/>
 					</Row>
 				);
 			}
@@ -259,7 +400,9 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 }, entryRowEqual);
 
 export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host } = props;
+	const { entries, stream, streamDone, activeTools, working, compact, host, onEditLastUserMessage } = props;
+
+	const lastUserEntryId = useMemo(() => [...entries].reverse().find(isUserPromptEntry)?.id, [entries]);
 
 	const results = useMemo(() => {
 		const map = new Map<string, ToolResultMessage>();
@@ -311,7 +454,16 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		>
 			{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
 			{entries.map(entry => (
-				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
+				<EntryRow
+					key={entry.id}
+					entry={entry}
+					results={results}
+					active={activeTools}
+					lastUserEntryId={lastUserEntryId}
+					working={working}
+					onEditLastUserMessage={onEditLastUserMessage}
+					host={host}
+				/>
 			))}
 			{stream !== null && (
 				<Row kind="assistant" speaker="agent">
