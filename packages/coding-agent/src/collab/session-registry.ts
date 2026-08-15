@@ -200,7 +200,8 @@ export class SessionRegistry {
 
 	/** List all sessions (disk + live), newest first by modification time. */
 	async list(): Promise<SessionSummary[]> {
-		const infos = await listSessions(this.#sessionDir, new FileSessionStorage());
+		const storage = new FileSessionStorage();
+		const infos = await listSessions(this.#sessionDir, storage);
 		const summaries: SessionSummary[] = [];
 		const seen = new Set<string>();
 		for (const info of infos) {
@@ -231,7 +232,9 @@ export class SessionRegistry {
 		for (const entry of this.#active.values()) {
 			if (entry.state === "dropping" || seen.has(entry.id)) continue;
 			const title = entry.sessionManager.getSessionName();
-			if (entry.sessionManager.getSessionFile() === undefined && !title?.trim()) continue;
+			const sessionFile = entry.sessionManager.getSessionFile();
+			const persisted = sessionFile !== undefined && (await storage.exists(sessionFile));
+			if (!persisted && !title?.trim()) continue;
 			summaries.push({
 				id: entry.id,
 				title,

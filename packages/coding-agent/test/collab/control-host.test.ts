@@ -217,7 +217,9 @@ async function setupHarness(persistedInitial = true): Promise<Harness> {
 	const sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-core-ctrl-"));
 	const initialSessionFile = path.join(sessionDir, "initial.jsonl");
 	const initialSessionFileRef: { current: string | undefined } = {
-		current: persistedInitial ? initialSessionFile : undefined,
+		// SessionManager.create() assigns the future JSONL path immediately even
+		// though lazy persistence has not created the file yet.
+		current: initialSessionFile,
 	};
 	const header = {
 		type: "session",
