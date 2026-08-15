@@ -25,6 +25,10 @@ fn round_trip_preserves_config() {
 		..Default::default()
 	};
 	cfg.record_project("D:/project/a");
+	cfg.set_project_name("D:/project/a", "My Project").unwrap();
+	cfg.pinned_sessions.push("session-1".into());
+	cfg.session_read_through
+		.insert("session-1".into(), "2026-08-15T10:00:00.000Z".into());
 	cfg.record_project("D:/project/b");
 	cfg.record_project("D:/project/a");
 
@@ -34,6 +38,27 @@ fn round_trip_preserves_config() {
 	assert_eq!(loaded, cfg);
 	// Dedup keeps the most recent occurrence at the front.
 	assert_eq!(loaded.recent_projects, vec!["D:/project/a", "D:/project/b"]);
+}
+
+#[test]
+fn old_config_without_project_names_loads() {
+	let path = temp_dir("old-config").join("config.json");
+	std::fs::write(&path, r#"{"omp_bin":"omp","dev_repo":null,"last_project":null,"recent_projects":[],"window_x":null,"window_y":null,"window_width":null,"window_height":null,"window_maximized":null}"#).unwrap();
+
+	let loaded = load_config(&path);
+
+	assert!(loaded.project_names.is_empty());
+	assert!(loaded.pinned_sessions.is_empty());
+	assert!(loaded.session_read_through.is_empty());
+}
+
+#[test]
+fn project_alias_matches_windows_extended_path_prefix() {
+	let mut cfg = ShellConfig::default();
+	cfg.set_project_name(r"\\?\C:\Work\Repo", "Renamed Repo")
+		.unwrap();
+
+	assert_eq!(cfg.project_name(r"c:\work\repo\"), Some("Renamed Repo"));
 }
 
 #[test]

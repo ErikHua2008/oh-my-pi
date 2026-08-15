@@ -8,6 +8,10 @@
 				"core:default",
 				"dialog:default",
 				"allow-project-list",
+				"allow-project-rename",
+				"allow-project-reveal",
+				"allow-session-preferences",
+				"allow-session-preferences-update",
 				"allow-project-open",
 				"allow-project-switch",
 				"allow-app-info"
@@ -22,6 +26,10 @@
 			"windows": ["main"],
 			"permissions": [
 				"allow-project-list",
+				"allow-project-rename",
+				"allow-project-reveal",
+				"allow-session-preferences",
+				"allow-session-preferences-update",
 				"allow-project-open",
 				"allow-project-switch",
 				"allow-app-info"

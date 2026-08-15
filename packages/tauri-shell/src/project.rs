@@ -1,7 +1,10 @@
 //! Project selection & switching: folder picker, menu rebuild, tray, window
 //! state, core lifecycle.
 
-use std::path::{Path, PathBuf};
+use std::{
+	collections::BTreeMap,
+	path::{Path, PathBuf},
+};
 
 use tauri::{
 	AppHandle, Manager, State, Url,
@@ -77,11 +80,11 @@ pub fn setup_app(app: &AppHandle) -> tauri::Result<()> {
 	let cfg = load_config(&config_path(app));
 	let omp = OmpCommand::resolve(&cfg);
 	let last_project = cfg.last_project.clone();
-	let recent = cfg.recent_projects.clone();
+	let menu_config = cfg.clone();
 
 	app.manage(Mutex::new(AppState { core: None, config: cfg, omp }));
 
-	rebuild_menu(app, &recent)?;
+	rebuild_menu(app, &menu_config)?;
 
 	restore_window_state(app);
 
@@ -158,12 +161,11 @@ pub async fn switch_project(app: &AppHandle, new_dir: &Path) -> Result<(), Strin
 	}
 	guard.config.record_project(&canonical_str);
 	let cfg_snapshot = guard.config.clone();
-	let recent = guard.config.recent_projects.clone();
 
 	if let Err(e) = save_config(&config_path(app), &cfg_snapshot) {
 		eprintln!("failed to save shell config: {e}");
 	}
-	if let Err(e) = rebuild_menu(app, &recent) {
+	if let Err(e) = rebuild_menu(app, &cfg_snapshot) {
 		eprintln!("failed to rebuild menu: {e}");
 	}
 
@@ -201,10 +203,11 @@ pub async fn switch_project(app: &AppHandle, new_dir: &Path) -> Result<(), Strin
 				.expect("a successful switch installs the started core")
 				.control_link
 				.clone();
-			let title = canonical
-				.file_name()
-				.map(|name| name.to_string_lossy().into_owned())
-				.unwrap_or_else(|| canonical_str.clone());
+			let title = guard
+				.config
+				.project_name(&canonical_str)
+				.map(str::to_string)
+				.unwrap_or_else(|| project_basename(&canonical_str));
 			drop(guard);
 			if let Some(win) = app.get_webview_window("main") {
 				if let Ok(url) = Url::parse(&control) {
@@ -232,6 +235,13 @@ pub struct ProjectList {
 	pub last_project:    Option<String>,
 	pub recent_projects: Vec<String>,
 	pub current_project: Option<String>,
+	pub project_names:   BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionPreferences {
+	pub pinned_sessions:      Vec<String>,
+	pub session_read_through: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -251,7 +261,92 @@ fn project_list_from(config: &ShellConfig, current_project: Option<&Path>) -> Pr
 		last_project:    config.last_project.clone(),
 		recent_projects: config.recent_projects.clone(),
 		current_project: current_project.map(|path| path.to_string_lossy().into_owned()),
+		project_names:   config.project_names.clone(),
 	}
+}
+
+#[tauri::command]
+pub async fn project_rename(app: AppHandle, path: String, name: String) -> Result<(), String> {
+	let config = {
+		let state = app.state::<Mutex<AppState>>();
+		let mut guard = state.lock().await;
+		guard
+			.config
+			.set_project_name(&path, &name)
+			.map_err(str::to_string)?;
+		guard.config.clone()
+	};
+	save_config(&config_path(&app), &config).map_err(|error| error.to_string())?;
+	rebuild_menu(&app, &config).map_err(|error| error.to_string())?;
+
+	let current = {
+		let state = app.state::<Mutex<AppState>>();
+		let guard = state.lock().await;
+		guard
+			.core
+			.as_ref()
+			.map(|core| core.project_dir().to_string_lossy().into_owned())
+	};
+	if current
+		.as_deref()
+		.is_some_and(|current| same_project_path(current, &path))
+	{
+		if let Some(win) = app.get_webview_window("main") {
+			let _ = win.set_title(name.trim());
+		}
+	}
+	Ok(())
+}
+
+/// Open a session working directory in the platform file manager.
+#[tauri::command]
+pub fn project_reveal(path: String) -> Result<(), String> {
+	let directory = PathBuf::from(&path)
+		.canonicalize()
+		.map_err(|error| format!("无法打开工作目录 {path:?}：{error}"))?;
+	if !directory.is_dir() {
+		return Err(format!("{} 不是目录", directory.display()));
+	}
+
+	#[cfg(target_os = "windows")]
+	let mut command = std::process::Command::new("explorer.exe");
+	#[cfg(target_os = "macos")]
+	let mut command = std::process::Command::new("open");
+	#[cfg(all(unix, not(target_os = "macos")))]
+	let mut command = std::process::Command::new("xdg-open");
+
+	command
+		.arg(&directory)
+		.spawn()
+		.map(|_| ())
+		.map_err(|error| format!("无法在文件管理器中打开 {}：{error}", directory.display()))
+}
+
+#[tauri::command]
+pub async fn session_preferences(
+	state: State<'_, Mutex<AppState>>,
+) -> Result<SessionPreferences, String> {
+	let guard = state.lock().await;
+	Ok(SessionPreferences {
+		pinned_sessions:      guard.config.pinned_sessions.clone(),
+		session_read_through: guard.config.session_read_through.clone(),
+	})
+}
+
+#[tauri::command]
+pub async fn session_preferences_update(
+	app: AppHandle,
+	pinned_sessions: Vec<String>,
+	session_read_through: BTreeMap<String, String>,
+) -> Result<(), String> {
+	let config = {
+		let state = app.state::<Mutex<AppState>>();
+		let mut guard = state.lock().await;
+		guard.config.pinned_sessions = pinned_sessions;
+		guard.config.session_read_through = session_read_through;
+		guard.config.clone()
+	};
+	save_config(&config_path(&app), &config).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -328,6 +423,19 @@ mod command_tests {
 
 		assert_eq!(value["last_project"], "/work/last");
 		assert!(value["current_project"].is_null());
+	}
+
+	#[test]
+	fn project_list_includes_persisted_display_names() {
+		let mut config =
+			ShellConfig { recent_projects: vec![r"\\?\C:\Work\Repo".into()], ..Default::default() };
+		config
+			.set_project_name(r"C:\Work\Repo", "Renamed Repo")
+			.expect("valid project name");
+
+		let projects = project_list_from(&config, None);
+
+		assert_eq!(projects.project_names.values().next().map(String::as_str), Some("Renamed Repo"));
 	}
 
 	#[tokio::test]
@@ -491,20 +599,21 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 	Ok(())
 }
 
-pub fn rebuild_menu(app: &AppHandle, recent: &[String]) -> tauri::Result<()> {
+pub fn rebuild_menu(app: &AppHandle, config: &ShellConfig) -> tauri::Result<()> {
 	let open = MenuItem::with_id(app, "open-project", "Open Project…", true, Some("CmdOrCtrl+O"))?;
 
-	let recent_menu = if recent.is_empty() {
+	let recent_menu = if config.recent_projects.is_empty() {
 		let empty = MenuItem::with_id(app, "recent:empty", "（empty）", false, None::<&str>)?;
 		Submenu::with_items(app, "Recent Projects", true, &[&empty])?
 	} else {
-		let items: Vec<MenuItem<tauri::Wry>> = recent
+		let items: Vec<MenuItem<tauri::Wry>> = config
+			.recent_projects
 			.iter()
 			.map(|p| {
-				let label = Path::new(p)
-					.file_name()
-					.map(|name| name.to_string_lossy().into_owned())
-					.unwrap_or_else(|| p.clone());
+				let label = config
+					.project_name(p)
+					.map(str::to_string)
+					.unwrap_or_else(|| project_basename(p));
 				MenuItem::with_id(app, format!("recent:{p}"), label, true, None::<&str>)
 			})
 			.collect::<tauri::Result<_>>()?;
@@ -526,4 +635,23 @@ pub fn rebuild_menu(app: &AppHandle, recent: &[String]) -> tauri::Result<()> {
 	let menu = Menu::with_items(app, &[&file, &help])?;
 	app.set_menu(menu)?;
 	Ok(())
+}
+
+fn project_basename(path: &str) -> String {
+	Path::new(path)
+		.file_name()
+		.map(|name| name.to_string_lossy().into_owned())
+		.unwrap_or_else(|| path.to_string())
+}
+
+fn same_project_path(left: &str, right: &str) -> bool {
+	let normalize = |path: &str| {
+		path
+			.strip_prefix(r"\\?\")
+			.unwrap_or(path)
+			.replace('\\', "/")
+			.trim_end_matches('/')
+			.to_lowercase()
+	};
+	normalize(left) == normalize(right)
 }

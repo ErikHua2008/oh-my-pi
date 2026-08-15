@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { SessionSummary } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SessionsPanel, groupSessionsByProject } from "../src/components/sessions/SessionsPanel";
+import { SessionsPanel, groupSessionsByProject, isSessionUnread } from "../src/components/sessions/SessionsPanel";
 import type { ControlSnapshot } from "../src/lib/control-client";
 
 function session(id: string, cwd: string, modifiedAt: string, title = id): SessionSummary {
@@ -35,6 +35,7 @@ function renderPanel(snap: ControlSnapshot, activeSessionId: string | null = nul
 			onOpenSettings={() => {}}
 			onOpenSession={() => {}}
 			onNewSession={() => {}}
+			onRenameSession={() => {}}
 			onDropSession={() => {}}
 			onLeave={() => {}}
 		/>,
@@ -67,9 +68,30 @@ describe("SessionsPanel project grouping", () => {
 		expect(groups[0]?.sessions.map(item => item.id)).toEqual(["alpha-new", "alpha-old"]);
 		expect(groups[1]?.sessions.map(item => item.id)).toEqual(["beta"]);
 	});
+
+	it("keeps pinned sessions above newer unpinned sessions within a project", () => {
+		const groups = groupSessionsByProject(
+			[
+				session("newest", "/work/alpha", "2026-08-05T09:00:00.000Z"),
+				session("pinned", "/work/alpha", "2026-08-03T09:00:00.000Z"),
+			],
+			[],
+			new Set(["pinned"]),
+		);
+
+		expect(groups[0]?.sessions.map(item => item.id)).toEqual(["pinned", "newest"]);
+	});
 });
 
 describe("SessionsPanel session actions", () => {
+	it("reports unread only after a known session advances beyond its read watermark", () => {
+		const item = { ...session("chat", "/work/project", "2026-08-05T09:00:00.000Z"), messageCount: 2 };
+		expect(isSessionUnread(item, {})).toBe(false);
+		expect(isSessionUnread(item, { chat: "2026-08-04T09:00:00.000Z" })).toBe(true);
+		expect(isSessionUnread(item, { chat: "2026-08-04T09:00:00.000Z" }, "chat")).toBe(false);
+		expect(isSessionUnread(item, { chat: item.modifiedAt })).toBe(false);
+	});
+
 	it("maps activeSessionId to the active row's aria-current state", () => {
 		const html = renderPanel(
 			snapshot([
@@ -81,6 +103,7 @@ describe("SessionsPanel session actions", () => {
 
 		expect(html).toContain('aria-current="page" title="Open Active session"');
 		expect(html).not.toContain('aria-current="page" title="Open Other session"');
+		expect(html).toContain('title="Rename session Active session"');
 	});
 
 	it("renders read-only session rows without resume, create, or drop controls", () => {
@@ -94,5 +117,6 @@ describe("SessionsPanel session actions", () => {
 		expect(html).not.toContain("Resume");
 		expect(html).not.toContain("New session");
 		expect(html).not.toContain("Drop Read only session");
+		expect(html).not.toContain("Rename session Read only session");
 	});
 });

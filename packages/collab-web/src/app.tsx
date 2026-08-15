@@ -323,6 +323,7 @@ export function App(): ReactNode {
 				}
 				onOpenSession={id => startResume(appState.client, id)}
 				onNewSession={() => startCreate(appState.client)}
+				onRenameSession={(id, title) => appState.client.sendRename(id, title)}
 				onDropSession={id => startDrop(appState.client, id)}
 				onLeave={leave}
 			/>

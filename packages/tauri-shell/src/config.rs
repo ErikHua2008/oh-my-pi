@@ -1,39 +1,50 @@
 //! Shell configuration persistence and omp executable resolution.
 
-use std::{io, path::Path};
+use std::{collections::BTreeMap, io, path::Path};
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShellConfig {
 	// Default "omp" (resolved via PATH).
-	pub omp_bin:          String,
+	pub omp_bin:              String,
 	// Some => spawn `bun --cwd=<repo>/packages/coding-agent src/cli.ts`.
-	pub dev_repo:         Option<String>,
-	pub last_project:     Option<String>,
+	pub dev_repo:             Option<String>,
+	pub last_project:         Option<String>,
 	// Newest first, deduped, max 8 entries.
-	pub recent_projects:  Vec<String>,
+	pub recent_projects:      Vec<String>,
+	// Display-only aliases keyed by project path. The directory itself is never renamed.
+	#[serde(default)]
+	pub project_names:        BTreeMap<String, String>,
+	// Desktop-only conversation list preferences. Session JSONL files remain untouched.
+	#[serde(default)]
+	pub pinned_sessions:      Vec<String>,
+	#[serde(default)]
+	pub session_read_through: BTreeMap<String, String>,
 	// Window geometry persisted on close/hide; restored on next launch.
 	// `Option` so old config.json files deserialize without migration.
-	pub window_x:         Option<i32>,
-	pub window_y:         Option<i32>,
-	pub window_width:     Option<u32>,
-	pub window_height:    Option<u32>,
-	pub window_maximized: Option<bool>,
+	pub window_x:             Option<i32>,
+	pub window_y:             Option<i32>,
+	pub window_width:         Option<u32>,
+	pub window_height:        Option<u32>,
+	pub window_maximized:     Option<bool>,
 }
 
 impl Default for ShellConfig {
 	fn default() -> Self {
 		Self {
-			omp_bin:          "omp".to_string(),
-			dev_repo:         None,
-			last_project:     None,
-			recent_projects:  Vec::new(),
-			window_x:         None,
-			window_y:         None,
-			window_width:     None,
-			window_height:    None,
-			window_maximized: None,
+			omp_bin:              "omp".to_string(),
+			dev_repo:             None,
+			last_project:         None,
+			recent_projects:      Vec::new(),
+			project_names:        BTreeMap::new(),
+			pinned_sessions:      Vec::new(),
+			session_read_through: BTreeMap::new(),
+			window_x:             None,
+			window_y:             None,
+			window_width:         None,
+			window_height:        None,
+			window_maximized:     None,
 		}
 	}
 }
@@ -44,6 +55,43 @@ impl ShellConfig {
 		self.recent_projects.retain(|p| p != dir);
 		self.recent_projects.insert(0, dir.to_string());
 		self.recent_projects.truncate(8);
+	}
+
+	pub fn project_name(&self, dir: &str) -> Option<&str> {
+		let key = comparable_project_path(dir);
+		self
+			.project_names
+			.iter()
+			.find_map(|(path, name)| (comparable_project_path(path) == key).then_some(name.as_str()))
+	}
+
+	pub fn set_project_name(&mut self, dir: &str, name: &str) -> Result<(), &'static str> {
+		let name = name.trim();
+		if name.is_empty() {
+			return Err("project name cannot be empty");
+		}
+		let key = comparable_project_path(dir);
+		self
+			.project_names
+			.retain(|path, _| comparable_project_path(path) != key);
+		self.project_names.insert(dir.to_string(), name.to_string());
+		Ok(())
+	}
+}
+
+fn comparable_project_path(path: &str) -> String {
+	let normalized = path
+		.strip_prefix(r"\\?\UNC\")
+		.map(|rest| format!(r"\\{rest}"))
+		.or_else(|| path.strip_prefix(r"\\?\").map(str::to_string))
+		.unwrap_or_else(|| path.to_string())
+		.replace('\\', "/")
+		.trim_end_matches('/')
+		.to_string();
+	if normalized.as_bytes().get(1) == Some(&b':') || normalized.starts_with("//") {
+		normalized.to_lowercase()
+	} else {
+		normalized
 	}
 }
 

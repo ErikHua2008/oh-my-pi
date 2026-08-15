@@ -70,14 +70,27 @@ function makeSessionDouble(scopeId: string, sessionManager: SessionManager): Age
  * accessors the registry's resume/list paths use. `onEntryAppended` must be
  * writable — CollabHost.start installs its entry broadcast there.
  */
-function makeSessionManagerDouble(id: string, sessionFile: string, cwd: string): SessionManager {
+function makeSessionManagerDouble(
+	id: string,
+	sessionFile: { current: string | undefined },
+	cwd: string,
+): SessionManager {
+	let title: string | undefined;
 	return {
 		getSessionId: () => id,
 		getCwd: () => cwd,
-		getSessionDir: () => path.dirname(sessionFile),
-		getSessionFile: () => sessionFile,
+		getSessionDir: () => (sessionFile.current ? path.dirname(sessionFile.current) : cwd),
+		getSessionFile: () => sessionFile.current,
+		getSessionName: () => title,
+		setSessionName: async (name: string) => {
+			title = name.trim();
+			const header = { type: "session", id, timestamp: new Date().toISOString(), cwd, title };
+			if (!sessionFile.current) throw new Error("test session has no persisted file");
+			await fs.writeFile(sessionFile.current, `${JSON.stringify(header)}\n`);
+			return title.length > 0;
+		},
 		snapshotForReplication: () => ({
-			header: { type: "session", id, timestamp: new Date().toISOString(), cwd },
+			header: { type: "session", id, timestamp: new Date().toISOString(), cwd, title },
 			entries: [],
 		}),
 		onEntryAppended: undefined,
@@ -193,24 +206,26 @@ interface Harness {
 	initialHost: CollabHost;
 	controlHost: ControlHost;
 	sessionDir: string;
+	persistInitialMessage(): Promise<void>;
 }
 
 let server: LocalServer;
 let harness: Harness | undefined;
 const guestCleanups: (() => void)[] = [];
 
-async function setupHarness(): Promise<Harness> {
+async function setupHarness(persistedInitial = true): Promise<Harness> {
 	const sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-core-ctrl-"));
-	// The initial session must be discoverable on disk so registry.list()
-	// reports it (header-only → status "unknown") and resume-by-id resolves.
 	const initialSessionFile = path.join(sessionDir, "initial.jsonl");
+	const initialSessionFileRef: { current: string | undefined } = {
+		current: persistedInitial ? initialSessionFile : undefined,
+	};
 	const header = {
 		type: "session",
 		id: INITIAL_SESSION_ID,
 		timestamp: new Date().toISOString(),
 		cwd: INITIAL_SESSION_CWD,
 	};
-	await fs.writeFile(initialSessionFile, `${JSON.stringify(header)}\n`);
+	if (persistedInitial) await fs.writeFile(initialSessionFile, `${JSON.stringify(header)}\n`);
 
 	const registry = new SessionRegistry({
 		relayUrl: server.relayUrl,
@@ -220,7 +235,7 @@ async function setupHarness(): Promise<Harness> {
 		agentDir: path.join(sessionDir, "agent"),
 	});
 
-	const initialManager = makeSessionManagerDouble(INITIAL_SESSION_ID, initialSessionFile, INITIAL_SESSION_CWD);
+	const initialManager = makeSessionManagerDouble(INITIAL_SESSION_ID, initialSessionFileRef, INITIAL_SESSION_CWD);
 	const initialSession = makeSessionDouble(INITIAL_SESSION_ID, initialManager);
 	const initialBus = new EventBus();
 	const initialHost = new CollabHost(makeHostContext(initialSession, initialManager, initialBus));
@@ -242,7 +257,23 @@ async function setupHarness(): Promise<Harness> {
 
 	const controlHost = new ControlHost(registry);
 	await controlHost.start(server.relayUrl, server.webLinkBase);
-	return { registry, initialHost, controlHost, sessionDir };
+	return {
+		registry,
+		initialHost,
+		controlHost,
+		sessionDir,
+		persistInitialMessage: async () => {
+			initialSessionFileRef.current = initialSessionFile;
+			const message = {
+				type: "message",
+				id: "message-1",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: { role: "user", content: [{ type: "text", text: "hello" }] },
+			};
+			await fs.writeFile(initialSessionFile, `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`);
+		},
+	};
 }
 
 async function teardownHarness(target: Harness | undefined): Promise<void> {
@@ -333,6 +364,18 @@ describe("control room + session registry (multi-session core)", () => {
 		expect(initial.link).toBe(harness.initialHost.webLink);
 	});
 
+	it("keeps an untitled draft out of the sidebar until its first message persists", async () => {
+		harness = await setupHarness(false);
+
+		expect(await harness.registry.list()).toEqual([]);
+
+		await harness.persistInitialMessage();
+		const sessions = await harness.registry.list();
+		expect(sessions).toHaveLength(1);
+		expect(sessions[0]?.id).toBe(INITIAL_SESSION_ID);
+		expect(sessions[0]?.messageCount).toBe(1);
+	});
+
 	it("creates a session through the control room and its link serves a live session room", async () => {
 		harness = await setupHarness();
 		const { created } = spyOnCreateAgentSession();
@@ -362,6 +405,9 @@ describe("control room + session registry (multi-session core)", () => {
 		const guest = await joinRoom(harness.controlHost.webLink, "resumer", { ctrl: true });
 		guestCleanups.push(() => guest.close());
 		await guest.nextFrame(f => f.t === "ctrl-welcome");
+		// A fresh active session can be listed before its first JSONL append.
+		// Removing the fixture proves resume checks the live registry before disk.
+		await fs.rm(path.join(harness.sessionDir, "initial.jsonl"));
 
 		// Active session: resume must hand back the live link, not reload the JSONL.
 		guest.socket.send({ t: "ctrl-resume", id: INITIAL_SESSION_ID });
@@ -377,6 +423,22 @@ describe("control room + session registry (multi-session core)", () => {
 		expect(err.message).toContain("no such session");
 	});
 
+	it("renames an active session through the control room and persists the JSONL title", async () => {
+		harness = await setupHarness();
+		const guest = await joinRoom(harness.controlHost.webLink, "renamer", { ctrl: true });
+		guestCleanups.push(() => guest.close());
+		await guest.nextFrame(f => f.t === "ctrl-welcome");
+
+		guest.socket.send({ t: "ctrl-rename", id: INITIAL_SESSION_ID, title: "Renamed conversation" });
+		const sessionsFrame = await guest.nextFrame(
+			f => f.t === "ctrl-sessions" && f.sessions.some(session => session.title === "Renamed conversation"),
+		);
+		if (sessionsFrame.t !== "ctrl-sessions") throw new Error(`expected ctrl-sessions, got ${sessionsFrame.t}`);
+		expect(sessionsFrame.sessions[0]?.title).toBe("Renamed conversation");
+		const stored = await fs.readFile(path.join(harness.sessionDir, "initial.jsonl"), "utf8");
+		expect(stored).toContain('"title":"Renamed conversation"');
+	});
+
 	it("treats guests without the write token as read-only and strips session links", async () => {
 		harness = await setupHarness();
 		const guest = await joinRoom(harness.controlHost.webLink, "viewer", { ctrl: true, writeToken: null });
@@ -390,6 +452,11 @@ describe("control room + session registry (multi-session core)", () => {
 		const err = await guest.nextFrame(f => f.t === "ctrl-error");
 		if (err.t !== "ctrl-error") throw new Error(`expected ctrl-error, got ${err.t}`);
 		expect(err.message).toBe("read-only");
+
+		guest.socket.send({ t: "ctrl-rename", id: INITIAL_SESSION_ID, title: "Forbidden rename" });
+		const renameErr = await guest.nextFrame(f => f.t === "ctrl-error");
+		if (renameErr.t !== "ctrl-error") throw new Error(`expected ctrl-error, got ${renameErr.t}`);
+		expect(renameErr.message).toBe("read-only");
 
 		guest.socket.send({ t: "ctrl-list" });
 		const sessionsFrame = await guest.nextFrame(f => f.t === "ctrl-sessions");

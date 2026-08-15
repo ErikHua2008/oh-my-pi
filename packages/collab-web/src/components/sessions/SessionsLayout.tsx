@@ -16,6 +16,7 @@ export interface SessionsLayoutProps {
 	content: ReactNode;
 	onOpenSession(id: string): void;
 	onNewSession(): void;
+	onRenameSession(id: string, title: string): void;
 	onDropSession(id: string): void;
 	onLeave(): void;
 }
@@ -31,6 +32,7 @@ export function SessionsLayout({
 	content,
 	onOpenSession,
 	onNewSession,
+	onRenameSession,
 	onDropSession,
 	onLeave,
 }: SessionsLayoutProps): ReactNode {
@@ -130,6 +132,7 @@ export function SessionsLayout({
 					onOpenSettings={() => setSettingsOpen(true)}
 					onOpenSession={openSession}
 					onNewSession={newSession}
+					onRenameSession={onRenameSession}
 					onDropSession={onDropSession}
 					onLeave={onLeave}
 				/>

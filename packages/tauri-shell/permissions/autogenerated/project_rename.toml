@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-rename"
+description = "Enables the project_rename command without any pre-configured scope."
+commands.allow = ["project_rename"]
+
+[[permission]]
+identifier = "deny-project-rename"
+description = "Denies the project_rename command without any pre-configured scope."
+commands.deny = ["project_rename"]
