@@ -54,6 +54,7 @@ function makeSessionDouble(scopeId: string, sessionManager: SessionManager): Age
 		sessionName: undefined,
 		model: undefined,
 		thinkingLevel: undefined,
+		configuredThinkingLevel: () => undefined,
 		getAgentScopeId: () => scopeId,
 		getContextUsage: () => undefined,
 		subscribe: () => () => {},
