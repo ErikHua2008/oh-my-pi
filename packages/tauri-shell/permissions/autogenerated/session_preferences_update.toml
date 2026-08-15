@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-session-preferences-update"
+description = "Enables the session_preferences_update command without any pre-configured scope."
+commands.allow = ["session_preferences_update"]
+
+[[permission]]
+identifier = "deny-session-preferences-update"
+description = "Denies the session_preferences_update command without any pre-configured scope."
+commands.deny = ["session_preferences_update"]

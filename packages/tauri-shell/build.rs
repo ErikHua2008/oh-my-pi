@@ -13,6 +13,10 @@ fn main() {
 			.capabilities_path_pattern("./src/capabilities/**/*")
 			.app_manifest(tauri_build::AppManifest::default().commands(&[
 				"project_list",
+				"project_rename",
+				"project_reveal",
+				"session_preferences",
+				"session_preferences_update",
 				"project_open",
 				"project_switch",
 				"app_info",

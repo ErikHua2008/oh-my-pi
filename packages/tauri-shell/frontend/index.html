@@ -277,7 +277,7 @@
 						nameRow.className = "name-row";
 						const name = document.createElement("span");
 						name.className = "name";
-						name.textContent = path.split(/[\\/]/).filter(Boolean).pop() || path;
+						name.textContent = list.project_names?.[path] || path.split(/[\\/]/).filter(Boolean).pop() || path;
 						nameRow.appendChild(name);
 						if (current) {
 							const currentLabel = document.createElement("span");

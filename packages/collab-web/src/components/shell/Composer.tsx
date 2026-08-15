@@ -1,6 +1,6 @@
 import { ArrowUp, Folder, SendHorizontal, Square } from "lucide-react";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { GuestClient, GuestSnapshot } from "../../lib/client";
 import { shortenPath } from "../../lib/format";
 import { ModelPicker } from "./ModelPicker";
@@ -8,6 +8,9 @@ import { ModelPicker } from "./ModelPicker";
 export interface ComposerProps {
 	client: GuestClient;
 	snapshot: GuestSnapshot;
+	/** Optional prompt text selected from the transcript for edit-and-resend. */
+	prefill?: string;
+	onPrefillConsumed?: () => void;
 }
 
 /** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with composer.css). */
@@ -138,8 +141,8 @@ function Workspace({ cwd }: { cwd: string | undefined }): ReactNode {
 	);
 }
 
-export function Composer({ client, snapshot }: ComposerProps): ReactNode {
-	const [text, setText] = useState("");
+export function Composer({ client, snapshot, prefill, onPrefillConsumed }: ComposerProps): ReactNode {
+	const [text, setText] = useState(prefill ?? "");
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 
@@ -157,12 +160,22 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 		autosize(taRef.current);
 	}, [text, uiRequest?.reqId]);
 
+	useEffect(() => {
+		if (prefill === undefined) return;
+		setText(prefill);
+		requestAnimationFrame(() => {
+			taRef.current?.focus();
+			taRef.current?.setSelectionRange(prefill.length, prefill.length);
+		});
+	}, [prefill]);
+
 	const send = useCallback((): void => {
 		const trimmed = text.trim();
 		if (!trimmed || !live || readOnly) return;
 		client.sendPrompt(trimmed);
 		setText("");
-	}, [client, live, readOnly, text]);
+		onPrefillConsumed?.();
+	}, [client, live, onPrefillConsumed, readOnly, text]);
 
 	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
 		if (shouldSubmitOnEnter(e, composingRef.current)) {

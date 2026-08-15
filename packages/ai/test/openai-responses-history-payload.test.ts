@@ -517,6 +517,54 @@ describe("OpenAI responses history payload", () => {
 		expect(collectResponsesInputImageDetails(openaiInput)).toEqual(["original"]);
 	});
 
+	it("normalizes imported MCP tool names when replaying Responses history", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "previous turn", timestamp: Date.now() },
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "call_mcp",
+							name: "openaiDeveloperDocs/fetch_openai_doc",
+							arguments: { id: "responses" },
+						},
+					],
+					api: "openai-responses",
+					provider: "openai",
+					model: "gpt-5-mini",
+					usage: issue5002ZeroUsage,
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_mcp",
+					toolName: "openaiDeveloperDocs/fetch_openai_doc",
+					content: [{ type: "text", text: "document" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const items = buildResponsesInput({
+			model: getOpenAIReasoningModel("openai", "gpt-5-mini"),
+			context,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+
+		expect(findResponsesInputItemByCallId(items, "function_call", "call_mcp")).toEqual({
+			type: "function_call",
+			call_id: "call_mcp",
+			name: "openaiDeveloperDocs_fetch_openai_doc",
+			arguments: JSON.stringify({ id: "responses" }),
+		});
+	});
+
 	it("adapts persisted native apply_patch Responses items for xai-oauth continuations", () => {
 		const nativeHistoryItems = [
 			{

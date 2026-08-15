@@ -403,6 +403,7 @@ export type ControlGuestFrame =
 	| { t: "ctrl-list" }
 	| { t: "ctrl-create" }
 	| { t: "ctrl-resume"; id: string }
+	| { t: "ctrl-rename"; id: string; title: string }
 	| { t: "ctrl-drop"; id: string };
 
 export type ControlHostFrame =

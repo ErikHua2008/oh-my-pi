@@ -195,10 +195,34 @@
           "markdownDescription": "Enables the project_open command without any pre-configured scope."
         },
         {
+          "description": "Enables the project_rename command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-project-rename",
+          "markdownDescription": "Enables the project_rename command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the project_reveal command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-project-reveal",
+          "markdownDescription": "Enables the project_reveal command without any pre-configured scope."
+        },
+        {
           "description": "Enables the project_switch command without any pre-configured scope.",
           "type": "string",
           "const": "allow-project-switch",
           "markdownDescription": "Enables the project_switch command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_preferences command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-preferences",
+          "markdownDescription": "Enables the session_preferences command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_preferences_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-preferences-update",
+          "markdownDescription": "Enables the session_preferences_update command without any pre-configured scope."
         },
         {
           "description": "Denies the app_info command without any pre-configured scope.",
@@ -219,10 +243,34 @@
           "markdownDescription": "Denies the project_open command without any pre-configured scope."
         },
         {
+          "description": "Denies the project_rename command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-project-rename",
+          "markdownDescription": "Denies the project_rename command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the project_reveal command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-project-reveal",
+          "markdownDescription": "Denies the project_reveal command without any pre-configured scope."
+        },
+        {
           "description": "Denies the project_switch command without any pre-configured scope.",
           "type": "string",
           "const": "deny-project-switch",
           "markdownDescription": "Denies the project_switch command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the session_preferences command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-session-preferences",
+          "markdownDescription": "Denies the session_preferences command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the session_preferences_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-session-preferences-update",
+          "markdownDescription": "Denies the session_preferences_update command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

@@ -1,8 +1,23 @@
 import type { SessionSummary } from "@oh-my-pi/pi-wire";
-import { ChevronRight, FolderOpen, LogOut, Plus, Settings, Trash2 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import {
+	Check,
+	ChevronRight,
+	Copy,
+	FolderOpen,
+	LogOut,
+	MailCheck,
+	Pencil,
+	Pin,
+	PinOff,
+	Plus,
+	Settings,
+	Trash2,
+	X,
+} from "lucide-react";
+import { type FormEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ControlSnapshot } from "../../lib/control-client";
-import { type DesktopProject, desktopBridge } from "../../lib/desktop-bridge";
+import { copyText, type DesktopProject, desktopBridge } from "../../lib/desktop-bridge";
 import { relTime } from "../../lib/format";
 
 export interface SessionsPanelProps {
@@ -12,6 +27,7 @@ export interface SessionsPanelProps {
 	onOpenSettings(): void;
 	onOpenSession(id: string): void;
 	onNewSession(): void;
+	onRenameSession(id: string, title: string): void;
 	onDropSession(id: string): void;
 	onLeave(): void;
 }
@@ -22,6 +38,59 @@ interface ProjectGroup {
 	sessions: readonly SessionSummary[];
 	modifiedMs: number;
 	desktopProject: DesktopProject | undefined;
+}
+
+interface SessionContextMenu {
+	id: string;
+	title: string;
+	cwd: string;
+	pinned: boolean;
+	unread: boolean;
+	x: number;
+	y: number;
+}
+
+const PINNED_SESSIONS_KEY = "omp.shell.pinned-sessions";
+const SESSION_READ_THROUGH_KEY = "omp.shell.session-read-through";
+
+function loadStringSet(key: string): ReadonlySet<string> {
+	try {
+		const value: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+		return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+	} catch {
+		return new Set();
+	}
+}
+
+function loadStringRecord(key: string): Readonly<Record<string, string>> {
+	try {
+		const value: unknown = JSON.parse(localStorage.getItem(key) ?? "{}");
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+		return Object.fromEntries(
+			Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+		);
+	} catch {
+		return {};
+	}
+}
+
+function persistPreference(key: string, value: unknown): void {
+	try {
+		localStorage.setItem(key, JSON.stringify(value));
+	} catch {
+		// Storage can be unavailable in private browsing; the in-memory preference still works.
+	}
+}
+
+export function isSessionUnread(
+	session: SessionSummary,
+	readThrough: Readonly<Record<string, string>>,
+	activeSessionId: string | null = null,
+): boolean {
+	const readAt = readThrough[session.id];
+	return (
+		activeSessionId !== session.id && session.messageCount > 0 && readAt !== undefined && session.modifiedAt > readAt
+	);
 }
 
 /** Session title falls back to the basename of the working directory. */
@@ -62,6 +131,7 @@ function projectName(path: string): string {
 export function groupSessionsByProject(
 	sessions: readonly SessionSummary[],
 	desktopProjects: readonly DesktopProject[] = [],
+	pinnedSessionIds: ReadonlySet<string> = new Set(),
 ): readonly ProjectGroup[] {
 	const groups = new Map<string, { path: string; sessions: SessionSummary[] }>();
 	for (const session of sessions) {
@@ -89,7 +159,11 @@ export function groupSessionsByProject(
 
 	return Array.from(groups.values())
 		.map(group => {
-			const sortedSessions = [...group.sessions].sort((a, b) => sessionModifiedMs(b) - sessionModifiedMs(a));
+			const sortedSessions = [...group.sessions].sort(
+				(a, b) =>
+					Number(pinnedSessionIds.has(b.id)) - Number(pinnedSessionIds.has(a.id)) ||
+					sessionModifiedMs(b) - sessionModifiedMs(a),
+			);
 			const desktopProject = desktopProjects.find(
 				project => comparableProjectPath(project.path) === comparableProjectPath(group.path),
 			);
@@ -118,6 +192,58 @@ function snapshotMessage(snapshot: ControlSnapshot): string {
 	return snapshot.readOnly ? "No sessions are available to view." : "No sessions yet. Start one above.";
 }
 
+function InlineRename({
+	value,
+	label,
+	onSave,
+	onCancel,
+}: {
+	value: string;
+	label: string;
+	onSave(value: string): Promise<void> | void;
+	onCancel(): void;
+}): ReactNode {
+	const [draft, setDraft] = useState(value);
+	const [saving, setSaving] = useState(false);
+	const save = async (event: FormEvent): Promise<void> => {
+		event.preventDefault();
+		const name = draft.trim();
+		if (!name || saving) return;
+		setSaving(true);
+		try {
+			await onSave(name);
+			onCancel();
+		} catch {
+			// The parent keeps the editor open and surfaces the operation error.
+		} finally {
+			setSaving(false);
+		}
+	};
+	return (
+		<form className="sh-inline-rename" onSubmit={event => void save(event)}>
+			<input
+				autoFocus
+				aria-label={label}
+				value={draft}
+				disabled={saving}
+				onChange={event => setDraft(event.currentTarget.value)}
+				onKeyDown={event => {
+					if (event.key === "Escape") {
+						event.preventDefault();
+						onCancel();
+					}
+				}}
+			/>
+			<button type="submit" disabled={saving || draft.trim().length === 0} title="Save name">
+				<Check size={14} aria-hidden="true" />
+			</button>
+			<button type="button" disabled={saving} onClick={onCancel} title="Cancel rename">
+				<X size={14} aria-hidden="true" />
+			</button>
+		</form>
+	);
+}
+
 export function SessionsPanel({
 	snapshot,
 	activeSessionId = null,
@@ -125,6 +251,7 @@ export function SessionsPanel({
 	onOpenSettings,
 	onOpenSession,
 	onNewSession,
+	onRenameSession,
 	onDropSession,
 	onLeave,
 }: SessionsPanelProps): ReactNode {
@@ -134,22 +261,39 @@ export function SessionsPanel({
 	const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(() => new Set());
 	const [desktopAction, setDesktopAction] = useState<string | null>(null);
 	const [desktopError, setDesktopError] = useState<string | null>(null);
+	const [renamingProject, setRenamingProject] = useState<string | null>(null);
+	const [renamingSession, setRenamingSession] = useState<string | null>(null);
+	const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenu | null>(null);
+	const [pinnedSessions, setPinnedSessions] = useState<ReadonlySet<string>>(() => loadStringSet(PINNED_SESSIONS_KEY));
+	const [readThrough, setReadThrough] = useState<Readonly<Record<string, string>>>(() =>
+		loadStringRecord(SESSION_READ_THROUGH_KEY),
+	);
+	const [desktopPreferencesReady, setDesktopPreferencesReady] = useState(false);
 
 	useEffect(() => {
 		let active = true;
 		void desktopBridge
 			.listProjects()
-			.then(projects => {
-				if (active) {
-					const available = desktopBridge.available;
-					setDesktopAvailable(available);
-					setDesktopProjects(available ? projects : []);
+			.then(async projects => {
+				if (!active) return;
+				const available = desktopBridge.available;
+				setDesktopAvailable(available);
+				setDesktopProjects(available ? projects : []);
+				if (available) {
+					const preferences = await desktopBridge.loadSessionPreferences();
+					if (!active) return;
+					if (preferences) {
+						setPinnedSessions(new Set(preferences.pinnedSessions));
+						setReadThrough(preferences.sessionReadThrough);
+					}
 				}
+				setDesktopPreferencesReady(true);
 			})
 			.catch(() => {
 				if (active) {
 					setDesktopAvailable(false);
 					setDesktopProjects([]);
+					setDesktopPreferencesReady(true);
 				}
 			});
 		return () => {
@@ -157,9 +301,50 @@ export function SessionsPanel({
 		};
 	}, []);
 
+	useEffect(() => {
+		const pinned = Array.from(pinnedSessions);
+		persistPreference(PINNED_SESSIONS_KEY, pinned);
+		persistPreference(SESSION_READ_THROUGH_KEY, readThrough);
+		if (!desktopPreferencesReady) return;
+		void desktopBridge
+			.saveSessionPreferences({ pinnedSessions: pinned, sessionReadThrough: readThrough })
+			.catch(() => setDesktopAvailable(false));
+	}, [desktopPreferencesReady, pinnedSessions, readThrough]);
+
+	useEffect(() => {
+		setReadThrough(current => {
+			let next: Record<string, string> | null = null;
+			for (const session of sessions) {
+				if (current[session.id] !== undefined && session.id !== activeSessionId) continue;
+				if (current[session.id] === session.modifiedAt) continue;
+				next ??= { ...current };
+				next[session.id] = session.modifiedAt;
+			}
+			return next ?? current;
+		});
+	}, [activeSessionId, sessions]);
+
+	useEffect(() => {
+		if (sessionContextMenu === null) return;
+		const dismiss = (): void => setSessionContextMenu(null);
+		const dismissOnEscape = (event: globalThis.KeyboardEvent): void => {
+			if (event.key === "Escape") dismiss();
+		};
+		document.addEventListener("pointerdown", dismiss);
+		document.addEventListener("scroll", dismiss, true);
+		window.addEventListener("resize", dismiss);
+		document.addEventListener("keydown", dismissOnEscape);
+		return () => {
+			document.removeEventListener("pointerdown", dismiss);
+			document.removeEventListener("scroll", dismiss, true);
+			window.removeEventListener("resize", dismiss);
+			document.removeEventListener("keydown", dismissOnEscape);
+		};
+	}, [sessionContextMenu]);
+
 	const groups = useMemo(
-		() => groupSessionsByProject(sessions, desktopAvailable ? desktopProjects : []),
-		[desktopAvailable, desktopProjects, sessions],
+		() => groupSessionsByProject(sessions, desktopAvailable ? desktopProjects : [], pinnedSessions),
+		[desktopAvailable, desktopProjects, pinnedSessions, sessions],
 	);
 	const toggleProject = (path: string): void => {
 		const key = comparableProjectPath(path);
@@ -184,6 +369,48 @@ export function SessionsPanel({
 		} finally {
 			setDesktopAction(null);
 		}
+	};
+	const renameProject = async (path: string, name: string): Promise<void> => {
+		setDesktopAction(`rename:${path}`);
+		setDesktopError(null);
+		try {
+			await desktopBridge.renameProject(path, name);
+			setDesktopProjects(await desktopBridge.listProjects());
+		} catch (error) {
+			setDesktopAvailable(desktopBridge.available);
+			setDesktopError("The project name could not be saved.");
+			throw error;
+		} finally {
+			setDesktopAction(null);
+		}
+	};
+	const markSessionRead = (session: SessionSummary): void => {
+		setReadThrough(current =>
+			current[session.id] === session.modifiedAt ? current : { ...current, [session.id]: session.modifiedAt },
+		);
+	};
+	const togglePinnedSession = (id: string): void => {
+		setPinnedSessions(current => {
+			const next = new Set(current);
+			if (next.has(id)) next.delete(id);
+			else next.add(id);
+			return next;
+		});
+	};
+	const openSessionContextMenu = (event: MouseEvent, session: SessionSummary): void => {
+		if (readOnly) return;
+		event.preventDefault();
+		const menuWidth = 220;
+		const menuHeight = 180;
+		setSessionContextMenu({
+			id: session.id,
+			title: sessionTitle(session),
+			cwd: session.cwd,
+			pinned: pinnedSessions.has(session.id),
+			unread: isSessionUnread(session, readThrough, activeSessionId),
+			x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+			y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+		});
 	};
 
 	return (
@@ -243,7 +470,14 @@ export function SessionsPanel({
 								>
 									<ChevronRight size={15} aria-hidden="true" />
 								</button>
-								{desktopAvailable && switchPath !== null ? (
+								{renamingProject === key ? (
+									<InlineRename
+										value={group.name}
+										label={`Rename project ${group.name}`}
+										onSave={name => renameProject(group.path, name)}
+										onCancel={() => setRenamingProject(null)}
+									/>
+								) : desktopAvailable && switchPath !== null ? (
 									<button
 										type="button"
 										className="sh-project-label sh-project-switch"
@@ -264,14 +498,41 @@ export function SessionsPanel({
 										<span className="sh-project-path">{group.path}</span>
 									</div>
 								)}
+								{desktopAvailable && !readOnly && renamingProject !== key && (
+									<button
+										type="button"
+										className="sh-project-rename"
+										title={`Rename project ${group.name}`}
+										disabled={desktopAction !== null}
+										onClick={() => setRenamingProject(key)}
+									>
+										<Pencil size={13} aria-hidden="true" />
+									</button>
+								)}
 							</div>
 
 							<div className="sh-sessions-list" id={sessionsId} hidden={collapsed}>
 								{group.sessions.map(session => (
-									<div className="sh-sessions-item" key={session.id}>
-										{readOnly ? (
+									<div
+										className="sh-sessions-item"
+										key={session.id}
+										data-pinned={pinnedSessions.has(session.id) ? "true" : undefined}
+										data-unread={isSessionUnread(session, readThrough, activeSessionId) ? "true" : undefined}
+										onContextMenu={event => openSessionContextMenu(event, session)}
+									>
+										{renamingSession === session.id ? (
+											<InlineRename
+												value={sessionTitle(session)}
+												label={`Rename session ${sessionTitle(session)}`}
+												onSave={title => onRenameSession(session.id, title)}
+												onCancel={() => setRenamingSession(null)}
+											/>
+										) : readOnly ? (
 											<div className="sh-sessions-item-open" title={sessionTitle(session)}>
 												<span className="sh-sessions-item-copy">
+													{pinnedSessions.has(session.id) && (
+														<Pin className="sh-sessions-pin" size={11} aria-hidden="true" />
+													)}
 													<span className="sh-sessions-item-title">{sessionTitle(session)}</span>
 													<span className="sh-sessions-item-meta">
 														{relTime(sessionModifiedMs(session))}
@@ -285,9 +546,15 @@ export function SessionsPanel({
 												aria-current={session.id === activeSessionId ? "page" : undefined}
 												title={`Open ${sessionTitle(session)}`}
 												disabled={pending}
-												onClick={() => onOpenSession(session.id)}
+												onClick={() => {
+													markSessionRead(session);
+													onOpenSession(session.id);
+												}}
 											>
 												<span className="sh-sessions-item-copy">
+													{pinnedSessions.has(session.id) && (
+														<Pin className="sh-sessions-pin" size={11} aria-hidden="true" />
+													)}
 													<span className="sh-sessions-item-title">{sessionTitle(session)}</span>
 													<span className="sh-sessions-item-meta">
 														{relTime(sessionModifiedMs(session))}
@@ -300,7 +567,18 @@ export function SessionsPanel({
 												/>
 											</button>
 										)}
-										{!readOnly && (
+										{!readOnly && renamingSession !== session.id && (
+											<button
+												type="button"
+												className="sh-sessions-rename"
+												title={`Rename session ${sessionTitle(session)}`}
+												onClick={() => setRenamingSession(session.id)}
+											>
+												<Pencil size={13} aria-hidden="true" />
+												<span className="sh-visually-hidden">Rename {sessionTitle(session)}</span>
+											</button>
+										)}
+										{!readOnly && renamingSession !== session.id && (
 											<button
 												type="button"
 												className="sh-sessions-drop"
@@ -335,6 +613,83 @@ export function SessionsPanel({
 					<span>Leave control room</span>
 				</button>
 			</div>
+			{sessionContextMenu !== null &&
+				createPortal(
+					<div
+						className="sh-session-context-menu"
+						role="menu"
+						aria-label={`Chat actions for ${sessionContextMenu.title}`}
+						style={{ left: sessionContextMenu.x, top: sessionContextMenu.y }}
+						onPointerDown={event => event.stopPropagation()}
+					>
+						<button
+							autoFocus
+							type="button"
+							role="menuitem"
+							onClick={() => {
+								setRenamingSession(sessionContextMenu.id);
+								setSessionContextMenu(null);
+							}}
+						>
+							<Pencil size={14} aria-hidden="true" />
+							<span>重命名聊天</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							onClick={() => {
+								togglePinnedSession(sessionContextMenu.id);
+								setSessionContextMenu(null);
+							}}
+						>
+							{sessionContextMenu.pinned ? (
+								<PinOff size={14} aria-hidden="true" />
+							) : (
+								<Pin size={14} aria-hidden="true" />
+							)}
+							<span>{sessionContextMenu.pinned ? "取消置顶" : "置顶对话"}</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							disabled={!desktopAvailable}
+							onClick={() => {
+								const { cwd, id } = sessionContextMenu;
+								setSessionContextMenu(null);
+								void runDesktopAction(`reveal:${id}`, () => desktopBridge.revealPath(cwd));
+							}}
+						>
+							<FolderOpen size={14} aria-hidden="true" />
+							<span>在资源管理器里打开</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							onClick={() => {
+								const { cwd } = sessionContextMenu;
+								setSessionContextMenu(null);
+								void copyText(cwd).catch(() => setDesktopError("无法复制工作目录。"));
+							}}
+						>
+							<Copy size={14} aria-hidden="true" />
+							<span>复制工作目录</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							disabled={!sessionContextMenu.unread}
+							onClick={() => {
+								const session = sessions.find(item => item.id === sessionContextMenu.id);
+								if (session) markSessionRead(session);
+								setSessionContextMenu(null);
+							}}
+						>
+							<MailCheck size={14} aria-hidden="true" />
+							<span>标记为已读</span>
+						</button>
+					</div>,
+					document.body,
+				)}
 		</nav>
 	);
 }

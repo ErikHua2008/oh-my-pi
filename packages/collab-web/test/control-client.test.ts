@@ -132,6 +132,20 @@ describe("ControlClient frame apply", () => {
 });
 
 describe("ControlClient phase transitions", () => {
+	it("sends a session rename mutation with the requested title", () => {
+		const sent: ControlGuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: ControlGuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const { client } = makeClient(CTRL_WRITE_LINK);
+			client.sendRename("s1", "Renamed session");
+			expect(sent.at(-1)).toEqual({ t: "ctrl-rename", id: "s1", title: "Renamed session" });
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
 	it("starts connecting, goes live on welcome, and ends with a reason on bye", () => {
 		const { client, socket } = makeClient(CTRL_WRITE_LINK);
 		expect(client.getSnapshot().phase).toBe("connecting");

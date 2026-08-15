@@ -116,6 +116,12 @@ export class SessionRegistry {
 	 * link instead.
 	 */
 	async resumeSession(idOrPath: string): Promise<{ id: string; link: string }> {
+		const activeById = this.#active.get(idOrPath);
+		if (activeById) {
+			if (activeById.state === "dropping") throw new Error("no such session");
+			return { id: activeById.id, link: activeById.collabHost.webLink };
+		}
+
 		let resolvedPath: string;
 		if (idOrPath.includes("/") || idOrPath.includes("\\") || idOrPath.endsWith(".jsonl")) {
 			// Direct path argument (mirrors main.ts resume handling).
@@ -137,6 +143,32 @@ export class SessionRegistry {
 
 		const sessionManager = await SessionManager.open(resolvedPath, this.#sessionDir);
 		return await this.#provisionSession(sessionManager);
+	}
+
+	/** Rename a live or persisted session through the canonical JSONL title path. */
+	async renameSession(idOrPath: string, title: string): Promise<void> {
+		if (title.trim().length === 0) throw new Error("session title cannot be empty");
+		const active = this.#active.get(idOrPath);
+		if (active) {
+			if (active.state === "dropping") throw new Error("no such session");
+			const renamed = await active.sessionManager.setSessionName(title, "user", "control-rename");
+			if (!renamed) throw new Error("session could not be renamed");
+			this.#emitChange();
+			return;
+		}
+
+		let resolvedPath: string;
+		if (idOrPath.includes("/") || idOrPath.includes("\\") || idOrPath.endsWith(".jsonl")) {
+			resolvedPath = path.resolve(idOrPath);
+		} else {
+			const match = await resolveResumableSession(idOrPath, this.#cwd, this.#sessionDir);
+			if (!match) throw new Error("no such session");
+			resolvedPath = path.resolve(match.session.path);
+		}
+		const sessionManager = await SessionManager.open(resolvedPath, this.#sessionDir);
+		const renamed = await sessionManager.setSessionName(title, "user", "control-rename");
+		if (!renamed) throw new Error("session could not be renamed");
+		this.#emitChange();
 	}
 
 	/**
@@ -168,7 +200,8 @@ export class SessionRegistry {
 
 	/** List all sessions (disk + live), newest first by modification time. */
 	async list(): Promise<SessionSummary[]> {
-		const infos = await listSessions(this.#sessionDir, new FileSessionStorage());
+		const storage = new FileSessionStorage();
+		const infos = await listSessions(this.#sessionDir, storage);
 		const summaries: SessionSummary[] = [];
 		const seen = new Set<string>();
 		for (const info of infos) {
@@ -192,15 +225,19 @@ export class SessionRegistry {
 			if (active) summary.link = active.collabHost.webLink;
 			summaries.push(summary);
 		}
-		// Live sessions with no JSONL yet (fresh `SessionManager.create` only
-		// persists on the first entry) must still appear in the list — the
-		// startup e2e contract shows the initial session in the sidebar before
-		// any prompt. Synthesize their summary from the managed entry.
+		// A fresh session is a Codex-style draft until its first entry persists:
+		// keep the editor/live room usable, but do not put an untitled, zero-message
+		// placeholder in the sidebar. Named sessions remain visible even before
+		// persistence so an explicit rename is never hidden.
 		for (const entry of this.#active.values()) {
 			if (entry.state === "dropping" || seen.has(entry.id)) continue;
+			const title = entry.sessionManager.getSessionName();
+			const sessionFile = entry.sessionManager.getSessionFile();
+			const persisted = sessionFile !== undefined && (await storage.exists(sessionFile));
+			if (!persisted && !title?.trim()) continue;
 			summaries.push({
 				id: entry.id,
-				title: entry.sessionManager.getSessionName(),
+				title,
 				cwd: entry.sessionManager.getCwd(),
 				createdAt: entry.createdAt,
 				modifiedAt: entry.createdAt,

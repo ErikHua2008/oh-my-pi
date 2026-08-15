@@ -88,6 +88,10 @@ fn main() {
 		})
 		.invoke_handler(tauri::generate_handler![
 			omp_shell::project::project_list,
+			omp_shell::project::project_rename,
+			omp_shell::project::project_reveal,
+			omp_shell::project::session_preferences,
+			omp_shell::project::session_preferences_update,
 			omp_shell::project::project_open,
 			omp_shell::project::project_switch,
 			omp_shell::project::app_info

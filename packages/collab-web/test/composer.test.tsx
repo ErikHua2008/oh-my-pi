@@ -86,6 +86,14 @@ describe("Composer host UI requests", () => {
 });
 
 describe("Composer session metadata and controls", () => {
+	it("prefills the composer with the final prompt selected for edit-and-resend", () => {
+		const html = renderToStaticMarkup(
+			<Composer client={client} snapshot={{ ...snapshot(null), working: false }} prefill="send this again" />,
+		);
+
+		expect(html).toContain(">send this again</textarea>");
+	});
+
 	it("renders the real cwd as plain workspace metadata and keeps model selection in the bottom controls", () => {
 		const snap = snapshot(null);
 		snap.working = false;

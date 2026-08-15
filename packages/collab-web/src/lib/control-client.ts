@@ -121,6 +121,10 @@ export class ControlClient {
 		this.#socket.send({ t: "ctrl-drop", id });
 	}
 
+	sendRename(id: string, title: string): void {
+		this.#socket.send({ t: "ctrl-rename", id, title });
+	}
+
 	#handleOpen(): void {
 		this.#socket.send({ t: "ctrl-hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";

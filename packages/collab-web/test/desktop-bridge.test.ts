@@ -19,6 +19,12 @@ describe("DesktopBridge browser fallback", () => {
 		expect(await desktopBridge.listProjects()).toEqual([]);
 		await expect(desktopBridge.openProject()).resolves.toBeUndefined();
 		await expect(desktopBridge.switchProject("/work/project")).resolves.toBeUndefined();
+		await expect(desktopBridge.renameProject("/work/project", "Project")).resolves.toBeUndefined();
+		await expect(desktopBridge.revealPath("/work/project")).resolves.toBeUndefined();
+		expect(await desktopBridge.loadSessionPreferences()).toBeNull();
+		await expect(
+			desktopBridge.saveSessionPreferences({ pinnedSessions: [], sessionReadThrough: {} }),
+		).resolves.toBeUndefined();
 	});
 });
 
@@ -31,6 +37,7 @@ describe("DesktopBridge Tauri capability probe", () => {
 					recent_projects: ["C:\\Work\\Current\\", "/srv/other"],
 					last_project: "/ignored/last-project",
 					current_project: "c:/work/current",
+					project_names: { "C:\\Work\\Current\\": "Renamed current" },
 				},
 				calls,
 			),
@@ -38,17 +45,34 @@ describe("DesktopBridge Tauri capability probe", () => {
 
 		expect(bridge.available).toBe(false);
 		expect(await bridge.listProjects()).toEqual([
-			{ path: "C:\\Work\\Current\\", name: "Current", current: true },
+			{ path: "C:\\Work\\Current\\", name: "Renamed current", current: true },
 			{ path: "/srv/other", name: "other", current: false },
 		]);
 		expect(bridge.available).toBe(true);
 
 		await bridge.openProject();
 		await bridge.switchProject("/srv/other");
+		await bridge.renameProject("/srv/other", "Other repo");
+		await bridge.revealPath("/srv/other");
+		expect(await bridge.loadSessionPreferences()).toEqual({ pinnedSessions: [], sessionReadThrough: {} });
+		await bridge.saveSessionPreferences({
+			pinnedSessions: ["session-1"],
+			sessionReadThrough: { "session-1": "2026-08-15T10:00:00.000Z" },
+		});
 		expect(calls).toEqual([
 			{ command: "project_list", args: undefined },
 			{ command: "project_open", args: undefined },
 			{ command: "project_switch", args: { path: "/srv/other" } },
+			{ command: "project_rename", args: { path: "/srv/other", name: "Other repo" } },
+			{ command: "project_reveal", args: { path: "/srv/other" } },
+			{ command: "session_preferences", args: undefined },
+			{
+				command: "session_preferences_update",
+				args: {
+					pinnedSessions: ["session-1"],
+					sessionReadThrough: { "session-1": "2026-08-15T10:00:00.000Z" },
+				},
+			},
 		]);
 	});
 
@@ -59,6 +83,7 @@ describe("DesktopBridge Tauri capability probe", () => {
 					recent_projects: ["/work/older"],
 					last_project: "/work/older",
 					current_project: "/work/live/",
+					project_names: {},
 				},
 				[],
 			),
@@ -91,7 +116,7 @@ describe("DesktopBridge Tauri capability probe", () => {
 		const invoke: TauriInvoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
 			calls.push({ command, args });
 			if (command === "project_list") {
-				return { recent_projects: [], last_project: null, current_project: null } as T;
+				return { recent_projects: [], last_project: null, current_project: null, project_names: {} } as T;
 			}
 			throw new Error(`command ${command} not allowed by capability`);
 		};
