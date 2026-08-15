@@ -64,6 +64,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
+	normalizeResponsesToolName,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
@@ -2052,7 +2053,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 				type: "custom_tool_call",
 				...(itemId ? { id: itemId } : {}),
 				call_id: normalized.callId,
-				name: block.customWireName,
+				name: normalizeResponsesToolName(block.customWireName),
 				input: rawInput,
 			} as ResponseInput[number]);
 			continue;
@@ -2065,7 +2066,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			type: "function_call",
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
-			name: functionName,
+			name: normalizeResponsesToolName(functionName),
 			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}

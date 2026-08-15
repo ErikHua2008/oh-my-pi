@@ -20,6 +20,18 @@ export function normalizeToolCallId(id: string): string {
 	return sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
 }
 
+/**
+ * Normalize a tool name before putting it in an OpenAI Responses item.
+ *
+ * Imported transcripts can contain MCP names such as `server/tool`. The
+ * Responses API only accepts ASCII letters, digits, `_`, and `-` for names,
+ * so replaying those historical calls must not send the original wire name.
+ */
+export function normalizeResponsesToolName(name: string): string {
+	const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
+	return (sanitized.length > 0 ? sanitized : "tool").slice(0, 64);
+}
+
 type ResponsesToolItemIdPrefix = "fc" | "ctc";
 
 export function normalizeResponsesToolCallId(
