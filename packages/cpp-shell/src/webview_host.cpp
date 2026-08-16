@@ -56,7 +56,16 @@ constexpr std::wstring_view kPageStyle = LR"css(
 <style>
 :root { color-scheme: dark; font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; }
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #202123; color: #f2f2f2; }
+body { margin: 0; min-height: 100vh; padding-top: 36px; display: grid; place-items: center; background: #202123; color: #f2f2f2; }
+.shellbar { position: fixed; inset: 0 0 auto; height: 36px; display: flex; align-items: stretch; z-index: 10;
+  background: #1b1b1c; border-bottom: 1px solid #34363a; user-select: none; }
+.shellbar-drag { flex: 1; min-width: 40px; }
+.shellbar-title { display: flex; align-items: center; padding-left: 14px; color: #b8babf; font-size: 12px; }
+.shellbar-controls { display: flex; }
+.shellbar-controls button { width: 46px; height: 35px; margin: 0; padding: 0; border-radius: 0; color: #b8babf;
+  background: transparent; font-size: 16px; font-weight: 400; }
+.shellbar-controls button:hover { color: white; background: #373739; }
+.shellbar-controls .shellbar-close:hover { background: #c42b1c; }
 .card { width: min(620px, calc(100vw - 48px)); padding: 44px; border: 1px solid #34363a; border-radius: 18px;
   background: #282a2d; box-shadow: 0 24px 80px rgba(0,0,0,.28); }
 .mark { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; margin-bottom: 24px;
@@ -73,8 +82,23 @@ button:hover { background: white; }
 </style>
 )css";
 
+constexpr std::wstring_view kFallbackTitlebar = LR"html(
+<header class="shellbar">
+  <span class="shellbar-title">OMP</span>
+  <div class="shellbar-drag"
+    onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'drag'})"
+    ondblclick="window.__TAURI_INTERNALS__?.invoke('window_action',{action:'toggle_maximize'})"></div>
+  <div class="shellbar-controls">
+    <button aria-label="Minimize" onclick="window.__TAURI_INTERNALS__?.invoke('window_action',{action:'minimize'})">−</button>
+    <button aria-label="Maximize" onclick="window.__TAURI_INTERNALS__?.invoke('window_action',{action:'toggle_maximize'})">□</button>
+    <button class="shellbar-close" aria-label="Close" onclick="window.__TAURI_INTERNALS__?.invoke('window_action',{action:'close'})">×</button>
+  </div>
+</header>
+)html";
+
 constexpr wchar_t kDesktopBridgeScript[] = LR"js(
 (() => {
+	window.__OMP_CPP_SHELL__ = true;
   if (window.__TAURI_INTERNALS__?.invoke || !window.chrome?.webview) return;
   let nextId = 0;
   const pending = new Map();
@@ -193,6 +217,14 @@ void WebViewHost::Reload() const {
 	}
 }
 
+void WebViewHost::ExecuteScript(std::wstring_view script) const {
+	if (!webview_) {
+		return;
+	}
+	const std::wstring owned(script);
+	webview_->ExecuteScript(owned.c_str(), nullptr);
+}
+
 void WebViewHost::PostJson(std::wstring_view json) const {
 	if (!webview_) {
 		return;
@@ -207,7 +239,9 @@ void WebViewHost::ShowWelcome() const {
 	}
 	std::wstring page = LR"html(<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>OMP</title>)html";
 	page.append(kPageStyle);
-	page.append(LR"html(<body><main class="card"><div class="mark">O</div><h1>从一个项目开始</h1>
+	page.append(L"<body>");
+	page.append(kFallbackTitlebar);
+	page.append(LR"html(<main class="card"><div class="mark">O</div><h1>从一个项目开始</h1>
 <p>选择本地项目后，OMP 会在后台启动 Core，并在这个原生窗口中打开会话。模型凭据仍由 OMP 管理。</p>
 <button onclick="chrome.webview.postMessage('open-project')">打开项目</button></main></body></html>)html");
 	webview_->NavigateToString(page.c_str());
@@ -219,7 +253,9 @@ void WebViewHost::ShowStatus(std::wstring_view title, std::wstring_view detail, 
 	}
 	std::wstring page = LR"html(<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>OMP</title>)html";
 	page.append(kPageStyle);
-	page.append(is_error ? L"<body><main class=\"card error\">" : L"<body><main class=\"card\">");
+	page.append(L"<body>");
+	page.append(kFallbackTitlebar);
+	page.append(is_error ? L"<main class=\"card error\">" : L"<main class=\"card\">");
 	page.append(is_error ? L"<div class=\"mark\">!</div>" : L"<div class=\"mark\">O</div>");
 	page.append(L"<h1>");
 	page.append(HtmlEscape(title));

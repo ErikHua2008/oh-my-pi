@@ -31,7 +31,6 @@ private:
 
 	[[nodiscard]] bool RegisterWindowClass() const;
 	[[nodiscard]] bool CreateMainWindow(int show_command);
-	void CreateMainMenu() const;
 	void InitializeTray();
 	void RemoveTray();
 	void ShowMainWindow() const;
@@ -44,6 +43,7 @@ private:
 	void HandleWebMessage(std::wstring message);
 	void HandleDesktopRequest(std::string_view payload);
 	void ShowCoreFailure(std::wstring_view summary, std::string_view detail);
+	void SetAgentRailOpen(bool open);
 	void UpdateWindowTitle() const;
 	void SaveWindowState();
 	void SaveConfigFile();
@@ -61,8 +61,11 @@ private:
 	std::vector<std::string> pending_native_images_;
 	RECT native_transcript_bounds_{};
 	NOTIFYICONDATAW tray_icon_{};
+	RECT compact_window_bounds_{};
 	bool has_native_transcript_bounds_ = false;
+	bool has_compact_window_bounds_ = false;
 	bool native_transcript_preferred_ = true;
+	bool agent_rail_open_ = false;
 	bool tray_added_ = false;
 	bool exiting_ = false;
 	bool shutting_down_ = false;

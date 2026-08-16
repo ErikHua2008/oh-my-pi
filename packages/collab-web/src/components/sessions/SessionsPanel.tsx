@@ -416,7 +416,7 @@ export function SessionsPanel({
 	return (
 		<nav className="sh-sessions" aria-label="Projects and sessions">
 			<div className="sh-sessions-brand">
-				<span className="sh-sessions-mark" aria-hidden="true" />
+				<img className="sh-sessions-mark" src="./public/favicon.svg" alt="" aria-hidden="true" />
 				<div className="sh-sessions-brand-copy">
 					<span className="sh-sessions-brand-name">Oh My Pi</span>
 					<span className="sh-sessions-brand-status">
@@ -604,14 +604,21 @@ export function SessionsPanel({
 
 			<div className="sh-sessions-foot">
 				{readOnly && <span className="sh-sessions-readonly">Read-only · watching</span>}
-				<button type="button" className="sh-sessions-leave" onClick={onOpenSettings}>
-					<Settings size={15} aria-hidden="true" />
-					<span>Settings</span>
-				</button>
-				<button type="button" className="sh-sessions-leave" onClick={onLeave}>
-					<LogOut size={15} aria-hidden="true" />
-					<span>Leave control room</span>
-				</button>
+				<div className="sh-sessions-foot-row">
+					<button type="button" className="sh-sessions-settings" onClick={onOpenSettings}>
+						<Settings size={15} aria-hidden="true" />
+						<span>Settings</span>
+					</button>
+					<button
+						type="button"
+						className="sh-sessions-leave"
+						onClick={onLeave}
+						aria-label="Leave control room"
+						title="Leave control room"
+					>
+						<LogOut size={15} aria-hidden="true" />
+					</button>
+				</div>
 			</div>
 			{sessionContextMenu !== null &&
 				createPortal(

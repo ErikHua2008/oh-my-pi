@@ -33,6 +33,7 @@ add_library(
 	src/native_transcript_model.cpp
 	src/path_utils.cpp
 	src/text_utils.cpp
+	src/window_layout.cpp
 	src/windows_command_line.cpp
 )
 target_include_directories(omp_shell_base PUBLIC include)

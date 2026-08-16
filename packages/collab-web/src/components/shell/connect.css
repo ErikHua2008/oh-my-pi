@@ -305,49 +305,59 @@
 	min-height: 36px;
 }
 
-.sh-toasts {
+.sh-toasts-transient,
+.sh-toasts-errors {
 	position: fixed;
 	z-index: 60;
 	display: flex;
 	flex-direction: column;
+	pointer-events: none;
+}
+
+.sh-toasts-transient {
+	top: 46%;
+	left: 50%;
+	width: min(420px, calc(100vw - 32px));
+	transform: translate(-50%, -50%);
+}
+
+.sh-toasts-errors {
+	top: calc(16px + env(safe-area-inset-top, 0px));
 	right: 16px;
-	left: auto;
-	bottom: calc(16px + env(safe-area-inset-bottom, 0px));
 	width: min(360px, calc(100vw - 32px));
-	max-width: none;
 	gap: 8px;
-	margin-left: 0;
 }
 
 .sh-toast {
 	display: flex;
 	font-size: 12px;
-	color: #f9fafb;
+	line-height: 1.4;
+	color: var(--fg);
 	align-items: center;
-	gap: 10px;
-	padding: 10px 10px 10px 12px;
-	background: #353536;
+	gap: 8px;
+	padding: 9px 11px;
+	background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
 	border: 1px solid var(--border-strong);
-	border-left-width: 2px;
-	border-radius: var(--radius-sm);
+	border-radius: var(--radius);
 	box-shadow: var(--shadow-pop);
+	backdrop-filter: blur(12px) saturate(115%);
+	-webkit-backdrop-filter: blur(12px) saturate(115%);
 }
 
-/* Dark toast surface: the toast is a deep neutral in both themes, slightly
- * lighter when the app is in dark mode. Mirrors the tokens.css theme selectors. */
-[data-theme="dark"] .sh-toast {
-	background: #434446;
+.sh-toast-transient {
+	align-self: center;
+	max-width: 100%;
+	animation: sh-toast-transient-in 160ms var(--ease);
 }
 
-@media (prefers-color-scheme: dark) {
-	:root:not([data-theme]) .sh-toast {
-		background: #434446;
-	}
+.sh-toasts-errors .sh-toast {
+	pointer-events: auto;
 }
 
-.sh-toast-info { border-left-color: var(--accent); }
-.sh-toast-warning { border-left-color: var(--warn); }
-.sh-toast-error { border-left-color: var(--err); }
+.sh-toast-error {
+	border-color: color-mix(in srgb, var(--err) 38%, var(--border-strong));
+}
+
 .sh-toast-msg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 
 .sh-toast-icon {
@@ -355,7 +365,7 @@
 }
 
 .sh-toast-info .sh-toast-icon {
-	color: #679efe;
+	color: var(--fg-muted);
 }
 
 .sh-toast-warning .sh-toast-icon {
@@ -370,7 +380,7 @@
 	flex: none;
 	display: inline-flex;
 	padding: 1px;
-	color: color-mix(in srgb, #f9fafb 65%, transparent);
+	color: var(--fg-muted);
 	background: none;
 	border: 0;
 	border-radius: var(--radius-sm);
@@ -378,6 +388,23 @@
 	height: 28px;
 	align-items: center;
 	justify-content: center;
+}
+
+.sh-toast-close:hover {
+	color: var(--fg);
+	background: var(--bg-hover);
+}
+
+@keyframes sh-toast-transient-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px) scale(0.98);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
 }
 
 @media (max-width: 640px) {
@@ -396,9 +423,14 @@
 		min-height: 44px;
 	}
 
-	.sh-toasts {
+	.sh-toasts-transient {
+		top: 44%;
+		width: calc(100vw - 24px);
+	}
+
+	.sh-toasts-errors {
+		top: calc(12px + env(safe-area-inset-top, 0px));
 		right: 12px;
-		bottom: calc(12px + env(safe-area-inset-bottom, 0px));
 		width: calc(100vw - 24px);
 	}
 
@@ -411,6 +443,10 @@
 
 @media (prefers-reduced-motion: reduce) {
 	.sh-banner-spinner {
+		animation: none;
+	}
+
+	.sh-toast-transient {
 		animation: none;
 	}
 }

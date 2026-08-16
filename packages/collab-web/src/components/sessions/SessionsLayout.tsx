@@ -38,6 +38,7 @@ export function SessionsLayout({
 }: SessionsLayoutProps): ReactNode {
 	const snap = useControlSnapshot(client);
 	const [sidebarOpen, setSidebarOpen] = useState(false);
+	const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 	const [sidebarOverlay, setSidebarOverlay] = useState(() => window.matchMedia("(max-width: 900px)").matches);
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const sidebarRef = useRef<HTMLElement | null>(null);
@@ -58,6 +59,15 @@ export function SessionsLayout({
 		media.addEventListener("change", update);
 		return () => media.removeEventListener("change", update);
 	}, []);
+
+	useEffect(() => {
+		const toggle = (): void => {
+			if (sidebarOverlay) setSidebarOpen(open => !open);
+			else setSidebarCollapsed(collapsed => !collapsed);
+		};
+		window.addEventListener("omp-toggle-sidebar", toggle);
+		return () => window.removeEventListener("omp-toggle-sidebar", toggle);
+	}, [sidebarOverlay]);
 
 	useEffect(() => {
 		if (!sidebarOpen) return;
@@ -96,7 +106,7 @@ export function SessionsLayout({
 	};
 
 	return (
-		<div className="sh-control">
+		<div className="sh-control" data-sidebar-collapsed={sidebarCollapsed ? "true" : undefined}>
 			{settingsOpen && (
 				<SettingsModal
 					onClose={() => setSettingsOpen(false)}
@@ -189,7 +199,12 @@ function SessionsEmpty({
 				<div className="sh-sessions-empty-composer" data-disabled={readOnly || unavailable ? "true" : undefined}>
 					<p>{hint}</p>
 					{!readOnly && !unavailable && (
-						<button type="button" className="sh-btn sh-btn-primary" onClick={onNewSession} disabled={pending}>
+						<button
+							type="button"
+							className="sh-btn sh-sessions-new-button"
+							onClick={onNewSession}
+							disabled={pending}
+						>
 							<Plus size={15} aria-hidden="true" />
 							{pending ? "Starting…" : "New session"}
 						</button>

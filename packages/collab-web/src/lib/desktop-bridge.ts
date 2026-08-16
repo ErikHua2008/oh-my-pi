@@ -58,12 +58,33 @@ export type DesktopNativeTranscriptEvent =
 	| "use-web"
 	| { type: "image-needed"; imageId: string };
 
+export type DesktopWindowAction =
+	| "drag"
+	| "minimize"
+	| "toggle_maximize"
+	| "close"
+	| "exit"
+	| "open_project"
+	| "reload"
+	| "toggle_native_transcript"
+	| "undo"
+	| "redo"
+	| "cut"
+	| "copy"
+	| "paste"
+	| "select_all"
+	| "about";
+
 export interface DesktopBridge {
 	available: boolean;
 	/** True while the native host supports, or has not yet rejected, local-file commands. */
 	localFilesAvailable: boolean;
 	/** Native virtual transcript is probed independently from project/file capabilities. */
 	nativeTranscriptAvailable: boolean;
+	/** Resize the native host to add or remove the docked Agent rail. */
+	setAgentRailOpen(open: boolean): Promise<boolean>;
+	/** Run native title-bar, application-menu, or window commands. */
+	runWindowAction(action: DesktopWindowAction): Promise<boolean>;
 	listProjects(): Promise<readonly DesktopProject[]>;
 	openProject(): Promise<void>;
 	switchProject(path: string): Promise<void>;
@@ -100,6 +121,7 @@ const ATTACHMENT_STATUS_BATCH = 64;
 export type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
 interface TauriWindow extends Window {
+	__OMP_CPP_SHELL__?: boolean;
 	__TAURI_INTERNALS__?: {
 		invoke?: TauriInvoke;
 	};
@@ -109,6 +131,10 @@ interface TauriWindow extends Window {
 			removeEventListener(type: "message", listener: (event: MessageEvent<unknown>) => void): void;
 		};
 	};
+}
+
+export function isCppShellHost(): boolean {
+	return typeof window !== "undefined" && (window as TauriWindow).__OMP_CPP_SHELL__ === true;
 }
 
 function getTauriInvoke(): TauriInvoke | null {
@@ -140,6 +166,12 @@ function browserBridge(): DesktopBridge {
 		available: false,
 		localFilesAvailable: false,
 		nativeTranscriptAvailable: false,
+		async setAgentRailOpen(_open: boolean) {
+			return false;
+		},
+		async runWindowAction(_action: DesktopWindowAction) {
+			return false;
+		},
 		async listProjects() {
 			return [];
 		},
@@ -216,6 +248,22 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 		},
 		get nativeTranscriptAvailable() {
 			return nativeTranscriptAuthorization !== "denied";
+		},
+		async setAgentRailOpen(open: boolean) {
+			try {
+				await invoke<unknown>("window_agent_rail", { open });
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		async runWindowAction(action: DesktopWindowAction) {
+			try {
+				await invoke<unknown>("window_action", { action });
+				return true;
+			} catch {
+				return false;
+			}
 		},
 		async listProjects() {
 			if (authorization === "denied") return [];

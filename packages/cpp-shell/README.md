@@ -36,6 +36,13 @@ view**. Disable that menu item for full Markdown, complex tool cards, browser
 content, and compatibility fallback. Project/session controls and the composer
 continue to run in WebView2; the long scrolling message surface does not.
 
+The default window keeps the 288-DIP project/session sidebar docked beside the
+808-DIP conversation area (a 760-DIP composer with 24-DIP outer gutters),
+without reserving space for optional panels. Opening the docked Agent rail
+grows the native window by the 288-DIP rail width (within the monitor work
+area); closing it restores the exact two-column bounds without changing the
+sidebar or conversation widths.
+
 ## Images and local files
 
 Replicated transcript rows contain content-addressed image IDs, never inline

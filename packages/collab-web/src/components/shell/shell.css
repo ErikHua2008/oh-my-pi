@@ -4,6 +4,153 @@
 @import "./settings.css";
 @import "./connect.css";
 
+/* ---- native desktop frame ---- */
+.sh-desktop-frame {
+	display: grid;
+	grid-template-rows: 36px minmax(0, 1fr);
+	width: 100%;
+	height: var(--viewport-height, 100%);
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
+	background: var(--bg);
+}
+
+.sh-desktop-titlebar {
+	position: relative;
+	z-index: 100;
+	display: flex;
+	align-items: stretch;
+	min-width: 0;
+	color: var(--fg-muted);
+	background: var(--bg-sidebar);
+	border-bottom: 1px solid var(--border);
+	user-select: none;
+}
+
+.sh-desktop-nav,
+.sh-desktop-menus,
+.sh-desktop-window-controls {
+	display: flex;
+	align-items: stretch;
+	flex: none;
+}
+
+.sh-desktop-nav {
+	padding-left: 4px;
+}
+
+.sh-desktop-icon,
+.sh-desktop-menu-trigger,
+.sh-desktop-window-controls button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 35px;
+	padding: 0;
+	color: var(--fg-muted);
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+}
+
+.sh-desktop-icon {
+	width: 32px;
+}
+
+.sh-desktop-icon:hover:not(:disabled),
+.sh-desktop-menu-trigger:hover,
+.sh-desktop-menu-trigger[aria-expanded="true"],
+.sh-desktop-window-controls button:hover {
+	color: var(--fg);
+	background: var(--bg-hover);
+}
+
+.sh-desktop-icon:disabled {
+	color: var(--fg-faint);
+	opacity: 0.42;
+}
+
+.sh-desktop-menu {
+	position: relative;
+}
+
+.sh-desktop-menu-trigger {
+	padding: 0 10px;
+	font-size: 12px;
+}
+
+.sh-desktop-menu-popup {
+	position: absolute;
+	left: 2px;
+	top: 34px;
+	z-index: 110;
+	display: flex;
+	flex-direction: column;
+	width: max-content;
+	min-width: 220px;
+	padding: 5px;
+	background: var(--bg-raised);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	box-shadow: var(--shadow-pop);
+}
+
+.sh-desktop-menu-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 32px;
+	min-height: 30px;
+	padding: 0 9px;
+	color: var(--fg);
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	font-size: 12px;
+	text-align: left;
+}
+
+.sh-desktop-menu-item:hover,
+.sh-desktop-menu-item:focus-visible {
+	background: var(--bg-hover);
+}
+
+.sh-desktop-menu-separated {
+	margin-top: 5px;
+	border-top: 1px solid var(--border);
+	border-top-left-radius: 0;
+	border-top-right-radius: 0;
+}
+
+.sh-desktop-menu-item kbd {
+	font: inherit;
+	color: var(--fg-faint);
+}
+
+.sh-desktop-drag {
+	flex: 1;
+	min-width: 40px;
+}
+
+.sh-desktop-window-controls button {
+	width: 46px;
+}
+
+.sh-desktop-window-controls .sh-desktop-close:hover {
+	color: #fff;
+	background: #c42b1c;
+}
+
+.sh-desktop-content {
+	--viewport-height: 100%;
+
+	min-width: 0;
+	min-height: 0;
+	height: 100%;
+	overflow: hidden;
+}
+
 /* ---- app frame ---- */
 .sh-app {
 	width: 100%;
@@ -44,17 +191,13 @@
 	flex-direction: column;
 }
 
-.sh-content[data-rail="true"] .sh-transcript {
-	max-width: none;
-}
-
 .sh-transcript > * {
 	flex: 1;
 	min-height: 0;
 }
 
 .sh-rail {
-	width: 360px;
+	width: 288px;
 	flex: none;
 	min-width: 0;
 	min-height: 0;
@@ -63,6 +206,12 @@
 	overflow: hidden;
 	border-left: 1px solid var(--border);
 	background: var(--bg);
+}
+
+.sh-app[data-agent-rail="true"] .sh-composer {
+	width: min(760px, calc(100% - 336px));
+	margin-right: auto;
+	margin-left: max(24px, calc((100% - 1048px) / 2));
 }
 
 .sh-rail-backdrop {

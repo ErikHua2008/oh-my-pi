@@ -7,6 +7,7 @@ import { SessionsLayout } from "./components/sessions/SessionsLayout";
 import { Banners } from "./components/shell/Banners";
 import { Composer } from "./components/shell/Composer";
 import { ConnectScreen } from "./components/shell/ConnectScreen";
+import { DesktopFrame } from "./components/shell/DesktopFrame";
 import { HeaderBar } from "./components/shell/HeaderBar";
 import { SettingsModal } from "./components/shell/SettingsModal";
 import { Toasts } from "./components/shell/Toasts";
@@ -14,6 +15,7 @@ import { Transcript } from "./components/transcript/Transcript";
 import { GuestClient, type GuestSnapshot, type Notice } from "./lib/client";
 import { ControlClient, type ControlSessionInfo } from "./lib/control-client";
 import { ControlSessionFlow } from "./lib/control-session-flow";
+import { desktopBridge } from "./lib/desktop-bridge";
 import { fmtPercent, fmtTokens } from "./lib/format";
 import { parseCollabLink } from "./lib/link";
 import { useGuestSnapshot } from "./lib/use-guest";
@@ -284,7 +286,7 @@ export function App(): ReactNode {
 
 	if (!appState) {
 		return (
-			<>
+			<DesktopFrame>
 				<ConnectScreen
 					defaultName={storedName()}
 					error={connectError}
@@ -292,21 +294,21 @@ export function App(): ReactNode {
 					onConnect={connect}
 				/>
 				<Toasts notices={controlNotices} />
-			</>
+			</DesktopFrame>
 		);
 	}
 
 	if (appState.kind === "session") {
 		return (
-			<>
+			<DesktopFrame>
 				<Session client={appState.client} onLeave={leave} onRejoin={rejoin} />
 				<Toasts notices={controlNotices} />
-			</>
+			</DesktopFrame>
 		);
 	}
 
 	return (
-		<>
+		<DesktopFrame canGoBack={appState.session !== null} onBack={backToSessions}>
 			<SessionsLayout
 				client={appState.client}
 				activeSessionId={appState.sessionId}
@@ -328,7 +330,7 @@ export function App(): ReactNode {
 				onLeave={leave}
 			/>
 			<Toasts notices={controlNotices} />
-		</>
+		</DesktopFrame>
 	);
 }
 
@@ -344,12 +346,14 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 	const snap = useGuestSnapshot(client);
 	const [composerPrefill, setComposerPrefill] = useState<string | undefined>(undefined);
 	const [railOpen, setRailOpen] = useState(false);
-	const [railOverlay, setRailOverlay] = useState(() => window.matchMedia("(max-width: 1024px)").matches);
+	const [narrowViewport, setNarrowViewport] = useState(() => window.matchMedia("(max-width: 1024px)").matches);
+	const [nativeWindowLayout, setNativeWindowLayout] = useState(false);
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const autoOpenedRef = useRef(false);
 	const agentsButtonRef = useRef<HTMLButtonElement | null>(null);
 	const railRef = useRef<HTMLElement | null>(null);
+	const railOverlay = narrowViewport && !nativeWindowLayout;
 	const closeRail = useCallback((): void => {
 		setRailOpen(false);
 		requestAnimationFrame(() => agentsButtonRef.current?.focus());
@@ -366,10 +370,26 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 
 	useEffect(() => {
 		const media = window.matchMedia("(max-width: 1024px)");
-		const update = (): void => setRailOverlay(media.matches);
+		const update = (): void => setNarrowViewport(media.matches);
 		media.addEventListener("change", update);
 		return () => media.removeEventListener("change", update);
 	}, []);
+
+	useEffect(() => {
+		let disposed = false;
+		void desktopBridge.setAgentRailOpen(false).then(supported => {
+			if (!disposed) setNativeWindowLayout(supported);
+		});
+		return () => {
+			disposed = true;
+			void desktopBridge.setAgentRailOpen(false);
+		};
+	}, []);
+
+	useEffect(() => {
+		if (!nativeWindowLayout) return;
+		void desktopBridge.setAgentRailOpen(railOpen && !railOverlay);
+	}, [nativeWindowLayout, railOpen, railOverlay]);
 
 	// Task-card agent chips drill into the same drawer the rail uses.
 	const agentIds = useMemo(() => new Set(snap.agents.map(a => a.id)), [snap.agents]);
@@ -444,7 +464,7 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 	const drawerAgent = selectedId != null ? snap.agents.find(a => a.id === selectedId) : undefined;
 
 	return (
-		<div className="sh-app">
+		<div className="sh-app" data-agent-rail={railOpen && !railOverlay ? "true" : undefined}>
 			<div inert={railOpen && railOverlay ? true : undefined}>
 				<HeaderBar
 					snapshot={snap}

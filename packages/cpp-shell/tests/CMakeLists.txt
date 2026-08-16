@@ -8,6 +8,7 @@ add_executable(
 	path_utils_test.cpp
 	test_main.cpp
 	text_utils_test.cpp
+	window_layout_test.cpp
 	windows_command_line_test.cpp
 )
 target_link_libraries(omp_shell_tests PRIVATE omp_shell_runtime)

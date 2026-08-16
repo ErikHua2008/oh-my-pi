@@ -3,9 +3,9 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import type { Notice } from "../../lib/client";
 
-const INFO_TTL_MS = 4000;
-const WARNING_TTL_MS = 8000;
-const MAX_VISIBLE = 4;
+const INFO_TTL_MS = 1800;
+const WARNING_TTL_MS = 4000;
+const MAX_VISIBLE_ERRORS = 3;
 
 const NOTICE_ICON: Record<Notice["level"], LucideIcon> = {
 	info: Info,
@@ -42,8 +42,10 @@ export function Toasts({ notices }: { notices: readonly Notice[] }): ReactNode {
 		};
 	}, [notices, dismissed]);
 
-	const visible = notices.filter(n => !dismissed.has(n.id)).slice(-MAX_VISIBLE);
-	if (visible.length === 0) return null;
+	const visible = notices.filter(n => !dismissed.has(n.id));
+	const transient = visible.filter(n => n.level !== "error").at(-1);
+	const errors = visible.filter(n => n.level === "error").slice(-MAX_VISIBLE_ERRORS);
+	if (transient == null && errors.length === 0) return null;
 
 	const close = (id: number): void => {
 		setDismissed(prev => {
@@ -53,32 +55,44 @@ export function Toasts({ notices }: { notices: readonly Notice[] }): ReactNode {
 		});
 	};
 
+	const TransientIcon = transient == null ? null : NOTICE_ICON[transient.level];
+
 	return (
-		<div className="sh-toasts" aria-label="Notifications" aria-live="polite" aria-relevant="additions">
-			{visible.map(n => {
-				const Icon = NOTICE_ICON[n.level];
-				return (
+		<>
+			{transient != null && TransientIcon != null && (
+				<div className="sh-toasts-transient" aria-live="polite" aria-relevant="additions">
 					<div
-						key={n.id}
-						className={`sh-toast sh-toast-${n.level}`}
-						role={n.level === "error" ? "alert" : "status"}
+						key={transient.id}
+						className={`sh-toast sh-toast-transient sh-toast-${transient.level}`}
+						role="status"
 					>
-						<Icon className="sh-toast-icon" size={15} aria-hidden="true" />
-						<span className="sh-toast-msg">{n.message}</span>
-						{n.level === "error" && (
-							<button
-								type="button"
-								className="sh-toast-close"
-								onClick={() => close(n.id)}
-								title="Dismiss notification"
-								aria-label="Dismiss notification"
-							>
-								<X size={14} aria-hidden="true" />
-							</button>
-						)}
+						<TransientIcon className="sh-toast-icon" size={15} aria-hidden="true" />
+						<span className="sh-toast-msg">{transient.message}</span>
 					</div>
-				);
-			})}
-		</div>
+				</div>
+			)}
+			{errors.length > 0 && (
+				<div className="sh-toasts-errors" aria-label="Error notifications" aria-live="assertive">
+					{errors.map(n => {
+						const Icon = NOTICE_ICON[n.level];
+						return (
+							<div key={n.id} className="sh-toast sh-toast-error" role="alert">
+								<Icon className="sh-toast-icon" size={15} aria-hidden="true" />
+								<span className="sh-toast-msg">{n.message}</span>
+								<button
+									type="button"
+									className="sh-toast-close"
+									onClick={() => close(n.id)}
+									title="Dismiss notification"
+									aria-label="Dismiss notification"
+								>
+									<X size={14} aria-hidden="true" />
+								</button>
+							</div>
+						);
+					})}
+				</div>
+			)}
+		</>
 	);
 }

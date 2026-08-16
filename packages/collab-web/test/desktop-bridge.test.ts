@@ -18,6 +18,8 @@ describe("DesktopBridge browser fallback", () => {
 		expect(desktopBridge.available).toBe(false);
 		expect(desktopBridge.localFilesAvailable).toBe(false);
 		expect(desktopBridge.nativeTranscriptAvailable).toBe(false);
+		expect(await desktopBridge.setAgentRailOpen(true)).toBe(false);
+		expect(await desktopBridge.runWindowAction("minimize")).toBe(false);
 		expect(await desktopBridge.listProjects()).toEqual([]);
 		await expect(desktopBridge.openProject()).resolves.toBeUndefined();
 		await expect(desktopBridge.switchProject("/work/project")).resolves.toBeUndefined();
@@ -33,6 +35,21 @@ describe("DesktopBridge browser fallback", () => {
 });
 
 describe("DesktopBridge native transcript capability", () => {
+	it("forwards native window layout and title-bar actions without changing other desktop capabilities", async () => {
+		const calls: InvokeCall[] = [];
+		const bridge = createDesktopBridge(respondingInvoke(null, calls));
+
+		expect(await bridge.setAgentRailOpen(true)).toBe(true);
+		expect(await bridge.setAgentRailOpen(false)).toBe(true);
+		expect(await bridge.runWindowAction("toggle_maximize")).toBe(true);
+		expect(calls).toEqual([
+			{ command: "window_agent_rail", args: { open: true } },
+			{ command: "window_agent_rail", args: { open: false } },
+			{ command: "window_action", args: { action: "toggle_maximize" } },
+		]);
+		expect(bridge.available).toBe(false);
+	});
+
 	it("probes transcript commands independently and keeps message rows as metadata", async () => {
 		const calls: InvokeCall[] = [];
 		const bridge = createDesktopBridge(async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
