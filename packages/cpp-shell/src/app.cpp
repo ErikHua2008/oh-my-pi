@@ -8,6 +8,7 @@
 #include <ShObjIdl.h>
 #include <dwmapi.h>
 #include <wincrypt.h>
+#include <windowsx.h>
 
 #include <nlohmann/json.hpp>
 
@@ -70,11 +71,7 @@ constexpr DarkMenuItem kMenuSeparatorItem{nullptr, false, true};
 }
 
 [[nodiscard]] int DefaultCompactWindowWidth(UINT dpi) noexcept {
-	RECT bounds{0, 0, MulDiv(kCompactClientWidth, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI), 1};
-	if (AdjustWindowRectExForDpi(&bounds, kWindowStyle, FALSE, 0, dpi) == FALSE) {
-		return bounds.right - bounds.left;
-	}
-	return bounds.right - bounds.left;
+	return MulDiv(kCompactClientWidth, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
 }
 
 [[nodiscard]] HBRUSH DarkMenuHotBrush() noexcept {
@@ -276,7 +273,7 @@ void EnableDarkApplicationMode() noexcept {
 	FreeLibrary(theme);
 }
 
-void EnableDarkWindowMode(HWND window) noexcept {
+void ApplyWindowThemeMode(HWND window, bool dark) noexcept {
 	const HMODULE theme = LoadUxTheme();
 	if (theme == nullptr) {
 		return;
@@ -287,10 +284,10 @@ void EnableDarkWindowMode(HWND window) noexcept {
 	const auto flush_menus = reinterpret_cast<FlushMenuThemesFn>(
 		GetProcAddress(theme, MAKEINTRESOURCEA(136)));
 	if (allow_window != nullptr) {
-		static_cast<void>(allow_window(window, TRUE));
+		static_cast<void>(allow_window(window, dark ? TRUE : FALSE));
 	}
 	if (set_window_theme != nullptr) {
-		static_cast<void>(set_window_theme(window, L"DarkMode_Explorer", nullptr));
+		static_cast<void>(set_window_theme(window, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr));
 	}
 	if (flush_menus != nullptr) {
 		flush_menus();
@@ -461,9 +458,30 @@ LRESULT CALLBACK App::WindowProcedure(HWND window, UINT message, WPARAM wparam, 
 
 LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 	switch (message) {
+	case WM_NCCALCSIZE:
+		// Keep WS_THICKFRAME semantics, but let the Web title bar occupy the
+		// complete window instead of exposing a DWM-painted strip above it.
+		if (wparam == TRUE) {
+			return 0;
+		}
+		break;
+	case WM_NCHITTEST: {
+		RECT bounds{};
+		if (!GetWindowRect(window_, &bounds)) {
+			break;
+		}
+		const UINT dpi = GetDpiForWindow(window_);
+		const int horizontal_border =
+			GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+		const int vertical_border =
+			GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+		return HitTestResizeBorder(
+			bounds, POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}, horizontal_border, vertical_border, IsZoomed(window_));
+	}
 	case WM_CREATE:
 		InitializeTray();
 		if (native_transcript_.Create(window_, instance_)) {
+			native_transcript_.SetDarkTheme(dark_theme_);
 			native_transcript_.SetHistoryRequestHandler([this] {
 				webview_.PostJson(LR"json({"channel":"omp-native-transcript-event","event":"load-earlier"})json");
 			});
@@ -629,7 +647,7 @@ bool App::RegisterWindowClass() const {
 	if (window_class.hIconSm == nullptr) {
 		window_class.hIconSm = window_class.hIcon;
 	}
-	window_class.hbrBackground = CreateSolidBrush(RGB(32, 33, 35));
+	window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
 	window_class.lpszClassName = kWindowClassName;
 	return RegisterClassExW(&window_class) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
@@ -672,9 +690,7 @@ bool App::CreateMainWindow(int show_command) {
 		0,
 		0,
 		SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
-	const BOOL dark_mode = TRUE;
-	DwmSetWindowAttribute(window_, 20, &dark_mode, sizeof(dark_mode));
-	EnableDarkWindowMode(window_);
+	ApplyTheme(false);
 	ShowWindow(window_, config_.window_maximized ? SW_SHOWMAXIMIZED : show_command);
 	UpdateWindow(window_);
 	return true;
@@ -764,6 +780,24 @@ void App::SetAgentRailOpen(bool open) {
 		compact.right - compact.left,
 		compact.bottom - compact.top,
 		SWP_NOACTIVATE | SWP_NOZORDER);
+}
+
+void App::ApplyTheme(bool dark) {
+	dark_theme_ = dark;
+	native_transcript_.SetDarkTheme(dark);
+	webview_.SetDarkTheme(dark);
+	if (window_ == nullptr) {
+		return;
+	}
+	const BOOL dark_mode = dark ? TRUE : FALSE;
+	DwmSetWindowAttribute(window_, 20, &dark_mode, sizeof(dark_mode));
+	// Windows 11 draws a one-pixel DWM border even after the client area is
+	// extended. DWMWA_COLOR_NONE suppresses it without disabling the shadow.
+	constexpr DWORD kDwmBorderColorAttribute = 34;
+	constexpr COLORREF kDwmColorNone = 0xFFFFFFFE;
+	DwmSetWindowAttribute(window_, kDwmBorderColorAttribute, &kDwmColorNone, sizeof(kDwmColorNone));
+	ApplyWindowThemeMode(window_, dark);
+	RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
 }
 
 void App::ShowTrayMenu() {
@@ -998,6 +1032,15 @@ void App::HandleDesktopRequest(std::string_view payload) {
 	};
 
 	try {
+		if (command == "window_theme") {
+			const std::string theme = args.at("theme").get<std::string>();
+			if (theme != "light" && theme != "dark") {
+				throw std::invalid_argument("unsupported window theme");
+			}
+			ApplyTheme(theme == "dark");
+			reply(true, Json{{"theme", theme}});
+			return;
+		}
 		if (command == "window_action") {
 			const std::string action = args.at("action").get<std::string>();
 			const auto post_command = [this, &reply](UINT native_command) {
@@ -1166,6 +1209,11 @@ void App::HandleDesktopRequest(std::string_view payload) {
 				return;
 			}
 			const Json& viewport = args.at("viewport");
+			const std::string theme = viewport.at("theme").get<std::string>();
+			if (theme != "light" && theme != "dark") {
+				throw std::invalid_argument("unsupported native transcript theme");
+			}
+			native_transcript_.SetDarkTheme(theme == "dark");
 			const std::int64_t x = std::clamp<std::int64_t>(viewport.at("x").get<std::int64_t>(), -1'000'000, 1'000'000);
 			const std::int64_t y = std::clamp<std::int64_t>(viewport.at("y").get<std::int64_t>(), -1'000'000, 1'000'000);
 			const std::int64_t width =

@@ -50,7 +50,10 @@ export interface DesktopNativeTranscriptViewport {
 	y: number;
 	width: number;
 	height: number;
+	theme: DesktopTheme;
 }
+
+export type DesktopTheme = "light" | "dark";
 
 export type DesktopNativeTranscriptEvent =
 	| "load-earlier"
@@ -83,6 +86,8 @@ export interface DesktopBridge {
 	nativeTranscriptAvailable: boolean;
 	/** Resize the native host to add or remove the docked Agent rail. */
 	setAgentRailOpen(open: boolean): Promise<boolean>;
+	/** Keep native HWND surfaces and DWM chrome aligned with the resolved Web theme. */
+	setWindowTheme(theme: DesktopTheme): Promise<boolean>;
 	/** Run native title-bar, application-menu, or window commands. */
 	runWindowAction(action: DesktopWindowAction): Promise<boolean>;
 	listProjects(): Promise<readonly DesktopProject[]>;
@@ -169,6 +174,9 @@ function browserBridge(): DesktopBridge {
 		async setAgentRailOpen(_open: boolean) {
 			return false;
 		},
+		async setWindowTheme(_theme: DesktopTheme) {
+			return false;
+		},
 		async runWindowAction(_action: DesktopWindowAction) {
 			return false;
 		},
@@ -252,6 +260,14 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 		async setAgentRailOpen(open: boolean) {
 			try {
 				await invoke<unknown>("window_agent_rail", { open });
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		async setWindowTheme(theme: DesktopTheme) {
+			try {
+				await invoke<unknown>("window_theme", { theme });
 				return true;
 			} catch {
 				return false;

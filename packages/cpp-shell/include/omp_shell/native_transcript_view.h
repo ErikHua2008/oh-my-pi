@@ -2,6 +2,7 @@
 
 #include "omp_shell/native_transcript_controls.h"
 #include "omp_shell/native_transcript_model.h"
+#include "omp_shell/native_transcript_theme.h"
 
 #include <windows.h>
 
@@ -35,6 +36,7 @@ public:
 	void Destroy();
 	void SetBounds(const RECT& bounds);
 	void SetVisible(bool visible);
+	void SetDarkTheme(bool dark);
 	[[nodiscard]] bool IsVisible() const noexcept { return visible_; }
 	[[nodiscard]] HWND Window() const noexcept { return window_; }
 
@@ -166,6 +168,7 @@ private:
 	std::uint64_t media_use_clock_ = 0;
 	bool stick_to_bottom_ = true;
 	bool visible_ = false;
+	bool dark_theme_ = false;
 };
 
 } // namespace omp::shell

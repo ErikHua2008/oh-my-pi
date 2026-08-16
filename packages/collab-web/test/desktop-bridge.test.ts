@@ -19,6 +19,7 @@ describe("DesktopBridge browser fallback", () => {
 		expect(desktopBridge.localFilesAvailable).toBe(false);
 		expect(desktopBridge.nativeTranscriptAvailable).toBe(false);
 		expect(await desktopBridge.setAgentRailOpen(true)).toBe(false);
+		expect(await desktopBridge.setWindowTheme("light")).toBe(false);
 		expect(await desktopBridge.runWindowAction("minimize")).toBe(false);
 		expect(await desktopBridge.listProjects()).toEqual([]);
 		await expect(desktopBridge.openProject()).resolves.toBeUndefined();
@@ -41,10 +42,12 @@ describe("DesktopBridge native transcript capability", () => {
 
 		expect(await bridge.setAgentRailOpen(true)).toBe(true);
 		expect(await bridge.setAgentRailOpen(false)).toBe(true);
+		expect(await bridge.setWindowTheme("light")).toBe(true);
 		expect(await bridge.runWindowAction("toggle_maximize")).toBe(true);
 		expect(calls).toEqual([
 			{ command: "window_agent_rail", args: { open: true } },
 			{ command: "window_agent_rail", args: { open: false } },
+			{ command: "window_theme", args: { theme: "light" } },
 			{ command: "window_action", args: { action: "toggle_maximize" } },
 		]);
 		expect(bridge.available).toBe(false);
@@ -79,7 +82,9 @@ describe("DesktopBridge native transcript capability", () => {
 			}),
 		).toBe(true);
 		expect(await bridge.upsertNativeTranscript(row)).toBe(true);
-		expect(await bridge.setNativeTranscriptViewport({ x: 10, y: 20, width: 700, height: 500 })).toBe(true);
+		expect(await bridge.setNativeTranscriptViewport({ x: 10, y: 20, width: 700, height: 500, theme: "light" })).toBe(
+			true,
+		);
 		await bridge.removeNativeTranscript("entry-1");
 		await bridge.hideNativeTranscript();
 		expect(await bridge.takeNativeTranscriptEvents()).toEqual([
@@ -101,7 +106,13 @@ describe("DesktopBridge native transcript capability", () => {
 		const bridge = createDesktopBridge(async <T>(): Promise<T> => {
 			throw new Error("unsupported desktop command");
 		});
-		const enabled = await bridge.setNativeTranscriptViewport({ x: 0, y: 0, width: 100, height: 100 });
+		const enabled = await bridge.setNativeTranscriptViewport({
+			x: 0,
+			y: 0,
+			width: 100,
+			height: 100,
+			theme: "dark",
+		});
 		expect(enabled).toBe(false);
 		expect(bridge.nativeTranscriptAvailable).toBe(false);
 	});

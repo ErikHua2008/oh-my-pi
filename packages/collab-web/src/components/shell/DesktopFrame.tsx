@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowRight, Minus, PanelLeft, Square, X } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { type DesktopWindowAction, desktopBridge, isCppShellHost } from "../../lib/desktop-bridge";
+import { useSystemTheme } from "../../lib/theme";
 
 type MenuName = "file" | "edit" | "view" | "help";
 
@@ -44,6 +45,11 @@ function menuLabel(menu: MenuName): string {
 export function DesktopFrame({ children, canGoBack = false, onBack }: DesktopFrameProps): ReactNode {
 	const [openMenu, setOpenMenu] = useState<MenuName | null>(null);
 	const nativeFrame = isCppShellHost();
+	const theme = useSystemTheme();
+
+	useEffect(() => {
+		if (nativeFrame) void desktopBridge.setWindowTheme(theme);
+	}, [nativeFrame, theme]);
 
 	useEffect(() => {
 		if (!nativeFrame || openMenu === null) return;

@@ -15,4 +15,26 @@ RECT ExpandWindowBoundsForRail(const RECT& compact_bounds, const RECT& work_area
 	return RECT{left, compact_bounds.top, left + expanded_width, compact_bounds.bottom};
 }
 
+LRESULT HitTestResizeBorder(
+	const RECT& window_bounds, POINT screen_point, int horizontal_border, int vertical_border, bool maximized) noexcept {
+	if (maximized || horizontal_border <= 0 || vertical_border <= 0 || screen_point.x < window_bounds.left ||
+		screen_point.x >= window_bounds.right || screen_point.y < window_bounds.top ||
+		screen_point.y >= window_bounds.bottom) {
+		return HTCLIENT;
+	}
+	const bool left = screen_point.x < window_bounds.left + horizontal_border;
+	const bool right = screen_point.x >= window_bounds.right - horizontal_border;
+	const bool top = screen_point.y < window_bounds.top + vertical_border;
+	const bool bottom = screen_point.y >= window_bounds.bottom - vertical_border;
+	if (top && left) return HTTOPLEFT;
+	if (top && right) return HTTOPRIGHT;
+	if (bottom && left) return HTBOTTOMLEFT;
+	if (bottom && right) return HTBOTTOMRIGHT;
+	if (left) return HTLEFT;
+	if (right) return HTRIGHT;
+	if (top) return HTTOP;
+	if (bottom) return HTBOTTOM;
+	return HTCLIENT;
+}
+
 } // namespace omp::shell

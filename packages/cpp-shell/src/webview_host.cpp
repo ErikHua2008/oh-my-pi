@@ -278,11 +278,7 @@ bool WebViewHost::ready() const noexcept {
 
 void WebViewHost::ConfigureController() {
 	Resize();
-	Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
-	if (SUCCEEDED(controller_.As(&controller2))) {
-		const COREWEBVIEW2_COLOR background{255, 32, 33, 35};
-		controller2->put_DefaultBackgroundColor(background);
-	}
+	SetDarkTheme(false);
 
 	Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
 	if (SUCCEEDED(webview_->get_Settings(&settings))) {
@@ -308,6 +304,18 @@ void WebViewHost::ConfigureController() {
 			})
 			.Get(),
 		&message_token_);
+}
+
+void WebViewHost::SetDarkTheme(bool dark) const {
+	if (controller_ == nullptr) {
+		return;
+	}
+	Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
+	if (SUCCEEDED(controller_.As(&controller2))) {
+		const COREWEBVIEW2_COLOR background =
+			dark ? COREWEBVIEW2_COLOR{255, 21, 21, 23} : COREWEBVIEW2_COLOR{255, 255, 255, 255};
+		controller2->put_DefaultBackgroundColor(background);
+	}
 }
 
 } // namespace omp::shell

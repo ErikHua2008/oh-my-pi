@@ -25,6 +25,7 @@ import {
 	STREAM_BATCH_MAX_DELAY_MS,
 	shouldFlushAssistantStreamBatch,
 } from "../../lib/stream-presentation";
+import { useSystemTheme } from "../../lib/theme";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
@@ -669,6 +670,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		historyLoading = false,
 		onLoadEarlier,
 	} = props;
+	const theme = useSystemTheme();
 	const presentedStream = usePresentedAssistantStream(stream, streamDone, sessionId);
 	const nativeSurfaceBlocked = useSyncExternalStore(
 		subscribeNativeSurfaceVisibility,
@@ -830,6 +832,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 						y: Math.round(bounds.top * scale),
 						width: Math.round(bounds.width * scale),
 						height: Math.round(bounds.height * scale),
+						theme,
 					})
 					.then(enabled => {
 						if (!enabled && !disposed) setNativeEnabled(false);
@@ -849,7 +852,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			window.visualViewport?.removeEventListener("resize", syncBounds);
 			void desktop.hideNativeTranscript();
 		};
-	}, [desktop, nativeEnabled, nativeSurfaceBlocked]);
+	}, [desktop, nativeEnabled, nativeSurfaceBlocked, theme]);
 
 	useLayoutEffect(() => {
 		const restore = restoreScrollRef.current;

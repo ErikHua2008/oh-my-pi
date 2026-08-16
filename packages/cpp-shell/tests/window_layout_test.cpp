@@ -38,4 +38,22 @@ OMP_TEST("window layout caps expansion to the monitor work area") {
 		760);
 }
 
+OMP_TEST("frameless resize hit testing preserves every edge and corner") {
+	constexpr RECT bounds{100, 200, 900, 800};
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{100, 200}, 8, 8, false) == HTTOPLEFT);
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{899, 200}, 8, 8, false) == HTTOPRIGHT);
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{100, 799}, 8, 8, false) == HTBOTTOMLEFT);
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{899, 799}, 8, 8, false) == HTBOTTOMRIGHT);
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{100, 500}, 8, 8, false) == HTLEFT);
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{899, 500}, 8, 8, false) == HTRIGHT);
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{500, 200}, 8, 8, false) == HTTOP);
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{500, 799}, 8, 8, false) == HTBOTTOM);
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{500, 500}, 8, 8, false) == HTCLIENT);
+}
+
+OMP_TEST("frameless resize hit testing is disabled while maximized") {
+	constexpr RECT bounds{0, 0, 1920, 1040};
+	OMP_CHECK(HitTestResizeBorder(bounds, POINT{0, 0}, 8, 8, true) == HTCLIENT);
+}
+
 } // namespace omp::shell::test

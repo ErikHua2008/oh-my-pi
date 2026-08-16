@@ -41,6 +41,10 @@ constexpr UINT kContextSelectAll = 2;
 		alpha);
 }
 
+[[nodiscard]] D2D1_COLOR_F Color(const NativeTranscriptColor& color) noexcept {
+	return Color(color.rgb, color.alpha);
+}
+
 [[nodiscard]] std::wstring_view RowLabel(NativeTranscriptRowKind kind) noexcept {
 	switch (kind) {
 	case NativeTranscriptRowKind::User:
@@ -191,6 +195,17 @@ void NativeTranscriptView::SetVisible(bool visible) {
 		SetWindowPos(window_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 		InvalidateRect(window_, nullptr, FALSE);
 		MaybeRequestEarlier();
+	}
+}
+
+void NativeTranscriptView::SetDarkTheme(bool dark) {
+	if (dark_theme_ == dark) {
+		return;
+	}
+	dark_theme_ = dark;
+	DiscardDeviceResources();
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
 	}
 }
 
@@ -681,48 +696,46 @@ HRESULT NativeTranscriptView::EnsureDeviceResources() {
 	const UINT width = static_cast<UINT>(std::max(1L, client.right - client.left));
 	const UINT height = static_cast<UINT>(std::max(1L, client.bottom - client.top));
 	const float dpi = static_cast<float>(GetDpiForWindow(window_));
+	const NativeTranscriptPalette palette = NativeTranscriptPaletteFor(dark_theme_);
 	HRESULT result = d2d_factory_->CreateHwndRenderTarget(
 		D2D1::RenderTargetProperties(
 			D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(), dpi, dpi, D2D1_RENDER_TARGET_USAGE_NONE),
 		D2D1::HwndRenderTargetProperties(window_, D2D1::SizeU(width, height), D2D1_PRESENT_OPTIONS_NONE),
 		render_target_.ReleaseAndGetAddressOf());
 	if (SUCCEEDED(result)) {
-		result = render_target_->CreateSolidColorBrush(Color(0xECECEC), primary_brush_.ReleaseAndGetAddressOf());
+		result = render_target_->CreateSolidColorBrush(Color(palette.primary), primary_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
-		result = render_target_->CreateSolidColorBrush(Color(0x969696), muted_brush_.ReleaseAndGetAddressOf());
+		result = render_target_->CreateSolidColorBrush(Color(palette.muted), muted_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
-		result = render_target_->CreateSolidColorBrush(Color(0x2B2D31), user_brush_.ReleaseAndGetAddressOf());
+		result = render_target_->CreateSolidColorBrush(Color(palette.user), user_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
-		result = render_target_->CreateSolidColorBrush(Color(0x35373B), line_brush_.ReleaseAndGetAddressOf());
+		result = render_target_->CreateSolidColorBrush(Color(palette.line), line_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
-		result = render_target_->CreateSolidColorBrush(Color(0x4D73B9, 0.72F), selection_brush_.ReleaseAndGetAddressOf());
+		result = render_target_->CreateSolidColorBrush(Color(palette.selection), selection_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
-		result = render_target_->CreateSolidColorBrush(Color(0x74777D, 0.62F), scrollbar_brush_.ReleaseAndGetAddressOf());
+		result = render_target_->CreateSolidColorBrush(Color(palette.scrollbar), scrollbar_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
-		result = render_target_->CreateSolidColorBrush(
-			Color(0xA7AAB0, 0.88F), scrollbar_hot_brush_.ReleaseAndGetAddressOf());
+		result = render_target_->CreateSolidColorBrush(Color(palette.scrollbar_hot), scrollbar_hot_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
-		result = render_target_->CreateSolidColorBrush(
-			Color(0x2C2E32, 0.98F), jump_button_brush_.ReleaseAndGetAddressOf());
+		result = render_target_->CreateSolidColorBrush(Color(palette.jump_button), jump_button_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
-		result = render_target_->CreateSolidColorBrush(
-			Color(0x3A3D42, 0.98F), jump_button_hot_brush_.ReleaseAndGetAddressOf());
+		result = render_target_->CreateSolidColorBrush(Color(palette.jump_button_hot), jump_button_hot_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
 		result = render_target_->CreateSolidColorBrush(
-			Color(0x555960, 0.92F), jump_button_border_brush_.ReleaseAndGetAddressOf());
+			Color(palette.jump_button_border), jump_button_border_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
 		result = render_target_->CreateSolidColorBrush(
-			Color(0x000000, 0.34F), jump_button_shadow_brush_.ReleaseAndGetAddressOf());
+			Color(palette.jump_button_shadow), jump_button_shadow_brush_.ReleaseAndGetAddressOf());
 	}
 	if (FAILED(result)) {
 		DiscardDeviceResources();
@@ -753,9 +766,10 @@ void NativeTranscriptView::Paint() {
 	PAINTSTRUCT paint{};
 	BeginPaint(window_, &paint);
 	if (SUCCEEDED(EnsureDeviceResources())) {
+		const NativeTranscriptPalette palette = NativeTranscriptPaletteFor(dark_theme_);
 		render_target_->BeginDraw();
 		render_target_->SetTransform(D2D1::Matrix3x2F::Identity());
-		render_target_->Clear(Color(0x202123));
+		render_target_->Clear(Color(palette.background));
 		const D2D1_SIZE_F size = render_target_->GetSize();
 		layout_changed_during_paint_ = false;
 		const auto range = model_.VisibleRange(
