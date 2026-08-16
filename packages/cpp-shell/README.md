@@ -116,10 +116,25 @@ the same embedded OMP icon resource.
 
 The shell resolves OMP in this order:
 
-1. `OMP_CPP_SHELL_DEV_REPO` - starts Bun against that repository's
-   `packages/coding-agent/src/cli.ts`.
-2. `OMP_CPP_SHELL_OMP_BIN` - explicit installed `omp` executable.
-3. `omp` from `PATH`.
+1. `OMP_CPP_SHELL_DEV_REPO` - explicit source mode; starts Bun against that
+   repository's `packages/coding-agent/src/cli.ts`.
+2. A valid persisted development repository, preferring its single-file
+   `packages/coding-agent/dist/cli.js` bundle and falling back to source when
+   the bundle is absent.
+3. A source repository discovered by walking upward from the built executable,
+   with the same bundle-first behavior.
+4. `OMP_CPP_SHELL_OMP_BIN` - explicit installed `omp` executable.
+5. `omp` from `PATH`.
+
+The default CMake build keeps the bundle current through the
+`OMP_CPP_SHELL_BUILD_CORE_BUNDLE` target. Set
+`-DOMP_CPP_SHELL_BUILD_CORE_BUNDLE=OFF` only when another build or installed
+OMP binary owns that artifact. The automatic repository lookup makes a freshly
+cloned and compiled shell portable across PCs without copying a
+machine-specific `devRepo` path. WebView2 and Core initialize in parallel; if
+Core has not emitted its local links after ten seconds, the startup page
+reports that it is still waiting instead of appearing frozen. The existing
+timeout and stderr diagnostics remain authoritative.
 
 `OMP_CPP_SHELL_INITIAL_PROJECT` selects a project on startup and is useful for
 repeatable integration tests. The persisted last project is used when the

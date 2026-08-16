@@ -54,31 +54,49 @@ std::wstring HtmlEscape(std::wstring_view value) {
 
 constexpr std::wstring_view kPageStyle = LR"css(
 <style>
-:root { color-scheme: dark; font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; }
+:root {
+  font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
+  --bg: #ffffff; --bg-sidebar: #f9fafb; --raised: #ffffff; --inset: #f9fafb;
+  --hover: rgb(38 49 72 / 6%); --fg: #0f1115; --muted: #61666b; --faint: #81858c;
+  --accent: #4176e6; --accent-hover: #3267d7; --accent-fg: #ffffff;
+  --border: rgb(0 0 0 / 10%); --border-strong: rgb(0 0 0 / 16%); --err: #ec1313;
+  --detail-bg: #f5f7fa; --detail-fg: #4b5057; --scrollbar: rgb(97 102 107 / 55%);
+  --shadow: 0 0 1px rgb(0 0 0 / 20%), 0 12px 32px rgb(0 0 0 / 8%);
+}
+[data-theme="light"] { color-scheme: light; }
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #151517; --bg-sidebar: #1b1b1c; --raised: #2c2c2e; --inset: #1b1b1c;
+  --hover: rgb(255 255 255 / 8%); --fg: #f9fafb; --muted: #cfd3d6; --faint: #adb2b8;
+  --accent: #679efe; --accent-hover: #79aaff; --accent-fg: #0f1115;
+  --border: rgb(255 255 255 / 12%); --border-strong: rgb(255 255 255 / 20%); --err: #f25a5a;
+  --detail-bg: #202022; --detail-fg: #cfd3d6; --scrollbar: rgb(207 211 214 / 58%);
+  --shadow: 0 0 1px rgb(0 0 0 / 35%), 0 18px 48px rgb(0 0 0 / 32%);
+}
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; padding-top: 36px; display: grid; place-items: center; background: #202123; color: #f2f2f2; }
+html { background: var(--bg); scrollbar-color: var(--scrollbar) transparent; }
+body { margin: 0; min-height: 100vh; padding-top: 36px; display: grid; place-items: center; background: var(--bg); color: var(--fg); }
 .shellbar { position: fixed; inset: 0 0 auto; height: 36px; display: flex; align-items: stretch; z-index: 10;
-  background: #1b1b1c; border-bottom: 1px solid #34363a; user-select: none; }
+  background: var(--bg-sidebar); border-bottom: 1px solid var(--border); user-select: none; }
 .shellbar-drag { flex: 1; min-width: 40px; }
-.shellbar-title { display: flex; align-items: center; padding-left: 14px; color: #b8babf; font-size: 12px; }
+.shellbar-title { display: flex; align-items: center; padding-left: 14px; color: var(--faint); font-size: 12px; }
 .shellbar-controls { display: flex; }
-.shellbar-controls button { width: 46px; height: 35px; margin: 0; padding: 0; border-radius: 0; color: #b8babf;
+.shellbar-controls button { width: 46px; height: 35px; margin: 0; padding: 0; border-radius: 0; color: var(--faint);
   background: transparent; font-size: 16px; font-weight: 400; }
-.shellbar-controls button:hover { color: white; background: #373739; }
+.shellbar-controls button:hover { color: var(--fg); background: var(--hover); }
 .shellbar-controls .shellbar-close:hover { background: #c42b1c; }
-.card { width: min(620px, calc(100vw - 48px)); padding: 44px; border: 1px solid #34363a; border-radius: 18px;
-  background: #282a2d; box-shadow: 0 24px 80px rgba(0,0,0,.28); }
-.mark { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; margin-bottom: 24px;
-  background: #f2f2f2; color: #202123; font-size: 22px; font-weight: 700; }
+.card { width: min(620px, calc(100vw - 48px)); padding: 44px; border: 1px solid var(--border); border-radius: 18px;
+  background: var(--raised); box-shadow: var(--shadow); }
+.error-mark { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; margin-bottom: 24px;
+  background: var(--err); color: white; font-size: 22px; font-weight: 700; }
 h1 { margin: 0 0 12px; font-size: 25px; font-weight: 620; letter-spacing: -.02em; }
-p { margin: 0; color: #b8babf; font-size: 14px; line-height: 1.65; }
+p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
 .detail { margin-top: 18px; padding: 14px 16px; max-height: 220px; overflow: auto; border-radius: 10px;
-  background: #1f2022; color: #c7c9ce; font: 12px/1.55 Consolas, monospace; overflow-wrap: anywhere; }
-button { margin-top: 28px; border: 0; border-radius: 9px; padding: 10px 17px; background: #f2f2f2; color: #202123;
+  border: 1px solid var(--border); background: var(--detail-bg); color: var(--detail-fg); font: 12px/1.55 Consolas, monospace; overflow-wrap: anywhere; }
+button { margin-top: 28px; border: 0; border-radius: 9px; padding: 10px 17px; background: var(--accent); color: var(--accent-fg);
   font: 600 14px "Segoe UI Variable", sans-serif; cursor: pointer; }
-button:hover { background: white; }
-.error .mark { background: #e45b5b; color: white; }
-.error h1 { color: #ffdfdf; }
+button:hover { background: var(--accent-hover); }
+.error h1 { color: var(--err); }
 </style>
 )css";
 
@@ -237,11 +255,13 @@ void WebViewHost::ShowWelcome() const {
 	if (!webview_) {
 		return;
 	}
-	std::wstring page = LR"html(<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>OMP</title>)html";
+	std::wstring page = LR"html(<!doctype html><html lang="zh-CN" data-theme=")html";
+	page.append(dark_theme_ ? L"dark" : L"light");
+	page.append(LR"html("><meta charset="utf-8"><title>OMP</title>)html");
 	page.append(kPageStyle);
 	page.append(L"<body>");
 	page.append(kFallbackTitlebar);
-	page.append(LR"html(<main class="card"><div class="mark">O</div><h1>从一个项目开始</h1>
+	page.append(LR"html(<main class="card"><h1>从一个项目开始</h1>
 <p>选择本地项目后，OMP 会在后台启动 Core，并在这个原生窗口中打开会话。模型凭据仍由 OMP 管理。</p>
 <button onclick="chrome.webview.postMessage('open-project')">打开项目</button></main></body></html>)html");
 	webview_->NavigateToString(page.c_str());
@@ -251,12 +271,16 @@ void WebViewHost::ShowStatus(std::wstring_view title, std::wstring_view detail, 
 	if (!webview_) {
 		return;
 	}
-	std::wstring page = LR"html(<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>OMP</title>)html";
+	std::wstring page = LR"html(<!doctype html><html lang="zh-CN" data-theme=")html";
+	page.append(dark_theme_ ? L"dark" : L"light");
+	page.append(LR"html("><meta charset="utf-8"><title>OMP</title>)html");
 	page.append(kPageStyle);
 	page.append(L"<body>");
 	page.append(kFallbackTitlebar);
 	page.append(is_error ? L"<main class=\"card error\">" : L"<main class=\"card\">");
-	page.append(is_error ? L"<div class=\"mark\">!</div>" : L"<div class=\"mark\">O</div>");
+	if (is_error) {
+		page.append(L"<div class=\"error-mark\">!</div>");
+	}
 	page.append(L"<h1>");
 	page.append(HtmlEscape(title));
 	page.append(L"</h1>");
@@ -278,7 +302,7 @@ bool WebViewHost::ready() const noexcept {
 
 void WebViewHost::ConfigureController() {
 	Resize();
-	SetDarkTheme(false);
+	SetDarkTheme(dark_theme_);
 
 	Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
 	if (SUCCEEDED(webview_->get_Settings(&settings))) {
@@ -306,15 +330,21 @@ void WebViewHost::ConfigureController() {
 		&message_token_);
 }
 
-void WebViewHost::SetDarkTheme(bool dark) const {
-	if (controller_ == nullptr) {
-		return;
+void WebViewHost::SetDarkTheme(bool dark) {
+	dark_theme_ = dark;
+	if (controller_ != nullptr) {
+		Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
+		if (SUCCEEDED(controller_.As(&controller2))) {
+			const COREWEBVIEW2_COLOR background =
+				dark ? COREWEBVIEW2_COLOR{255, 21, 21, 23} : COREWEBVIEW2_COLOR{255, 255, 255, 255};
+			controller2->put_DefaultBackgroundColor(background);
+		}
 	}
-	Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
-	if (SUCCEEDED(controller_.As(&controller2))) {
-		const COREWEBVIEW2_COLOR background =
-			dark ? COREWEBVIEW2_COLOR{255, 21, 21, 23} : COREWEBVIEW2_COLOR{255, 255, 255, 255};
-		controller2->put_DefaultBackgroundColor(background);
+	if (webview_ != nullptr) {
+		const wchar_t* script = dark
+			? L"document.documentElement.dataset.theme='dark'"
+			: L"document.documentElement.dataset.theme='light'";
+		webview_->ExecuteScript(script, nullptr);
 	}
 }
 

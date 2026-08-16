@@ -3,8 +3,11 @@ add_executable(
 	config_test.cpp
 	core_process_integration_test.cpp
 	core_output_parser_test.cpp
+	native_menu_test.cpp
+	native_transcript_bubble_test.cpp
 	native_transcript_controls_test.cpp
 	native_transcript_model_test.cpp
+	native_transcript_reasoning_test.cpp
 	native_transcript_theme_test.cpp
 	path_utils_test.cpp
 	test_main.cpp

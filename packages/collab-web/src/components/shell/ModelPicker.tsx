@@ -2,11 +2,14 @@ import { Check, ChevronDown } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { GuestSnapshot } from "../../lib/client";
+import { type DesktopBridge, desktopBridge as defaultDesktopBridge } from "../../lib/desktop-bridge";
+import { useNativeTranscriptOcclusion } from "./useNativeTranscriptOcclusion";
 
 export interface ModelPickerProps {
 	snapshot: GuestSnapshot;
 	onModelList(): void;
 	onModelChange(provider: string, id: string): void;
+	desktop?: Pick<DesktopBridge, "setNativeTranscriptOcclusion">;
 	disabled?: boolean;
 }
 
@@ -15,7 +18,13 @@ export interface ModelPickerProps {
  * null therefore means "loading/not requested", while an empty array is a
  * real empty result from the host.
  */
-export function ModelPicker({ snapshot, onModelList, onModelChange, disabled = false }: ModelPickerProps): ReactNode {
+export function ModelPicker({
+	snapshot,
+	onModelList,
+	onModelChange,
+	desktop = defaultDesktopBridge,
+	disabled = false,
+}: ModelPickerProps): ReactNode {
 	const [open, setOpen] = useState(false);
 	const menuId = useId();
 	const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -24,6 +33,7 @@ export function ModelPicker({ snapshot, onModelList, onModelChange, disabled = f
 	const models = snapshot.models;
 	const currentId = model?.id;
 	const currentProvider = model?.provider;
+	useNativeTranscriptOcclusion(open, menuRef, desktop);
 
 	useEffect(() => {
 		if (disabled) setOpen(false);

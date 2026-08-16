@@ -50,6 +50,7 @@ OMP_TEST("shell config round trips Unicode projects and window state without cre
 	config.window_y = 80;
 	config.window_width = 1440;
 	config.window_height = 900;
+	config.dark_theme = true;
 	config.window_maximized = true;
 	std::string error;
 	OMP_CHECK(omp::shell::SaveConfig(path, config, error));
@@ -63,6 +64,7 @@ OMP_TEST("shell config round trips Unicode projects and window state without cre
 	OMP_CHECK(loaded.pinned_sessions == config.pinned_sessions);
 	OMP_CHECK(loaded.session_read_through == config.session_read_through);
 	OMP_CHECK(loaded.window_width == 1440);
+	OMP_CHECK(loaded.dark_theme == std::optional<bool>(true));
 	OMP_CHECK(loaded.window_maximized);
 
 	std::ifstream input(path, std::ios::binary);
@@ -101,6 +103,7 @@ OMP_TEST("corrupt shell config is backed up and replaced with safe defaults in m
 	const omp::shell::ShellConfig loaded = omp::shell::LoadConfig(path);
 	OMP_CHECK(loaded.omp_bin == L"omp");
 	OMP_CHECK(!loaded.last_project.has_value());
+	OMP_CHECK(!loaded.dark_theme.has_value());
 	std::filesystem::path backup = path;
 	backup += L".bak";
 	OMP_CHECK(std::filesystem::exists(backup));

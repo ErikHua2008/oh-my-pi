@@ -1,5 +1,8 @@
 #include "omp_shell/native_transcript_view.h"
 
+#include "omp_shell/native_menu.h"
+#include "omp_shell/native_transcript_bubble.h"
+#include "omp_shell/native_transcript_reasoning.h"
 #include "omp_shell/text_utils.h"
 
 #include <algorithm>
@@ -13,12 +16,11 @@ namespace omp::shell {
 namespace {
 
 constexpr wchar_t kTranscriptWindowClass[] = L"OmpNativeTranscriptWindow";
-constexpr float kHorizontalPadding = 22.0F;
+constexpr float kHorizontalPadding = 16.0F;
 constexpr float kRowVerticalPadding = 12.0F;
 constexpr float kLabelHeight = 17.0F;
 constexpr float kTextGap = 5.0F;
 constexpr std::int32_t kCollapsedReasoningHeight = 42;
-constexpr float kUserWidthRatio = 0.78F;
 constexpr std::int64_t kEstimatedLineScroll = 54;
 constexpr std::int64_t kOverscan = 360;
 constexpr std::size_t kMaximumCachedLayouts = 256;
@@ -32,6 +34,8 @@ constexpr UINT_PTR kScrollbarHideTimer = 1;
 constexpr UINT kScrollbarHideDelayMs = 1'100;
 constexpr UINT kContextCopy = 1;
 constexpr UINT kContextSelectAll = 2;
+constexpr NativeMenuItem kContextCopyItem{L"复制\tCtrl+C", false, false};
+constexpr NativeMenuItem kContextSelectAllItem{L"全选\tCtrl+A", false, false};
 
 [[nodiscard]] D2D1_COLOR_F Color(std::uint32_t rgb, float alpha = 1.0F) noexcept {
 	return D2D1::ColorF(
@@ -178,11 +182,52 @@ void NativeTranscriptView::SetBounds(const RECT& bounds) {
 	if (window_ == nullptr) {
 		return;
 	}
+	bounds_ = bounds;
 	const int width = std::max(0L, bounds.right - bounds.left);
 	const int height = std::max(0L, bounds.bottom - bounds.top);
 	SetWindowPos(
 		window_, HWND_TOP, bounds.left, bounds.top, width, height, SWP_NOACTIVATE | (visible_ ? SWP_SHOWWINDOW : 0));
+	ApplyOcclusion();
 	ScrollTo(scroll_offset_, false);
+}
+
+void NativeTranscriptView::SetOcclusion(std::optional<RECT> occlusion) {
+	occlusion_ = occlusion;
+	ApplyOcclusion();
+}
+
+void NativeTranscriptView::ApplyOcclusion() {
+	if (window_ == nullptr) {
+		return;
+	}
+	const LONG width = std::max(0L, bounds_.right - bounds_.left);
+	const LONG height = std::max(0L, bounds_.bottom - bounds_.top);
+	if (!occlusion_ || width == 0 || height == 0) {
+		SetWindowRgn(window_, nullptr, TRUE);
+		return;
+	}
+	const RECT clipped{
+		std::clamp(occlusion_->left - bounds_.left, 0L, width),
+		std::clamp(occlusion_->top - bounds_.top, 0L, height),
+		std::clamp(occlusion_->right - bounds_.left, 0L, width),
+		std::clamp(occlusion_->bottom - bounds_.top, 0L, height),
+	};
+	if (clipped.right <= clipped.left || clipped.bottom <= clipped.top) {
+		SetWindowRgn(window_, nullptr, TRUE);
+		return;
+	}
+	HRGN visible_region = CreateRectRgn(0, 0, width, height);
+	HRGN occluded_region = CreateRectRgn(clipped.left, clipped.top, clipped.right, clipped.bottom);
+	if (visible_region == nullptr || occluded_region == nullptr ||
+		CombineRgn(visible_region, visible_region, occluded_region, RGN_DIFF) == ERROR) {
+		if (visible_region != nullptr) DeleteObject(visible_region);
+		if (occluded_region != nullptr) DeleteObject(occluded_region);
+		return;
+	}
+	DeleteObject(occluded_region);
+	if (SetWindowRgn(window_, visible_region, TRUE) == 0) {
+		DeleteObject(visible_region);
+	}
 }
 
 void NativeTranscriptView::SetVisible(bool visible) {
@@ -231,6 +276,8 @@ void NativeTranscriptView::Clear() {
 	jump_button_pressed_ = false;
 	mouse_tracking_ = false;
 	stick_to_bottom_ = true;
+	occlusion_.reset();
+	ApplyOcclusion();
 	UpdateScrollInfo();
 	if (window_ != nullptr) {
 		InvalidateRect(window_, nullptr, FALSE);
@@ -369,6 +416,16 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		return 0;
 	case WM_ERASEBKGND:
 		return 1;
+	case WM_MEASUREITEM:
+		if (MeasureNativeMenuItem(window_, reinterpret_cast<MEASUREITEMSTRUCT*>(lparam))) {
+			return TRUE;
+		}
+		break;
+	case WM_DRAWITEM:
+		if (DrawNativeMenuItem(window_, reinterpret_cast<DRAWITEMSTRUCT*>(lparam), dark_theme_)) {
+			return TRUE;
+		}
+		break;
 	case WM_SIZE:
 		if (render_target_ != nullptr) {
 			const UINT width = LOWORD(lparam);
@@ -712,6 +769,14 @@ HRESULT NativeTranscriptView::EnsureDeviceResources() {
 		result = render_target_->CreateSolidColorBrush(Color(palette.user), user_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(
+			Color(palette.user_foreground), user_foreground_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(
+			Color(palette.assistant), assistant_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
 		result = render_target_->CreateSolidColorBrush(Color(palette.line), line_brush_.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
@@ -756,6 +821,8 @@ void NativeTranscriptView::DiscardDeviceResources() {
 	scrollbar_brush_.Reset();
 	selection_brush_.Reset();
 	line_brush_.Reset();
+	assistant_brush_.Reset();
+	user_foreground_brush_.Reset();
 	user_brush_.Reset();
 	muted_brush_.Reset();
 	primary_brush_.Reset();
@@ -798,18 +865,30 @@ void NativeTranscriptView::Paint() {
 void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 	const NativeTranscriptRow& row = model_.RowAt(index);
 	const bool user = row.kind == NativeTranscriptRowKind::User;
+	const bool assistant = row.kind == NativeTranscriptRowKind::Assistant;
+	const bool message = user || assistant;
 	const bool collapsed_reasoning = IsCollapsedReasoning(row);
 	const float available_width = std::max(80.0F, viewport_width - 2.0F * kHorizontalPadding);
-	const float content_width = user ? std::max(80.0F, available_width * kUserWidthRatio) : available_width;
-	TextLayout* cached = collapsed_reasoning ? nullptr : GetTextLayout(row, content_width);
+	const float layout_width = message ? NativeTranscriptBubbleMaxContentWidth(viewport_width, user) : available_width;
+	TextLayout* cached = collapsed_reasoning ? nullptr : GetTextLayout(row, layout_width);
 	if (!collapsed_reasoning && cached == nullptr) {
 		return;
 	}
 
+	NativeTranscriptBubbleLayout bubble_layout{};
+	if (message) {
+		bubble_layout = ComputeNativeTranscriptBubbleLayout(viewport_width,
+			user,
+			cached->measured_width,
+			cached->measured_height,
+			row.media_ids.size());
+	}
 	const std::int32_t measured_height = static_cast<std::int32_t>(
 		collapsed_reasoning
 			? kCollapsedReasoningHeight
-			: std::ceil(
+			: message
+				? bubble_layout.row_height
+				: std::ceil(
 				  cached->measured_height + 2.0F * kRowVerticalPadding + kLabelHeight + kTextGap +
 				  static_cast<float>(row.media_ids.size()) * (kThumbnailHeight + kMediaGap)));
 	if (row.height != measured_height) {
@@ -818,50 +897,61 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 	}
 	const float row_top = static_cast<float>(model_.RowTop(index) - scroll_offset_);
 	const float row_height = static_cast<float>(model_.RowAt(index).height);
-	const float content_left = user ? viewport_width - kHorizontalPadding - content_width : kHorizontalPadding;
+	const float content_left = message ? bubble_layout.content_left : kHorizontalPadding;
+	const float content_width = message ? bubble_layout.content_width : available_width;
 
-	if (user) {
+	if (message) {
 		const D2D1_ROUNDED_RECT bubble = D2D1::RoundedRect(
 			D2D1::RectF(
-				content_left - 12.0F,
-				row_top + 5.0F,
-				viewport_width - kHorizontalPadding + 12.0F,
-				row_top + row_height - 5.0F),
-			10.0F,
-			10.0F);
-		render_target_->FillRoundedRectangle(bubble, user_brush_.Get());
+				bubble_layout.bubble.left,
+				row_top + bubble_layout.bubble.top,
+				bubble_layout.bubble.right,
+				row_top + bubble_layout.bubble.bottom),
+			11.0F,
+			11.0F);
+		render_target_->FillRoundedRectangle(bubble, user ? user_brush_.Get() : assistant_brush_.Get());
 	}
 
-	const std::wstring_view row_label = RowLabel(row.kind);
-	std::wstring expandable_label;
-	std::wstring_view label = row_label;
-	if (row.kind == NativeTranscriptRowKind::Reasoning &&
-		HasFlag(row.flags, NativeTranscriptRowFlags::Expandable)) {
-		expandable_label = collapsed_reasoning ? L"▸ " : L"▾ ";
-		expandable_label.append(row_label);
-		label = expandable_label;
+	if (!message) {
+		const std::wstring_view row_label = RowLabel(row.kind);
+		std::wstring reasoning_label;
+		std::wstring_view label = row_label;
+		if (row.kind == NativeTranscriptRowKind::Reasoning) {
+			const bool expandable = HasFlag(row.flags, NativeTranscriptRowFlags::Expandable);
+			reasoning_label = NativeTranscriptReasoningLabel(
+				row.duration_ms,
+				expandable,
+				expandable && !collapsed_reasoning,
+				HasFlag(row.flags, NativeTranscriptRowFlags::Streaming));
+			label = reasoning_label;
+		}
+		const D2D1_RECT_F label_rect = D2D1::RectF(
+			content_left,
+			row_top + kRowVerticalPadding,
+			content_left + content_width,
+			row_top + kRowVerticalPadding + kLabelHeight);
+		render_target_->DrawTextW(
+			label.data(),
+			static_cast<UINT32>(label.size()),
+			label_format_.Get(),
+			label_rect,
+			row.kind == NativeTranscriptRowKind::Error ? primary_brush_.Get() : muted_brush_.Get(),
+			D2D1_DRAW_TEXT_OPTIONS_CLIP);
 	}
-	const D2D1_RECT_F label_rect = D2D1::RectF(
-		content_left,
-		row_top + kRowVerticalPadding,
-		content_left + content_width,
-		row_top + kRowVerticalPadding + kLabelHeight);
-	render_target_->DrawTextW(
-		label.data(),
-		static_cast<UINT32>(label.size()),
-		label_format_.Get(),
-		label_rect,
-		row.kind == NativeTranscriptRowKind::Error ? primary_brush_.Get() : muted_brush_.Get(),
-		D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
 	if (cached != nullptr) {
-		const D2D1_POINT_2F origin = D2D1::Point2F(
-			content_left, row_top + kRowVerticalPadding + kLabelHeight + kTextGap);
+		const float text_top = message
+			? row_top + bubble_layout.text_top
+			: row_top + kRowVerticalPadding + kLabelHeight + kTextGap;
+		const D2D1_POINT_2F origin = D2D1::Point2F(content_left, text_top);
 		DrawSelection(index, *cached, origin.x, origin.y);
-		render_target_->DrawTextLayout(origin, cached->layout.Get(), primary_brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+		render_target_->DrawTextLayout(origin,
+			cached->layout.Get(),
+			user ? user_foreground_brush_.Get() : primary_brush_.Get(),
+			D2D1_DRAW_TEXT_OPTIONS_CLIP);
 		DrawMedia(row, content_left, origin.y + cached->measured_height + kMediaGap, content_width);
 	}
-	if (!user) {
+	if (!message) {
 		render_target_->DrawLine(
 			D2D1::Point2F(kHorizontalPadding, row_top + row_height - 1.0F),
 			D2D1::Point2F(viewport_width - kHorizontalPadding, row_top + row_height - 1.0F),
@@ -944,7 +1034,9 @@ void NativeTranscriptView::DrawMedia(const NativeTranscriptRow& row, float left,
 					bitmap, &destination, 1.0F, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
 			}
 		} else {
-			render_target_->FillRoundedRectangle(D2D1::RoundedRect(slot, 8.0F, 8.0F), user_brush_.Get());
+			ID2D1SolidColorBrush* placeholder =
+				row.kind == NativeTranscriptRowKind::User ? user_brush_.Get() : assistant_brush_.Get();
+			render_target_->FillRoundedRectangle(D2D1::RoundedRect(slot, 8.0F, 8.0F), placeholder);
 			const auto found = media_cache_.find(image_id);
 			const bool failed = found != media_cache_.end() && found->second.failed;
 			const wchar_t* label = failed ? L"图片不可用" : L"图片加载中…";
@@ -954,7 +1046,7 @@ void NativeTranscriptView::DrawMedia(const NativeTranscriptRow& row, float left,
 				label_length,
 				label_format_.Get(),
 				D2D1::RectF(left + 12.0F, top + 12.0F, left + width - 12.0F, top + 36.0F),
-				muted_brush_.Get());
+				row.kind == NativeTranscriptRowKind::User ? user_foreground_brush_.Get() : muted_brush_.Get());
 		}
 		top += kThumbnailHeight + kMediaGap;
 	}
@@ -1185,15 +1277,24 @@ std::optional<NativeTranscriptView::SelectionPoint> NativeTranscriptView::HitTes
 		return std::nullopt;
 	}
 	const bool user = row.kind == NativeTranscriptRowKind::User;
+	const bool message = user || row.kind == NativeTranscriptRowKind::Assistant;
 	const float available_width = std::max(80.0F, viewport_width - 2.0F * kHorizontalPadding);
-	const float content_width = user ? std::max(80.0F, available_width * kUserWidthRatio) : available_width;
-	TextLayout* layout = GetTextLayout(row, content_width);
+	const float layout_width = message ? NativeTranscriptBubbleMaxContentWidth(viewport_width, user) : available_width;
+	TextLayout* layout = GetTextLayout(row, layout_width);
 	if (layout == nullptr) {
 		return std::nullopt;
 	}
-	const float content_left = user ? viewport_width - kHorizontalPadding - content_width : kHorizontalPadding;
-	const float text_top = static_cast<float>(model_.RowTop(index) - scroll_offset_) + kRowVerticalPadding +
-		kLabelHeight + kTextGap;
+	NativeTranscriptBubbleLayout bubble_layout{};
+	if (message) {
+		bubble_layout = ComputeNativeTranscriptBubbleLayout(viewport_width,
+			user,
+			layout->measured_width,
+			layout->measured_height,
+			row.media_ids.size());
+	}
+	const float content_left = message ? bubble_layout.content_left : kHorizontalPadding;
+	const float text_top = static_cast<float>(model_.RowTop(index) - scroll_offset_) +
+		(message ? bubble_layout.text_top : kRowVerticalPadding + kLabelHeight + kTextGap);
 	if (y <= text_top) {
 		return SelectionPoint{row.id, 0};
 	}
@@ -1321,8 +1422,10 @@ void NativeTranscriptView::CopySelectionToClipboard() {
 
 void NativeTranscriptView::ShowContextMenu(POINT screen_point) {
 	HMENU menu = CreatePopupMenu();
-	AppendMenuW(menu, MF_STRING | (HasSelection() ? MF_ENABLED : MF_GRAYED), kContextCopy, L"复制\tCtrl+C");
-	AppendMenuW(menu, MF_STRING, kContextSelectAll, L"全选\tCtrl+A");
+	InsertNativeMenuItem(
+		menu, kContextCopyItem, kContextCopy, nullptr, HasSelection() ? MFS_ENABLED : MFS_DISABLED);
+	InsertNativeMenuItem(menu, kContextSelectAllItem, kContextSelectAll);
+	ApplyNativeMenuBackground(menu, dark_theme_);
 	const UINT command = TrackPopupMenu(
 		menu,
 		TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
@@ -1450,6 +1553,7 @@ NativeTranscriptView::TextLayout* NativeTranscriptView::GetTextLayout(
 	if (FAILED(replacement.layout->GetMetrics(&metrics))) {
 		return nullptr;
 	}
+	replacement.measured_width = std::max(0.0F, metrics.widthIncludingTrailingWhitespace);
 	replacement.measured_height = std::max(18.0F, metrics.height);
 	if (found == layout_cache_.end()) {
 		found = layout_cache_.emplace(row.id, std::move(replacement)).first;

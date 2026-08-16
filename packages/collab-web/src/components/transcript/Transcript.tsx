@@ -71,9 +71,47 @@ function Row({
 	);
 }
 
-function ThinkingBlock({ text, redacted, pending }: { text: string; redacted?: boolean; pending: boolean }): ReactNode {
+const MAX_REASONING_DURATION_MS = 7 * 24 * 60 * 60 * 1_000;
+
+function completedDurationMs(startedAt: number, completedAt?: string): number | undefined {
+	if (completedAt === undefined || !Number.isFinite(startedAt)) return undefined;
+	const completed = Date.parse(completedAt);
+	if (Number.isNaN(completed)) return undefined;
+	const duration = completed - startedAt;
+	if (duration < 0 || duration > MAX_REASONING_DURATION_MS) return undefined;
+	return Math.round(duration);
+}
+
+function formatWorkDuration(durationMs: number): string {
+	const roundedSeconds = Math.max(1, Math.round(durationMs / 1_000));
+	const hours = Math.floor(roundedSeconds / 3_600);
+	const minutes = Math.floor((roundedSeconds % 3_600) / 60);
+	const seconds = roundedSeconds % 60;
+	const parts: string[] = [];
+	if (hours > 0) parts.push(`${hours}h`);
+	if (minutes > 0) parts.push(`${minutes}m`);
+	if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
+	return parts.join(" ");
+}
+
+function ThinkingBlock({
+	text,
+	redacted,
+	pending,
+	durationMs,
+}: {
+	text: string;
+	redacted?: boolean;
+	pending: boolean;
+	durationMs?: number;
+}): ReactNode {
 	const [open, setOpen] = useState(pending && !redacted);
 	const contentId = useId();
+	const label = pending
+		? "thinking…"
+		: durationMs === undefined
+			? "thinking"
+			: `Worked for ${formatWorkDuration(durationMs)}`;
 	useEffect(() => {
 		if (!pending) setOpen(false);
 	}, [pending]);
@@ -86,8 +124,9 @@ function ThinkingBlock({ text, redacted, pending }: { text: string; redacted?: b
 				aria-controls={contentId}
 				onClick={() => setOpen(v => !v)}
 			>
+				{label}
+				{redacted ? " · redacted" : ""}
 				<ChevronRight aria-hidden size={12} className={`tr-chev${open ? " tr-chev--open" : ""}`} />
-				thinking{redacted ? " · redacted" : ""}
 			</button>
 			{open && (
 				<div id={contentId} className="tr-think-body">
@@ -468,6 +507,7 @@ function AssistantBody({
 	results,
 	active,
 	pending,
+	completedAt,
 	host,
 }: {
 	message: AssistantMessage;
@@ -475,21 +515,53 @@ function AssistantBody({
 	active: ReadonlyMap<string, ActiveTool>;
 	/** Still streaming — suppress stop-reason chips on the partial message. */
 	pending: boolean;
+	completedAt?: string;
 	host?: ToolRenderHost;
 }): ReactNode {
-	const blocks = message.content.map((block, i) => {
+	const durationMs = completedDurationMs(message.timestamp, completedAt);
+	const blocks: ReactNode[] = [];
+	for (let index = 0; index < message.content.length; index++) {
+		const block = message.content[index];
+		if (block.type === "thinking" || block.type === "redactedThinking") {
+			const reasoning: string[] = [];
+			let redactedOnly = true;
+			let next = index;
+			for (; next < message.content.length; next++) {
+				const reasoningBlock = message.content[next];
+				if (reasoningBlock.type === "thinking") {
+					if (reasoningBlock.thinking.length > 0) reasoning.push(reasoningBlock.thinking);
+					redactedOnly = false;
+				} else if (reasoningBlock.type === "redactedThinking") {
+					reasoning.push("[redacted by provider]");
+				} else {
+					break;
+				}
+			}
+			blocks.push(
+				<ThinkingBlock
+					key={`thinking-${index}`}
+					text={reasoning.join("\n\n")}
+					redacted={redactedOnly}
+					pending={pending}
+					durationMs={durationMs}
+				/>,
+			);
+			index = next - 1;
+			continue;
+		}
 		switch (block.type) {
-			case "thinking":
-				return <ThinkingBlock key={i} text={block.thinking} pending={pending} />;
-			case "redactedThinking":
-				return <ThinkingBlock key={i} text="" redacted pending={pending} />;
 			case "text":
-				return <Markdown key={i} text={block.text} />;
+				blocks.push(
+					<div key={index} className="tr-assistant-bubble">
+						<Markdown text={block.text} />
+					</div>,
+				);
+				break;
 			case "toolCall": {
 				const act = active.get(block.id);
 				const result = results.get(block.id);
 				const args = act?.args ?? block.arguments;
-				return (
+				blocks.push(
 					<ToolCard
 						key={block.id}
 						toolCallId={block.id}
@@ -500,13 +572,14 @@ function AssistantBody({
 						host={host}
 						running={!result && (act !== undefined || pending)}
 						partialResult={act?.partialResult}
-					/>
+					/>,
 				);
+				break;
 			}
 			default:
-				return null;
+				break;
 		}
-	});
+	}
 	const stop = message.stopReason;
 	const failed = !pending && (stop === "error" || stop === "aborted");
 	return (
@@ -586,7 +659,14 @@ const EntryRow = memo(function EntryRow({
 				case "assistant":
 					return (
 						<Row kind="assistant" speaker="agent" title={entry.timestamp}>
-							<AssistantBody message={msg} results={results} active={active} pending={false} host={host} />
+							<AssistantBody
+								message={msg}
+								results={results}
+								active={active}
+								pending={false}
+								completedAt={entry.timestamp}
+								host={host}
+							/>
 						</Row>
 					);
 				default:
@@ -679,6 +759,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	);
 	const nativeEligible = compact !== true && desktop.nativeTranscriptAvailable;
 	const [nativeEnabled, setNativeEnabled] = useState(false);
+	const nativeSurfaceVisible = nativeEnabled && !nativeSurfaceBlocked;
 	const [nativeRevision, setNativeRevision] = useState(0);
 	const nativeRows = useMemo(
 		() => (nativeEligible ? projectNativeTranscript(entries) : []),
@@ -815,6 +896,11 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		const element = rootRef.current;
 		if (!nativeEnabled || element === null) return;
 		if (nativeSurfaceBlocked) {
+			// The Web transcript is normally replaced by a lightweight placeholder
+			// while the native renderer is active. When a Web popover temporarily
+			// hides that renderer, position the freshly mounted fallback at the tail
+			// before paint instead of flashing the oldest conversation rows.
+			element.scrollTop = element.scrollHeight;
 			void desktop.hideNativeTranscript();
 			return;
 		}
@@ -890,7 +976,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		<div
 			ref={rootRef}
 			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
-			data-native={nativeEnabled ? "true" : undefined}
+			data-native={nativeSurfaceVisible ? "true" : undefined}
 			onScroll={() => {
 				const el = rootRef.current;
 				if (el !== null) {
@@ -898,7 +984,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				}
 			}}
 		>
-			{nativeEnabled ? (
+			{nativeSurfaceVisible ? (
 				<div className="tr-native-placeholder" />
 			) : (
 				<>

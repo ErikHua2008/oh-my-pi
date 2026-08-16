@@ -16,6 +16,44 @@ namespace {
 
 constexpr std::size_t kStderrTailBytes = 4096;
 
+[[nodiscard]] bool IsDevelopmentRepository(const std::filesystem::path& directory) {
+	std::error_code error;
+	return std::filesystem::is_regular_file(directory / L"packages" / L"coding-agent" / L"src" / L"cli.ts", error) &&
+		!error;
+}
+
+[[nodiscard]] std::filesystem::path CurrentExecutablePath() {
+	std::wstring path(32768, L'\0');
+	const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+	if (length == 0 || length >= path.size()) {
+		return {};
+	}
+	path.resize(length);
+	return std::filesystem::path(std::move(path));
+}
+
+[[nodiscard]] std::wstring SearchExecutable(std::wstring_view name);
+
+[[nodiscard]] std::vector<std::wstring> DevelopmentRepositoryCommand(
+	std::wstring_view repository, bool force_source) {
+	std::filesystem::path coding_agent(repository);
+	coding_agent /= L"packages";
+	coding_agent /= L"coding-agent";
+
+	std::wstring entrypoint = L"src/cli.ts";
+	if (!force_source) {
+		std::error_code error;
+		if (std::filesystem::is_regular_file(coding_agent / L"dist" / L"cli.js", error) && !error) {
+			entrypoint = L"dist/cli.js";
+		}
+	}
+
+	auto command = std::vector<std::wstring>{SearchExecutable(L"bun")};
+	command.push_back(L"--cwd=" + coding_agent.wstring());
+	command.push_back(std::move(entrypoint));
+	return command;
+}
+
 struct PipePair {
 	HANDLE read = nullptr;
 	HANDLE write = nullptr;
@@ -292,6 +330,7 @@ void CoreProcess::Monitor(CoreLaunch launch) {
 	CoreOutputParser parser;
 	const ULONGLONG started_at = GetTickCount64();
 	bool startup_finished = false;
+	bool startup_slow_emitted = false;
 	std::string startup_error;
 	std::array<char, 4096> buffer{};
 
@@ -337,6 +376,13 @@ void CoreProcess::Monitor(CoreLaunch launch) {
 			break;
 		}
 		const auto elapsed = std::chrono::milliseconds(GetTickCount64() - started_at);
+		if (!startup_slow_emitted && elapsed >= launch.startup_slow_threshold) {
+			startup_slow_emitted = true;
+			Emit(CoreEvent{CoreEventKind::StartupSlow,
+				{},
+				"OMP Core is running but has not emitted its startup links yet.",
+				0});
+		}
 		if (elapsed >= launch.startup_timeout) {
 			startup_error = "waiting for omp core startup timed out";
 			break;
@@ -446,26 +492,50 @@ void CoreProcess::CleanupHandles() {
 }
 
 std::vector<std::wstring> ResolveOmpCommand(std::wstring_view configured_omp_bin, std::wstring_view configured_dev_repo) {
-	std::wstring dev_repo = EnvironmentValue(L"OMP_CPP_SHELL_DEV_REPO").value_or(L"");
-	if (dev_repo.empty()) {
-		dev_repo = configured_dev_repo;
+	// An explicit development override means exactly that: run the TypeScript
+	// source tree so Core edits are visible without rebuilding the bundle.
+	if (const auto explicit_dev_repo = EnvironmentValue(L"OMP_CPP_SHELL_DEV_REPO");
+		explicit_dev_repo && !explicit_dev_repo->empty()) {
+		return DevelopmentRepositoryCommand(*explicit_dev_repo, true);
 	}
-	if (!dev_repo.empty()) {
-		std::wstring coding_agent = dev_repo;
-		while (!coding_agent.empty() && (coding_agent.back() == L'\\' || coding_agent.back() == L'/')) {
-			coding_agent.pop_back();
-		}
-		coding_agent.append(L"\\packages\\coding-agent");
-		auto command = std::vector<std::wstring>{SearchExecutable(L"bun")};
-		command.push_back(L"--cwd=" + coding_agent);
-		command.push_back(L"src/cli.ts");
-		return command;
+
+	// Normal launches from a configured or auto-detected checkout prefer the
+	// single-file bundle.  Loading thousands of source modules dominates cold
+	// startup on Windows; fall back to source only when the bundle is absent.
+	if (!configured_dev_repo.empty() && IsDevelopmentRepository(std::filesystem::path(configured_dev_repo))) {
+		return DevelopmentRepositoryCommand(configured_dev_repo, false);
 	}
+	if (const auto detected = FindDevelopmentRepository(CurrentExecutablePath())) {
+		return DevelopmentRepositoryCommand(detected->wstring(), false);
+	}
+
 	std::wstring omp_bin = EnvironmentValue(L"OMP_CPP_SHELL_OMP_BIN").value_or(L"");
 	if (omp_bin.empty()) {
 		omp_bin = configured_omp_bin;
 	}
 	return {SearchExecutable(omp_bin.empty() ? L"omp" : omp_bin)};
+}
+
+std::optional<std::filesystem::path> FindDevelopmentRepository(
+	const std::filesystem::path& executable_or_directory) {
+	if (executable_or_directory.empty()) {
+		return std::nullopt;
+	}
+	std::error_code error;
+	std::filesystem::path current = std::filesystem::is_directory(executable_or_directory, error)
+		? executable_or_directory
+		: executable_or_directory.parent_path();
+	for (int depth = 0; depth < 12 && !current.empty(); ++depth) {
+		if (IsDevelopmentRepository(current)) {
+			return current;
+		}
+		const std::filesystem::path parent = current.parent_path();
+		if (parent == current) {
+			break;
+		}
+		current = parent;
+	}
+	return std::nullopt;
 }
 
 } // namespace omp::shell

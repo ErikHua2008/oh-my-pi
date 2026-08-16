@@ -149,6 +149,9 @@ ShellConfig LoadConfig(const std::filesystem::path& path) {
 		config.window_y = OptionalNumber<int>(json, "windowY");
 		config.window_width = OptionalNumber<int>(json, "windowWidth");
 		config.window_height = OptionalNumber<int>(json, "windowHeight");
+		if (const auto theme = json.find("darkTheme"); theme != json.end() && theme->is_boolean()) {
+			config.dark_theme = theme->get<bool>();
+		}
 		config.window_maximized = json.value("windowMaximized", false);
 		config.close_to_tray = json.value("closeToTray", true);
 		return config;
@@ -178,6 +181,7 @@ bool SaveConfig(const std::filesystem::path& path, const ShellConfig& config, st
 	json["windowY"] = config.window_y ? Json(*config.window_y) : Json(nullptr);
 	json["windowWidth"] = config.window_width ? Json(*config.window_width) : Json(nullptr);
 	json["windowHeight"] = config.window_height ? Json(*config.window_height) : Json(nullptr);
+	json["darkTheme"] = config.dark_theme ? Json(*config.dark_theme) : Json(nullptr);
 	json["windowMaximized"] = config.window_maximized;
 	json["closeToTray"] = config.close_to_tray;
 

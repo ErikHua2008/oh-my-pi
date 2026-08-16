@@ -184,8 +184,8 @@
 }
 
 .sh-transcript {
-	width: 100%;
-	max-width: 748px;
+	width: calc(100% - 48px);
+	max-width: 760px;
 	min-height: 0;
 	display: flex;
 	flex-direction: column;
@@ -221,6 +221,12 @@
 .sh-rail > :last-child {
 	flex: 1;
 	min-height: 0;
+}
+
+@media (max-width: 720px) {
+	.sh-transcript {
+		width: calc(100% - 24px);
+	}
 }
 
 .sh-rail-header {

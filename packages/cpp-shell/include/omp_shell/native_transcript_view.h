@@ -35,6 +35,7 @@ public:
 	[[nodiscard]] bool Create(HWND parent, HINSTANCE instance);
 	void Destroy();
 	void SetBounds(const RECT& bounds);
+	void SetOcclusion(std::optional<RECT> occlusion);
 	void SetVisible(bool visible);
 	void SetDarkTheme(bool dark);
 	[[nodiscard]] bool IsVisible() const noexcept { return visible_; }
@@ -57,6 +58,7 @@ private:
 		float width = 0.0F;
 		std::wstring text;
 		Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+		float measured_width = 0.0F;
 		float measured_height = 0.0F;
 	};
 	struct SelectionPoint final {
@@ -81,6 +83,7 @@ private:
 	[[nodiscard]] bool RegisterWindowClass(HINSTANCE instance) const;
 	[[nodiscard]] HRESULT EnsureDeviceResources();
 	void DiscardDeviceResources();
+	void ApplyOcclusion();
 	void Paint();
 	void DrawRow(std::size_t index, float viewport_width);
 	void DrawOverlayControls(float viewport_width, float viewport_height);
@@ -123,6 +126,8 @@ private:
 	void MaybeRequestEarlier();
 
 	HWND window_ = nullptr;
+	RECT bounds_{};
+	std::optional<RECT> occlusion_;
 	NativeTranscriptModel model_;
 	Microsoft::WRL::ComPtr<ID2D1Factory> d2d_factory_;
 	Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_factory_;
@@ -131,6 +136,8 @@ private:
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> primary_brush_;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> muted_brush_;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> user_brush_;
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> user_foreground_brush_;
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> assistant_brush_;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> line_brush_;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> selection_brush_;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> scrollbar_brush_;

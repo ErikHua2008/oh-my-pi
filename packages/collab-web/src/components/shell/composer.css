@@ -59,7 +59,7 @@
 	z-index: 10;
 	width: calc(100% - 48px);
 	max-width: 760px;
-	margin: 0 auto 22px;
+	margin: 8px auto 22px;
 	padding-bottom: env(safe-area-inset-bottom, 0px);
 	background: transparent;
 }
@@ -263,25 +263,80 @@
 }
 
 .sh-thinking-picker {
+	position: relative;
 	flex: none;
+	min-width: 0;
+}
+
+.sh-thinking-picker-trigger {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
 	max-width: 112px;
 	height: 28px;
-	padding: 0 22px 0 7px;
+	padding: 0 7px;
 	font: 500 12px / 28px var(--font-mono);
 	color: var(--fg-muted);
-	background-color: transparent;
+	background: transparent;
 	border: 0;
 	border-radius: var(--radius-sm);
 }
 
-.sh-thinking-picker:hover:not(:disabled) {
+.sh-thinking-picker-trigger:hover:not(:disabled),
+.sh-thinking-picker-trigger[aria-expanded="true"] {
 	color: var(--fg);
-	background-color: var(--bg-hover);
+	background: var(--bg-hover);
 }
 
-.sh-thinking-picker:disabled {
+.sh-thinking-picker-trigger:disabled {
 	color: var(--fg-faint);
 	cursor: default;
+}
+
+.sh-thinking-picker-name {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sh-thinking-picker-menu {
+	position: absolute;
+	left: 0;
+	bottom: calc(100% + 8px);
+	z-index: 20;
+	width: max-content;
+	min-width: 148px;
+	max-height: 280px;
+	overflow-y: auto;
+	padding: 4px;
+	background: var(--bg-raised);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow-pop);
+}
+
+.sh-thinking-picker-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+	width: 100%;
+	padding: 7px 9px;
+	font: 500 12px / 1.4 var(--font-mono);
+	color: var(--fg);
+	background: transparent;
+	border: 0;
+	border-radius: var(--radius-sm);
+	text-align: left;
+}
+
+.sh-thinking-picker-item:hover {
+	background: var(--bg-hover);
+}
+
+.sh-thinking-picker-on {
+	background: var(--bg-selected);
 }
 
 .sh-composer-send {
@@ -570,7 +625,7 @@
 		display: none;
 	}
 
-	.sh-thinking-picker {
+	.sh-thinking-picker-trigger {
 		min-height: 44px;
 	}
 
@@ -591,6 +646,7 @@
 	.sh-composer-submit,
 	.sh-composer-controls .sh-btn,
 	.sh-model-picker-item,
+	.sh-thinking-picker-item,
 	.sh-ask-option {
 		min-height: 44px;
 	}

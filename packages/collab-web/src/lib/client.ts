@@ -154,6 +154,7 @@ export class GuestClient {
 	#uiRequest: CollabUiRequest | null = null;
 	#uiRequestQueue: CollabUiRequest[] = [];
 	#models: WireModel[] | null = null;
+	#modelListRequested = false;
 	#historyRemaining = 0;
 	#historyLoading = false;
 	#notices: readonly Notice[] = [];
@@ -228,6 +229,8 @@ export class GuestClient {
 	}
 
 	sendModelList(): void {
+		if (this.#models !== null || this.#modelListRequested) return;
+		this.#modelListRequested = true;
 		this.#socket.send({ t: "model-list" });
 	}
 
@@ -498,6 +501,7 @@ export class GuestClient {
 				else this.#uiRequestQueue = this.#uiRequestQueue.filter(request => request.reqId !== frame.reqId);
 				break;
 			case "model-list":
+				this.#modelListRequested = false;
 				this.#models = frame.models;
 				break;
 			case "transcript": {

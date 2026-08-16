@@ -179,7 +179,7 @@ describe("collab session-room model frames", () => {
 		expect(welcome.state.availableThinkingLevels).toEqual(["off", "auto", "low", "medium", "high"]);
 	});
 
-	it("replies to model-list with the available models mapped to wire shape after discovery", async () => {
+	it("replies to model-list immediately while background discovery continues", async () => {
 		const guest = await joinAsGuest(host.link, "model-browser");
 		guestCleanups.push(() => guest.socket.close());
 		const welcome = await guest.nextFrame();
@@ -191,7 +191,8 @@ describe("collab session-room model frames", () => {
 		// CollabFrame unions the guest `model-list` and host `model-list`
 		// variants under the same discriminant; the reply is the host variant.
 		if (!("models" in reply)) throw new Error("expected host model-list frame with models");
-		// Background discovery settles before the list is served (cold-start providers).
+		// The current registry is served without waiting; discovery is still awaited
+		// so the host can push a follow-up list if it adds models.
 		expect(harness.refreshCount).toBe(1);
 		expect(reply.models).toEqual([
 			{ id: "flash-lite", name: "Flash Lite", provider: "google", contextWindow: 1_000_000 },

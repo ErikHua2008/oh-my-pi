@@ -639,11 +639,15 @@ export class CollabHost {
 			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
 	}
 
-	/** Targeted reply to `model-list`: current available models after background discovery settles. */
+	/** Reply immediately from the local registry, then refresh the menu if background discovery adds models. */
 	async #handleModelList(fromPeer: number): Promise<void> {
+		const initial = this.#ctx.session.getAvailableModels().map(toWireModel);
+		this.#socket?.send({ t: "model-list", models: initial }, fromPeer);
 		await this.#ctx.session.modelRegistry.awaitBackgroundRefresh();
-		const models = this.#ctx.session.getAvailableModels().map(toWireModel);
-		this.#socket?.send({ t: "model-list", models }, fromPeer);
+		const refreshed = this.#ctx.session.getAvailableModels().map(toWireModel);
+		if (JSON.stringify(refreshed) !== JSON.stringify(initial)) {
+			this.#socket?.send({ t: "model-list", models: refreshed }, fromPeer);
+		}
 	}
 
 	/**

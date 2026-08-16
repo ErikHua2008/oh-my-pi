@@ -82,23 +82,25 @@ describe("native transcript projection", () => {
 	});
 
 	it("separates completed reasoning into a collapsed expandable native row", () => {
+		const completedAt = "2026-08-16T00:00:00Z";
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [
 				{ type: "thinking", thinking: "需要保留但默认隐藏的详细思考" },
+				{ type: "thinking", thinking: "连续的思考片段应合并到同一个折叠项" },
 				{ type: "text", text: "这是最终回答。" },
 			],
 			model: "test/model",
 			usage: usage(),
 			stopReason: "stop",
-			timestamp: 2,
+			timestamp: Date.parse(completedAt) - 539_000,
 		};
 		const entries: SessionEntry[] = [
 			{
 				type: "message",
 				id: "assistant-with-reasoning",
 				parentId: null,
-				timestamp: "2026-08-16T00:00:00Z",
+				timestamp: completedAt,
 				message,
 			},
 		];
@@ -106,12 +108,14 @@ describe("native transcript projection", () => {
 		const projected = projectNativeTranscript(entries);
 		expect(projected).toHaveLength(2);
 		expect(projected[0]).toMatchObject({
-			id: "assistant-with-reasoning:reasoning:0",
+			id: "assistant-with-reasoning:reasoning",
 			kind: "reasoning",
 			flags: 2,
 			estimatedHeight: 42,
-			text: "需要保留但默认隐藏的详细思考",
+			durationMs: 539_000,
 		});
+		expect(projected[0]?.text).toContain("需要保留但默认隐藏的详细思考");
+		expect(projected[0]?.text).toContain("连续的思考片段应合并到同一个折叠项");
 		expect(projected[1]).toMatchObject({
 			id: "assistant-with-reasoning",
 			kind: "assistant",

@@ -153,8 +153,8 @@ describe("Composer session metadata and controls", () => {
 		const html = renderToStaticMarkup(<Composer client={client} snapshot={snap} />);
 
 		expect(html).toContain('title="change thinking level"');
-		expect(html).toContain('<option value="auto" selected="">Auto</option>');
-		expect(html).toContain('<option value="high">High</option>');
+		expect(html).toContain('aria-haspopup="menu"');
+		expect(html).toContain('class="sh-thinking-picker-name">Auto</span>');
 	});
 
 	it("hides unavailable thinking controls and disables them for read-only sessions", () => {
@@ -176,7 +176,7 @@ describe("Composer session metadata and controls", () => {
 		);
 		const readOnlyHtml = renderToStaticMarkup(<Composer client={client} snapshot={readOnly} />);
 		expect(readOnlyHtml).toContain('title="change thinking level"');
-		expect(readOnlyHtml).toContain('class="sh-thinking-picker" disabled=""');
+		expect(readOnlyHtml).toContain('class="sh-thinking-picker-trigger" disabled=""');
 	});
 });
 

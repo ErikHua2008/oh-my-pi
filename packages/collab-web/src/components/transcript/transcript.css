@@ -10,7 +10,7 @@
 	height: 100%;
 	overflow-x: hidden;
 	overflow-y: auto;
-	padding: 24px 28px 176px;
+	padding: 24px 0 176px;
 	color: var(--fg);
 	font-family: var(--font-ui);
 	font-size: 14px;
@@ -104,7 +104,17 @@
 	max-width: 100%;
 	padding: 10px 14px;
 	border-radius: var(--radius-xl) var(--radius-xl) var(--radius-sm) var(--radius-xl);
-	background: var(--bg-subtle);
+	background: var(--chat-user-bubble);
+	color: var(--chat-user-fg);
+}
+
+.tr-assistant-bubble {
+	width: fit-content;
+	max-width: min(760px, 92%);
+	padding: 10px 14px;
+	border-radius: var(--radius-xl) var(--radius-xl) var(--radius-xl) var(--radius-sm);
+	background: var(--chat-assistant-bubble);
+	color: var(--chat-assistant-fg);
 }
 
 .tr-local-files {
@@ -200,6 +210,10 @@
 .tr-row--assistant .tr-md {
 	font-size: 16px;
 	line-height: 28px;
+}
+
+.tr-assistant-bubble .tr-md {
+	width: auto;
 }
 
 .tr-row--custom,
@@ -631,6 +645,11 @@
 	padding: 8px 10px;
 }
 
+.tr-root--compact .tr-assistant-bubble {
+	max-width: 94%;
+	padding: 8px 10px;
+}
+
 .tr-root--compact .tr-divider {
 	margin-bottom: 12px;
 	font-size: 10px;
@@ -672,8 +691,8 @@
 }
 
 @media (max-width: 720px) {
-	.tr-root {
-		padding: 20px 12px 160px;
+	.tr-root:not(.tr-root--compact) {
+		padding: 20px 0 160px;
 	}
 
 	.tr-row {

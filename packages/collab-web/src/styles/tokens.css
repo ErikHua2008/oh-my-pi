@@ -16,6 +16,10 @@
 	--bg-overlay: #e9ecf2;
 	--bg-hover: rgb(38 49 72 / 6%);
 	--bg-selected: rgb(38 49 72 / 10%);
+	--chat-user-bubble: #cbe7ff;
+	--chat-user-fg: #0f1115;
+	--chat-assistant-bubble: #f1f2f4;
+	--chat-assistant-fg: #0f1115;
 
 	/* text */
 	--fg: #0f1115;
@@ -76,6 +80,10 @@
 	--bg-overlay: #e9ecf2;
 	--bg-hover: rgb(38 49 72 / 6%);
 	--bg-selected: rgb(38 49 72 / 10%);
+	--chat-user-bubble: #cbe7ff;
+	--chat-user-fg: #0f1115;
+	--chat-assistant-bubble: #f1f2f4;
+	--chat-assistant-fg: #0f1115;
 
 	--fg: #0f1115;
 	--fg-muted: #61666b;
@@ -114,6 +122,10 @@
 	--bg-overlay: #61666b;
 	--bg-hover: rgb(255 255 255 / 8%);
 	--bg-selected: rgb(255 255 255 / 14%);
+	--chat-user-bubble: #65c98f;
+	--chat-user-fg: #102419;
+	--chat-assistant-bubble: #2c2c2e;
+	--chat-assistant-fg: #f9fafb;
 
 	--fg: #f9fafb;
 	--fg-muted: #cfd3d6;
@@ -153,6 +165,10 @@
 		--bg-overlay: #61666b;
 		--bg-hover: rgb(255 255 255 / 8%);
 		--bg-selected: rgb(255 255 255 / 14%);
+		--chat-user-bubble: #65c98f;
+		--chat-user-fg: #102419;
+		--chat-assistant-bubble: #2c2c2e;
+		--chat-assistant-fg: #f9fafb;
 
 		--fg: #f9fafb;
 		--fg-muted: #cfd3d6;

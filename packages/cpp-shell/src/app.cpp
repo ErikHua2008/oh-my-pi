@@ -1,5 +1,6 @@
 #include "omp_shell/app.h"
 
+#include "omp_shell/native_menu.h"
 #include "omp_shell/path_utils.h"
 #include "omp_shell/resource.h"
 #include "omp_shell/text_utils.h"
@@ -48,232 +49,72 @@ constexpr int kConversationClientWidth = 808;
 constexpr int kCompactClientWidth = kSidebarWidth + kConversationClientWidth;
 constexpr int kAgentRailWidth = 288;
 
-constexpr COLORREF kMenuBackground = RGB(31, 31, 32);
-constexpr COLORREF kMenuHotBackground = RGB(55, 55, 58);
-constexpr COLORREF kMenuForeground = RGB(245, 245, 245);
-constexpr COLORREF kMenuDisabledForeground = RGB(132, 132, 136);
-constexpr COLORREF kMenuSeparator = RGB(70, 70, 73);
-
-struct DarkMenuItem {
-	const wchar_t* text;
-	bool menu_bar;
-	bool separator;
-};
-
-constexpr DarkMenuItem kShowWindowItem{L"打开 OMP", false, false};
-constexpr DarkMenuItem kTrayOpenProjectItem{L"打开项目...", false, false};
-constexpr DarkMenuItem kTrayExitItem{L"退出", false, false};
-constexpr DarkMenuItem kMenuSeparatorItem{nullptr, false, true};
-
-[[nodiscard]] HBRUSH DarkMenuBrush() noexcept {
-	static HBRUSH brush = CreateSolidBrush(kMenuBackground);
-	return brush;
-}
+constexpr NativeMenuItem kShowWindowItem{L"打开 OMP", false, false};
+constexpr NativeMenuItem kTrayOpenProjectItem{L"打开项目...", false, false};
+constexpr NativeMenuItem kTrayExitItem{L"退出", false, false};
+constexpr NativeMenuItem kMenuSeparatorItem{nullptr, false, true};
 
 [[nodiscard]] int DefaultCompactWindowWidth(UINT dpi) noexcept {
 	return MulDiv(kCompactClientWidth, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
 }
 
-[[nodiscard]] HBRUSH DarkMenuHotBrush() noexcept {
-	static HBRUSH brush = CreateSolidBrush(kMenuHotBackground);
-	return brush;
-}
-
-[[nodiscard]] HFONT CreateMenuFont(HWND window) noexcept {
-	NONCLIENTMETRICSW metrics{};
-	metrics.cbSize = sizeof(metrics);
-	const UINT dpi = window == nullptr ? USER_DEFAULT_SCREEN_DPI : GetDpiForWindow(window);
-	if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi) != FALSE) {
-		return CreateFontIndirectW(&metrics.lfMenuFont);
-	}
-	return nullptr;
-}
-
-void ApplyDarkMenuBackground(HMENU menu) noexcept {
-	MENUINFO info{};
-	info.cbSize = sizeof(info);
-	info.fMask = MIM_BACKGROUND | MIM_APPLYTOSUBMENUS;
-	info.hbrBack = DarkMenuBrush();
-	SetMenuInfo(menu, &info);
-}
-
-void InsertDarkMenuItem(
-	HMENU menu, const DarkMenuItem& item, UINT command, HMENU submenu = nullptr, UINT state = MFS_ENABLED) {
-	MENUITEMINFOW info{};
-	info.cbSize = sizeof(info);
-	info.fMask = MIIM_FTYPE | MIIM_DATA | MIIM_STATE;
-	info.fType = MFT_OWNERDRAW | (item.separator ? MFT_SEPARATOR : MFT_STRING);
-	info.fState = state;
-	info.dwItemData = reinterpret_cast<ULONG_PTR>(&item);
-	if (item.text != nullptr) {
-		info.fMask |= MIIM_STRING;
-		info.dwTypeData = const_cast<wchar_t*>(item.text);
-	}
-	if (submenu != nullptr) {
-		info.fMask |= MIIM_SUBMENU;
-		info.hSubMenu = submenu;
-	} else if (!item.separator) {
-		info.fMask |= MIIM_ID;
-		info.wID = command;
-	}
-	InsertMenuItemW(menu, static_cast<UINT>(GetMenuItemCount(menu)), TRUE, &info);
-}
-
-[[nodiscard]] bool MeasureDarkMenuItem(HWND window, MEASUREITEMSTRUCT* measure) noexcept {
-	if (measure == nullptr || measure->CtlType != ODT_MENU || measure->itemData == 0) {
-		return false;
-	}
-	const auto* item = reinterpret_cast<const DarkMenuItem*>(measure->itemData);
-	const UINT dpi = window == nullptr ? USER_DEFAULT_SCREEN_DPI : GetDpiForWindow(window);
-	if (item->separator) {
-		measure->itemWidth = 0;
-		measure->itemHeight = static_cast<UINT>(MulDiv(9, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI));
-		return true;
-	}
-
-	HDC dc = GetDC(window);
-	if (dc == nullptr) {
-		return false;
-	}
-	HFONT font = CreateMenuFont(window);
-	HGDIOBJ previous_font = nullptr;
-	if (font != nullptr) {
-		previous_font = SelectObject(dc, font);
-	}
-	const std::wstring_view text(item->text == nullptr ? L"" : item->text);
-	const std::size_t tab = text.find(L'\t');
-	const std::wstring_view label = text.substr(0, tab);
-	const std::wstring_view accelerator = tab == std::wstring_view::npos ? std::wstring_view{} : text.substr(tab + 1);
-	SIZE label_size{};
-	SIZE accelerator_size{};
-	GetTextExtentPoint32W(dc, label.data(), static_cast<int>(label.size()), &label_size);
-	if (!accelerator.empty()) {
-		GetTextExtentPoint32W(dc, accelerator.data(), static_cast<int>(accelerator.size()), &accelerator_size);
-	}
-	if (previous_font != nullptr) {
-		SelectObject(dc, previous_font);
-	}
-	if (font != nullptr) {
-		DeleteObject(font);
-	}
-	ReleaseDC(window, dc);
-
-	const int horizontal_padding = MulDiv(item->menu_bar ? 18 : 52, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
-	const int accelerator_gap = accelerator.empty()
-		? 0
-		: MulDiv(28, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI) + accelerator_size.cx;
-	measure->itemWidth = static_cast<UINT>(label_size.cx + horizontal_padding + accelerator_gap);
-	measure->itemHeight = static_cast<UINT>(item->menu_bar
-		? GetSystemMetricsForDpi(SM_CYMENU, dpi)
-		: std::max(MulDiv(28, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI),
-			static_cast<int>(label_size.cy) + MulDiv(8, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI)));
-	return true;
-}
-
-void DrawMenuText(HDC dc, std::wstring_view text, RECT bounds, UINT flags) noexcept {
-	if (text.empty()) {
-		return;
-	}
-	DrawTextW(dc, const_cast<wchar_t*>(text.data()), static_cast<int>(text.size()), &bounds, flags);
-}
-
-[[nodiscard]] bool DrawDarkMenuItem(HWND window, const DRAWITEMSTRUCT* draw) noexcept {
-	if (draw == nullptr || draw->CtlType != ODT_MENU || draw->itemData == 0) {
-		return false;
-	}
-	const auto* item = reinterpret_cast<const DarkMenuItem*>(draw->itemData);
-	const bool selected = (draw->itemState & (ODS_SELECTED | ODS_HOTLIGHT)) != 0;
-	FillRect(draw->hDC, &draw->rcItem, selected ? DarkMenuHotBrush() : DarkMenuBrush());
-	const UINT dpi = window == nullptr ? USER_DEFAULT_SCREEN_DPI : GetDpiForWindow(window);
-	if (item->separator) {
-		const int y = (draw->rcItem.top + draw->rcItem.bottom) / 2;
-		RECT separator{draw->rcItem.left + MulDiv(28, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI),
-			y,
-			draw->rcItem.right - MulDiv(8, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI),
-			y + 1};
-		HBRUSH brush = CreateSolidBrush(kMenuSeparator);
-		FillRect(draw->hDC, &separator, brush);
-		DeleteObject(brush);
-		return true;
-	}
-
-	const bool disabled = (draw->itemState & (ODS_DISABLED | ODS_GRAYED)) != 0;
-	SetBkMode(draw->hDC, TRANSPARENT);
-	SetTextColor(draw->hDC, disabled ? kMenuDisabledForeground : kMenuForeground);
-	HFONT font = CreateMenuFont(window);
-	HGDIOBJ previous_font = nullptr;
-	if (font != nullptr) {
-		previous_font = SelectObject(draw->hDC, font);
-	}
-	UINT text_flags = DT_SINGLELINE | DT_VCENTER;
-	if ((draw->itemState & ODS_NOACCEL) != 0) {
-		text_flags |= DT_HIDEPREFIX;
-	}
-	const std::wstring_view text(item->text == nullptr ? L"" : item->text);
-	if (item->menu_bar) {
-		DrawMenuText(draw->hDC, text, draw->rcItem, text_flags | DT_CENTER);
-	} else {
-		const int left_padding = MulDiv(28, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
-		const int right_padding = MulDiv(12, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
-		RECT text_bounds = draw->rcItem;
-		text_bounds.left += left_padding;
-		text_bounds.right -= right_padding;
-		const std::size_t tab = text.find(L'\t');
-		DrawMenuText(draw->hDC, text.substr(0, tab), text_bounds, text_flags | DT_LEFT);
-		if (tab != std::wstring_view::npos) {
-			DrawMenuText(draw->hDC, text.substr(tab + 1), text_bounds, text_flags | DT_RIGHT);
-		}
-		if ((draw->itemState & ODS_CHECKED) != 0) {
-			const int center_x = draw->rcItem.left + MulDiv(13, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
-			const int center_y = (draw->rcItem.top + draw->rcItem.bottom) / 2;
-			HPEN pen = CreatePen(PS_SOLID,
-				std::max(1, MulDiv(2, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI)),
-				disabled ? kMenuDisabledForeground : kMenuForeground);
-			HGDIOBJ previous_pen = SelectObject(draw->hDC, pen);
-			MoveToEx(draw->hDC, center_x - MulDiv(4, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI), center_y, nullptr);
-			LineTo(draw->hDC, center_x - MulDiv(1, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI), center_y + MulDiv(3, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI));
-			LineTo(draw->hDC, center_x + MulDiv(5, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI), center_y - MulDiv(4, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI));
-			SelectObject(draw->hDC, previous_pen);
-			DeleteObject(pen);
-		}
-	}
-	if (previous_font != nullptr) {
-		SelectObject(draw->hDC, previous_font);
-	}
-	if (font != nullptr) {
-		DeleteObject(font);
-	}
-	return true;
-}
-
 enum class PreferredAppMode : int {
 	Default = 0,
 	AllowDark = 1,
+	ForceDark = 2,
+	ForceLight = 3,
 };
 
 using SetPreferredAppModeFn = PreferredAppMode(WINAPI*)(PreferredAppMode);
 using AllowDarkModeForWindowFn = BOOL(WINAPI*)(HWND, BOOL);
 using FlushMenuThemesFn = void(WINAPI*)();
 using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+using ShouldAppsUseDarkModeFn = bool(WINAPI*)();
+using RefreshImmersiveColorPolicyStateFn = void(WINAPI*)();
 
 [[nodiscard]] HMODULE LoadUxTheme() noexcept {
 	return LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 }
 
-void EnableDarkApplicationMode() noexcept {
+[[nodiscard]] bool SystemPrefersDarkMode() noexcept {
+	const HMODULE theme = LoadUxTheme();
+	if (theme == nullptr) {
+		return false;
+	}
+	const auto should_use_dark = reinterpret_cast<ShouldAppsUseDarkModeFn>(
+		GetProcAddress(theme, MAKEINTRESOURCEA(132)));
+	const bool dark = should_use_dark != nullptr && should_use_dark();
+	FreeLibrary(theme);
+	return dark;
+}
+
+void ApplyApplicationThemeMode(bool dark) noexcept {
 	const HMODULE theme = LoadUxTheme();
 	if (theme == nullptr) {
 		return;
 	}
 	const auto set_preferred = reinterpret_cast<SetPreferredAppModeFn>(
 		GetProcAddress(theme, MAKEINTRESOURCEA(135)));
+	const auto flush_menus = reinterpret_cast<FlushMenuThemesFn>(
+		GetProcAddress(theme, MAKEINTRESOURCEA(136)));
+	const auto refresh_policy = reinterpret_cast<RefreshImmersiveColorPolicyStateFn>(
+		GetProcAddress(theme, MAKEINTRESOURCEA(104)));
 	if (set_preferred != nullptr) {
-		static_cast<void>(set_preferred(PreferredAppMode::AllowDark));
+		static_cast<void>(set_preferred(dark ? PreferredAppMode::ForceDark : PreferredAppMode::ForceLight));
+	}
+	if (refresh_policy != nullptr) {
+		refresh_policy();
+	}
+	if (flush_menus != nullptr) {
+		flush_menus();
 	}
 	FreeLibrary(theme);
 }
 
 void ApplyWindowThemeMode(HWND window, bool dark) noexcept {
+	if (window == nullptr) {
+		return;
+	}
 	const HMODULE theme = LoadUxTheme();
 	if (theme == nullptr) {
 		return;
@@ -281,19 +122,62 @@ void ApplyWindowThemeMode(HWND window, bool dark) noexcept {
 	const auto allow_window = reinterpret_cast<AllowDarkModeForWindowFn>(
 		GetProcAddress(theme, MAKEINTRESOURCEA(133)));
 	const auto set_window_theme = reinterpret_cast<SetWindowThemeFn>(GetProcAddress(theme, "SetWindowTheme"));
-	const auto flush_menus = reinterpret_cast<FlushMenuThemesFn>(
-		GetProcAddress(theme, MAKEINTRESOURCEA(136)));
 	if (allow_window != nullptr) {
 		static_cast<void>(allow_window(window, dark ? TRUE : FALSE));
 	}
 	if (set_window_theme != nullptr) {
 		static_cast<void>(set_window_theme(window, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr));
 	}
-	if (flush_menus != nullptr) {
-		flush_menus();
-	}
 	FreeLibrary(theme);
 	DrawMenuBar(window);
+}
+
+thread_local bool native_dialog_dark_theme = false;
+
+BOOL CALLBACK ApplyChildWindowTheme(HWND window, LPARAM dark) {
+	ApplyWindowThemeMode(window, dark != 0);
+	return TRUE;
+}
+
+void ApplyWindowTreeTheme(HWND window, bool dark) noexcept {
+	ApplyWindowThemeMode(window, dark);
+	EnumChildWindows(window, ApplyChildWindowTheme, dark ? 1 : 0);
+	RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+}
+
+LRESULT CALLBACK NativeDialogThemeHook(int code, WPARAM wparam, LPARAM lparam) {
+	if (code == HCBT_ACTIVATE) {
+		ApplyWindowTreeTheme(reinterpret_cast<HWND>(wparam), native_dialog_dark_theme);
+	}
+	return CallNextHookEx(nullptr, code, wparam, lparam);
+}
+
+class ScopedNativeDialogTheme final {
+public:
+	explicit ScopedNativeDialogTheme(bool dark) : previous_theme_(native_dialog_dark_theme) {
+		ApplyApplicationThemeMode(dark);
+		native_dialog_dark_theme = dark;
+		hook_ = SetWindowsHookExW(WH_CBT, NativeDialogThemeHook, nullptr, GetCurrentThreadId());
+	}
+
+	~ScopedNativeDialogTheme() {
+		if (hook_ != nullptr) {
+			UnhookWindowsHookEx(hook_);
+		}
+		native_dialog_dark_theme = previous_theme_;
+	}
+
+	ScopedNativeDialogTheme(const ScopedNativeDialogTheme&) = delete;
+	ScopedNativeDialogTheme& operator=(const ScopedNativeDialogTheme&) = delete;
+
+private:
+	HHOOK hook_ = nullptr;
+	bool previous_theme_ = false;
+};
+
+int ShowThemedMessageBox(HWND owner, const wchar_t* text, const wchar_t* caption, UINT type, bool dark) {
+	ScopedNativeDialogTheme theme(dark);
+	return MessageBoxW(owner, text, caption, type);
 }
 
 [[nodiscard]] HICON LoadEmbeddedIcon(HINSTANCE instance, int width, int height) noexcept {
@@ -352,6 +236,17 @@ NativeTranscriptRow ParseNativeRow(const nlohmann::json& value) {
 	}
 	row.flags = static_cast<NativeTranscriptRowFlags>(static_cast<std::uint8_t>(flags));
 	row.height = std::clamp(value.value("estimatedHeight", 48), 1, 100'000);
+	if (const auto duration = value.find("durationMs"); duration != value.end()) {
+		if (!duration->is_number_integer()) {
+			throw std::invalid_argument("native transcript duration must be an integer");
+		}
+		constexpr std::int64_t kMaximumReasoningDurationMs = 7LL * 24LL * 60LL * 60LL * 1'000LL;
+		const std::int64_t duration_ms = duration->get<std::int64_t>();
+		if (duration_ms < 0 || duration_ms > kMaximumReasoningDurationMs) {
+			throw std::invalid_argument("native transcript duration is out of range");
+		}
+		row.duration_ms = duration_ms;
+	}
 	if (const auto media = value.find("mediaIds"); media != value.end()) {
 		if (!media->is_array() || media->size() > 8) {
 			throw std::invalid_argument("native transcript media list is invalid");
@@ -399,7 +294,11 @@ std::vector<std::uint8_t> DecodeBase64(std::string_view encoded) {
 
 } // namespace
 
-App::App(HINSTANCE instance) : instance_(instance), config_path_(DefaultConfigPath()), config_(LoadConfig(config_path_)) {}
+App::App(HINSTANCE instance)
+	: instance_(instance),
+	  config_path_(DefaultConfigPath()),
+	  config_(LoadConfig(config_path_)),
+	  dark_theme_(config_.dark_theme.value_or(SystemPrefersDarkMode())) {}
 
 App::~App() {
 	shutting_down_ = true;
@@ -408,7 +307,7 @@ App::~App() {
 }
 
 int App::Run(int show_command) {
-	EnableDarkApplicationMode();
+	ApplyApplicationThemeMode(dark_theme_);
 	if (!RegisterWindowClass() || !CreateMainWindow(show_command)) {
 		return 1;
 	}
@@ -471,10 +370,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 			break;
 		}
 		const UINT dpi = GetDpiForWindow(window_);
-		const int horizontal_border =
-			GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-		const int vertical_border =
-			GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+		const int horizontal_border = ResizeBorderThicknessForDpi(
+			GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi),
+			static_cast<int>(dpi));
+		const int vertical_border = ResizeBorderThicknessForDpi(
+			GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi),
+			static_cast<int>(dpi));
 		return HitTestResizeBorder(
 			bounds, POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}, horizontal_border, vertical_border, IsZoomed(window_));
 	}
@@ -498,12 +399,41 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 			});
 		}
 		InitializeWebView();
+		// WebView2 environment creation and the Bun/Core cold start are the two
+		// dominant startup costs.  Start them side-by-side; the ready link is
+		// retained in pending_navigation_ when Core wins the race.
+		if (const auto initial_project = EnvironmentValue(L"OMP_CPP_SHELL_INITIAL_PROJECT");
+			initial_project && std::filesystem::is_directory(*initial_project)) {
+			SwitchProject(*initial_project);
+		} else if (config_.last_project && std::filesystem::is_directory(*config_.last_project)) {
+			SwitchProject(*config_.last_project);
+		}
 		return 0;
+	case WM_ERASEBKGND: {
+		RECT client{};
+		GetClientRect(window_, &client);
+		HBRUSH background = CreateSolidBrush(dark_theme_ ? RGB(21, 21, 23) : RGB(255, 255, 255));
+		FillRect(reinterpret_cast<HDC>(wparam), &client, background);
+		DeleteObject(background);
+		return 1;
+	}
 	case WM_SIZE:
 		webview_.Resize();
 		if (has_native_transcript_bounds_) {
 			native_transcript_.SetBounds(native_transcript_bounds_);
 		}
+		return 0;
+	case WM_EXITSIZEMOVE:
+		if (agent_rail_open_ && has_compact_window_bounds_ && !IsZoomed(window_) && !IsIconic(window_)) {
+			RECT resized{};
+			if (GetWindowRect(window_, &resized)) {
+				const LONG rail_width =
+					MulDiv(kAgentRailWidth, static_cast<int>(GetDpiForWindow(window_)), USER_DEFAULT_SCREEN_DPI);
+				compact_window_bounds_ = resized;
+				compact_window_bounds_.right = std::max(resized.left + 1, resized.right - rail_width);
+			}
+		}
+		SaveWindowState();
 		return 0;
 	case WM_GETMINMAXINFO: {
 		MONITORINFO monitor_info{};
@@ -530,12 +460,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 		return 0;
 	}
 	case WM_MEASUREITEM:
-		if (MeasureDarkMenuItem(window_, reinterpret_cast<MEASUREITEMSTRUCT*>(lparam))) {
+		if (MeasureNativeMenuItem(window_, reinterpret_cast<MEASUREITEMSTRUCT*>(lparam))) {
 			return TRUE;
 		}
 		break;
 	case WM_DRAWITEM:
-		if (DrawDarkMenuItem(window_, reinterpret_cast<DRAWITEMSTRUCT*>(lparam))) {
+		if (DrawNativeMenuItem(window_, reinterpret_cast<DRAWITEMSTRUCT*>(lparam), dark_theme_)) {
 			return TRUE;
 		}
 		break;
@@ -587,7 +517,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 			ShowMainWindow();
 			return 0;
 		case kMenuAbout:
-			MessageBoxW(window_, L"OMP C++ Shell\nNative Windows host for omp core", L"About OMP", MB_OK | MB_ICONINFORMATION);
+			ShowThemedMessageBox(window_,
+				L"OMP C++ Shell\nNative Windows host for omp core",
+				L"About OMP",
+				MB_OK | MB_ICONINFORMATION,
+				dark_theme_);
 			return 0;
 		default:
 			break;
@@ -647,7 +581,7 @@ bool App::RegisterWindowClass() const {
 	if (window_class.hIconSm == nullptr) {
 		window_class.hIconSm = window_class.hIcon;
 	}
-	window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+	window_class.hbrBackground = nullptr;
 	window_class.lpszClassName = kWindowClassName;
 	return RegisterClassExW(&window_class) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
@@ -690,7 +624,7 @@ bool App::CreateMainWindow(int show_command) {
 		0,
 		0,
 		SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
-	ApplyTheme(false);
+	ApplyTheme(dark_theme_);
 	ShowWindow(window_, config_.window_maximized ? SW_SHOWMAXIMIZED : show_command);
 	UpdateWindow(window_);
 	return true;
@@ -783,9 +717,15 @@ void App::SetAgentRailOpen(bool open) {
 }
 
 void App::ApplyTheme(bool dark) {
+	const bool persist_theme = config_.dark_theme != std::optional<bool>(dark);
 	dark_theme_ = dark;
+	config_.dark_theme = dark;
+	ApplyApplicationThemeMode(dark);
 	native_transcript_.SetDarkTheme(dark);
 	webview_.SetDarkTheme(dark);
+	if (persist_theme) {
+		SaveConfigFile();
+	}
 	if (window_ == nullptr) {
 		return;
 	}
@@ -797,6 +737,7 @@ void App::ApplyTheme(bool dark) {
 	constexpr COLORREF kDwmColorNone = 0xFFFFFFFE;
 	DwmSetWindowAttribute(window_, kDwmBorderColorAttribute, &kDwmColorNone, sizeof(kDwmColorNone));
 	ApplyWindowThemeMode(window_, dark);
+	ApplyWindowThemeMode(native_transcript_.Window(), dark);
 	RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
 }
 
@@ -804,11 +745,11 @@ void App::ShowTrayMenu() {
 	POINT cursor{};
 	GetCursorPos(&cursor);
 	HMENU menu = CreatePopupMenu();
-	InsertDarkMenuItem(menu, kShowWindowItem, kMenuShowWindow, nullptr, MFS_DEFAULT);
-	InsertDarkMenuItem(menu, kTrayOpenProjectItem, kMenuOpenProject);
-	InsertDarkMenuItem(menu, kMenuSeparatorItem, 0);
-	InsertDarkMenuItem(menu, kTrayExitItem, kMenuExit);
-	ApplyDarkMenuBackground(menu);
+	InsertNativeMenuItem(menu, kShowWindowItem, kMenuShowWindow, nullptr, MFS_DEFAULT);
+	InsertNativeMenuItem(menu, kTrayOpenProjectItem, kMenuOpenProject);
+	InsertNativeMenuItem(menu, kMenuSeparatorItem, 0);
+	InsertNativeMenuItem(menu, kTrayExitItem, kMenuExit);
+	ApplyNativeMenuBackground(menu, dark_theme_);
 	SetForegroundWindow(window_);
 	// Request the selected command directly instead of relying on a posted
 	// WM_COMMAND.  The tray owner can be hidden, and a posted command can be
@@ -833,23 +774,26 @@ void App::ShowTrayMenu() {
 }
 
 void App::InitializeWebView() {
+	webview_.SetDarkTheme(dark_theme_);
 	webview_.Initialize(window_,
 		[this](HRESULT result) {
 			if (FAILED(result)) {
-				MessageBoxW(window_,
+				ShowThemedMessageBox(window_,
 					L"无法初始化 Microsoft Edge WebView2 Runtime。请安装或修复 WebView2 Runtime。",
 					L"OMP 启动失败",
-					MB_OK | MB_ICONERROR);
+					MB_OK | MB_ICONERROR,
+					dark_theme_);
 				return;
 			}
 			if (!pending_navigation_.empty()) {
 				webview_.Navigate(pending_navigation_);
 				pending_navigation_.clear();
-			} else if (const auto initial_project = EnvironmentValue(L"OMP_CPP_SHELL_INITIAL_PROJECT");
-				initial_project && std::filesystem::is_directory(*initial_project)) {
-				SwitchProject(*initial_project);
-			} else if (config_.last_project && std::filesystem::is_directory(*config_.last_project)) {
-				SwitchProject(*config_.last_project);
+			} else if (!pending_core_failure_summary_.empty()) {
+				webview_.ShowStatus(pending_core_failure_summary_, pending_core_failure_detail_, true);
+				pending_core_failure_summary_.clear();
+				pending_core_failure_detail_.clear();
+			} else if (!project_directory_.empty() && core_.running()) {
+				webview_.ShowStatus(L"正在启动 OMP Core", project_directory_, false);
 			} else {
 				webview_.ShowWelcome();
 			}
@@ -860,7 +804,7 @@ void App::InitializeWebView() {
 void App::PickProject() {
 	Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
 	if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
-		MessageBoxW(window_, L"无法打开项目选择器。", L"OMP", MB_OK | MB_ICONERROR);
+		ShowThemedMessageBox(window_, L"无法打开项目选择器。", L"OMP", MB_OK | MB_ICONERROR, dark_theme_);
 		return;
 	}
 	FILEOPENDIALOGOPTIONS options{};
@@ -868,7 +812,8 @@ void App::PickProject() {
 		dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
 	}
 	dialog->SetTitle(L"选择 OMP 项目目录");
-	if (dialog->Show(window_) != S_OK) {
+	const HRESULT shown = dialog->Show(window_);
+	if (shown != S_OK) {
 		return;
 	}
 	Microsoft::WRL::ComPtr<IShellItem> item;
@@ -932,7 +877,11 @@ void App::SwitchProject(std::wstring project_directory) {
 	std::error_code error;
 	std::wstring canonical = CanonicalDirectory(project_directory, error);
 	if (error || canonical.empty()) {
-		MessageBoxW(window_, L"所选路径不是可访问的项目目录。", L"无法打开项目", MB_OK | MB_ICONERROR);
+		ShowThemedMessageBox(window_,
+			L"所选路径不是可访问的项目目录。",
+			L"无法打开项目",
+			MB_OK | MB_ICONERROR,
+			dark_theme_);
 		return;
 	}
 	if (core_.running() && ComparableProjectPath(canonical) == ComparableProjectPath(project_directory_)) {
@@ -988,6 +937,9 @@ void App::HandleCoreEvent(std::unique_ptr<CoreEvent> event) {
 		}
 		break;
 	}
+	case CoreEventKind::StartupSlow:
+		webview_.ShowStatus(L"OMP Core 启动时间较长", Utf8ToWide(event->detail), false);
+		break;
 	case CoreEventKind::StartupFailed:
 		ShowCoreFailure(L"OMP Core 启动失败", event->detail);
 		break;
@@ -1037,7 +989,12 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			if (theme != "light" && theme != "dark") {
 				throw std::invalid_argument("unsupported window theme");
 			}
-			ApplyTheme(theme == "dark");
+			const bool dark = theme == "dark";
+			if (dark != dark_theme_) {
+				ApplyTheme(dark);
+			} else {
+				native_transcript_.SetDarkTheme(dark);
+			}
 			reply(true, Json{{"theme", theme}});
 			return;
 		}
@@ -1213,7 +1170,12 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			if (theme != "light" && theme != "dark") {
 				throw std::invalid_argument("unsupported native transcript theme");
 			}
-			native_transcript_.SetDarkTheme(theme == "dark");
+			const bool dark = theme == "dark";
+			if (dark != dark_theme_) {
+				ApplyTheme(dark);
+			} else {
+				native_transcript_.SetDarkTheme(dark);
+			}
 			const std::int64_t x = std::clamp<std::int64_t>(viewport.at("x").get<std::int64_t>(), -1'000'000, 1'000'000);
 			const std::int64_t y = std::clamp<std::int64_t>(viewport.at("y").get<std::int64_t>(), -1'000'000, 1'000'000);
 			const std::int64_t width =
@@ -1238,7 +1200,33 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			reply(true, Json{{"enabled", native_transcript_preferred_}});
 			return;
 		}
+		if (command == "native_transcript_occlusion") {
+			if (native_transcript_.Window() == nullptr) {
+				reply(false, nullptr, "native transcript renderer is unavailable");
+				return;
+			}
+			const auto found = args.find("occlusion");
+			if (found == args.end() || found->is_null()) {
+				native_transcript_.SetOcclusion(std::nullopt);
+				reply(true, nullptr);
+				return;
+			}
+			const Json& occlusion = *found;
+			const std::int64_t x = std::clamp<std::int64_t>(occlusion.at("x").get<std::int64_t>(), -1'000'000, 1'000'000);
+			const std::int64_t y = std::clamp<std::int64_t>(occlusion.at("y").get<std::int64_t>(), -1'000'000, 1'000'000);
+			const std::int64_t width = std::clamp<std::int64_t>(occlusion.at("width").get<std::int64_t>(), 0, 1'000'000);
+			const std::int64_t height = std::clamp<std::int64_t>(occlusion.at("height").get<std::int64_t>(), 0, 1'000'000);
+			native_transcript_.SetOcclusion(RECT{
+				static_cast<LONG>(x),
+				static_cast<LONG>(y),
+				static_cast<LONG>(x + width),
+				static_cast<LONG>(y + height),
+			});
+			reply(true, nullptr);
+			return;
+		}
 		if (command == "native_transcript_hide") {
+			native_transcript_.SetOcclusion(std::nullopt);
 			native_transcript_.SetVisible(false);
 			has_native_transcript_bounds_ = false;
 			reply(true, nullptr);
@@ -1359,7 +1347,11 @@ void App::ShowCoreFailure(std::wstring_view summary, std::string_view detail) {
 	if (webview_.ready()) {
 		webview_.ShowStatus(summary, wide_detail, true);
 	} else {
-		MessageBoxW(window_, wide_detail.c_str(), std::wstring(summary).c_str(), MB_OK | MB_ICONERROR);
+		// Core now starts in parallel with WebView2.  Keep an early failure for
+		// the startup page instead of blocking WebView initialization behind a
+		// modal dialog on the UI thread.
+		pending_core_failure_summary_ = summary;
+		pending_core_failure_detail_ = wide_detail;
 	}
 }
 

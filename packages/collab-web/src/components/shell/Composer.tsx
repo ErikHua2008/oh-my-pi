@@ -6,6 +6,7 @@ import type { GuestClient, GuestSnapshot } from "../../lib/client";
 import { type DesktopBridge, desktopBridge as defaultDesktopBridge } from "../../lib/desktop-bridge";
 import { shortenPath } from "../../lib/format";
 import { ModelPicker } from "./ModelPicker";
+import { ThinkingPicker } from "./ThinkingPicker";
 
 export interface ComposerProps {
 	client: GuestClient;
@@ -35,17 +36,6 @@ function comparableLocalPath(path: string): string {
 	const normalized = path.replaceAll("\\", "/");
 	return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//") ? normalized.toLocaleLowerCase() : normalized;
 }
-
-const THINKING_LABELS: Readonly<Record<string, string>> = {
-	off: "Off",
-	auto: "Auto",
-	minimal: "Minimal",
-	low: "Low",
-	medium: "Medium",
-	high: "High",
-	xhigh: "Extra high",
-	max: "Max",
-};
 
 function autosize(el: HTMLTextAreaElement | null): void {
 	if (!el) return;
@@ -186,6 +176,11 @@ export function Composer({
 		localFiles.every(file => file.available);
 	const thinkingLevels = snapshot.state?.availableThinkingLevels ?? [];
 	const configuredThinkingLevel = snapshot.state?.configuredThinkingLevel;
+	useEffect(() => {
+		// Warm the local picker while the session snapshot is arriving. The
+		// client deduplicates this with a click made before the reply arrives.
+		if (snapshot.state !== null && snapshot.models === null) client.sendModelList();
+	}, [client, snapshot.models, snapshot.state]);
 
 	useLayoutEffect(() => {
 		autosize(taRef.current);
@@ -400,24 +395,18 @@ export function Composer({
 					)}
 					<Workspace cwd={snapshot.state?.cwd} />
 					{thinkingLevels.length > 0 && configuredThinkingLevel && (
-						<select
-							className="sh-thinking-picker"
+						<ThinkingPicker
+							levels={thinkingLevels}
 							value={configuredThinkingLevel}
 							disabled={!canPrompt}
-							title="change thinking level"
-							aria-label="thinking level"
-							onChange={event => client.sendThinkingChange(event.target.value)}
-						>
-							{thinkingLevels.map(level => (
-								<option key={level} value={level}>
-									{THINKING_LABELS[level] ?? level}
-								</option>
-							))}
-						</select>
+							desktop={desktop}
+							onChange={level => client.sendThinkingChange(level)}
+						/>
 					)}
 					<ModelPicker
 						snapshot={snapshot}
 						disabled={!canPrompt}
+						desktop={desktop}
 						onModelList={() => client.sendModelList()}
 						onModelChange={(provider, id) => client.sendModelChange(provider, id)}
 					/>

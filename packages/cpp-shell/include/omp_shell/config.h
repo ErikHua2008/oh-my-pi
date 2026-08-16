@@ -20,6 +20,7 @@ struct ShellConfig {
 	std::optional<int> window_y;
 	std::optional<int> window_width;
 	std::optional<int> window_height;
+	std::optional<bool> dark_theme;
 	bool window_maximized = false;
 	bool close_to_tray = true;
 

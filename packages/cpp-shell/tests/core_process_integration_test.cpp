@@ -91,6 +91,34 @@ private:
 	std::filesystem::path path_;
 };
 
+class ScopedEnvironmentVariable final {
+public:
+	ScopedEnvironmentVariable(std::wstring name, const wchar_t* value) : name_(std::move(name)) {
+		SetLastError(ERROR_SUCCESS);
+		const DWORD required = GetEnvironmentVariableW(name_.c_str(), nullptr, 0);
+		if (required != 0) {
+			previous_.resize(required - 1);
+			GetEnvironmentVariableW(name_.c_str(), previous_.data(), required);
+			was_present_ = true;
+		} else {
+			was_present_ = GetLastError() != ERROR_ENVVAR_NOT_FOUND;
+		}
+		SetEnvironmentVariableW(name_.c_str(), value);
+	}
+
+	~ScopedEnvironmentVariable() {
+		SetEnvironmentVariableW(name_.c_str(), was_present_ ? previous_.c_str() : nullptr);
+	}
+
+	ScopedEnvironmentVariable(const ScopedEnvironmentVariable&) = delete;
+	ScopedEnvironmentVariable& operator=(const ScopedEnvironmentVariable&) = delete;
+
+private:
+	std::wstring name_;
+	std::wstring previous_;
+	bool was_present_ = false;
+};
+
 void WriteFixtureLinks() {
 	std::cout << "ctrl: http://127.0.0.1:43210/#ws://127.0.0.1:43210/r/ctrl-fixture\n"
 				  << "session: http://127.0.0.1:43210/#ws://127.0.0.1:43210/r/session-fixture\n"
@@ -105,6 +133,12 @@ int RunCoreProcessFixtureIfRequested(int argc, char** argv) {
 	}
 	const std::string_view mode(argv[2]);
 	if (mode == "success") {
+		WriteFixtureLinks();
+		Sleep(60'000);
+		return 0;
+	}
+	if (mode == "slow-success") {
+		Sleep(80);
 		WriteFixtureLinks();
 		Sleep(60'000);
 		return 0;
@@ -178,14 +212,94 @@ OMP_TEST("CoreProcess timeout terminates a silent child") {
 	omp::shell::CoreProcess process;
 	EventCollector events;
 	std::string error;
-	OMP_CHECK(process.Start(FixtureLaunch(L"silent", 100ms),
+	auto launch = FixtureLaunch(L"silent", 150ms);
+	launch.startup_slow_threshold = 30ms;
+	OMP_CHECK(process.Start(std::move(launch),
 		[&events](omp::shell::CoreEvent event) { events.Push(std::move(event)); },
 		error));
+	const auto slow = events.WaitFor(omp::shell::CoreEventKind::StartupSlow, 5s);
+	OMP_CHECK(slow.has_value());
+	OMP_CHECK(slow->detail.find("has not emitted") != std::string::npos);
 	const auto failed = events.WaitFor(omp::shell::CoreEventKind::StartupFailed, 5s);
 	OMP_CHECK(failed.has_value());
 	OMP_CHECK(failed->detail.find("timed out") != std::string::npos);
 	process.Stop();
 	OMP_CHECK(!process.running());
+}
+
+OMP_TEST("CoreProcess can report slow startup and still become ready") {
+	omp::shell::CoreProcess process;
+	EventCollector events;
+	std::string error;
+	auto launch = FixtureLaunch(L"slow-success", 2s);
+	launch.startup_slow_threshold = 20ms;
+	OMP_CHECK(process.Start(std::move(launch),
+		[&events](omp::shell::CoreEvent event) { events.Push(std::move(event)); },
+		error));
+	OMP_CHECK(events.WaitFor(omp::shell::CoreEventKind::StartupSlow, 5s).has_value());
+	OMP_CHECK(events.WaitFor(omp::shell::CoreEventKind::Ready, 5s).has_value());
+	process.Stop();
+	OMP_CHECK(!process.running());
+}
+
+OMP_TEST("development repository is discovered above a nested shell executable") {
+	const std::filesystem::path root = std::filesystem::temp_directory_path() /
+		(L"omp-cpp-shell-repo-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+	const std::filesystem::path marker = root / L"packages" / L"coding-agent" / L"src" / L"cli.ts";
+	const std::filesystem::path executable =
+		root / L"packages" / L"cpp-shell" / L"out" / L"build" / L"windows-msvc" / L"Release" / L"omp-cpp-shell.exe";
+	std::error_code error;
+	std::filesystem::create_directories(marker.parent_path(), error);
+	OMP_CHECK(!error);
+	std::filesystem::create_directories(executable.parent_path(), error);
+	OMP_CHECK(!error);
+	{
+		std::ofstream output(marker, std::ios::binary | std::ios::trunc);
+		output << "// fixture\n";
+	}
+	const auto detected = omp::shell::FindDevelopmentRepository(executable);
+	std::filesystem::remove_all(root, error);
+	OMP_CHECK(detected.has_value());
+	OMP_CHECK(*detected == root);
+}
+
+OMP_TEST("configured development repository prefers bundle and explicit override keeps source mode") {
+	const std::filesystem::path root = std::filesystem::temp_directory_path() /
+		(L"omp-cpp-shell-bundle-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+	const std::filesystem::path source = root / L"packages" / L"coding-agent" / L"src" / L"cli.ts";
+	const std::filesystem::path bundle = root / L"packages" / L"coding-agent" / L"dist" / L"cli.js";
+	std::error_code error;
+	std::filesystem::create_directories(source.parent_path(), error);
+	OMP_CHECK(!error);
+	std::filesystem::create_directories(bundle.parent_path(), error);
+	OMP_CHECK(!error);
+	{
+		std::ofstream output(source, std::ios::binary | std::ios::trunc);
+		output << "// source fixture\n";
+	}
+	{
+		std::ofstream output(bundle, std::ios::binary | std::ios::trunc);
+		output << "// bundle fixture\n";
+	}
+
+	ScopedEnvironmentVariable clear_override(L"OMP_CPP_SHELL_DEV_REPO", nullptr);
+	const auto bundled_command = omp::shell::ResolveOmpCommand({}, root.wstring());
+	OMP_CHECK(bundled_command.size() == 3);
+	OMP_CHECK(bundled_command[2] == L"dist/cli.js");
+
+	{
+		ScopedEnvironmentVariable source_override(L"OMP_CPP_SHELL_DEV_REPO", root.c_str());
+		const auto source_command = omp::shell::ResolveOmpCommand({}, root.wstring());
+		OMP_CHECK(source_command.size() == 3);
+		OMP_CHECK(source_command[2] == L"src/cli.ts");
+	}
+
+	std::filesystem::remove(bundle, error);
+	OMP_CHECK(!error);
+	const auto fallback_command = omp::shell::ResolveOmpCommand({}, root.wstring());
+	std::filesystem::remove_all(root, error);
+	OMP_CHECK(fallback_command.size() == 3);
+	OMP_CHECK(fallback_command[2] == L"src/cli.ts");
 }
 
 OMP_TEST("CoreProcess startup diagnostics do not echo unexpected stdout secrets") {

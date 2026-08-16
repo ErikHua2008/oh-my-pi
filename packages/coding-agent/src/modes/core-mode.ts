@@ -66,6 +66,11 @@ async function resolveWebDistDir(): Promise<string | null> {
 	const override = process.env.OMP_COLLAB_WEB_DIST;
 	if (override) return override;
 	if (process.env.PI_COMPILED === "true") return materializeEmbeddedCollabWeb();
+	// The npm/dev bundle is emitted to packages/coding-agent/dist, while this
+	// source module normally lives under packages/coding-agent/src/modes.
+	// Resolve from the bundle's runtime directory so the fast single-file Core
+	// can serve the same freshly-built collab-web assets as source mode.
+	if (process.env.PI_BUNDLED === "true") return path.resolve(import.meta.dir, "../../collab-web/dist");
 	return path.resolve(import.meta.dir, "../../../collab-web/dist");
 }
 

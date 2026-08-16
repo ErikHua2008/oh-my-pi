@@ -107,6 +107,8 @@ describe("Transcript live tool rendering", () => {
 		});
 
 		expect(countElements(html, ".tv-card")).toBe(1);
+		expect(countElements(html, ".tr-assistant-bubble")).toBe(1);
+		expect(countElements(html, ".tr-assistant-bubble .tv-card")).toBe(0);
 		expect(countElements(html, ".tv-status-dots--run")).toBe(1);
 		expect(countOccurrences(html, TOOL_NAME)).toBe(1);
 		expect(html).not.toContain("thinking…");
@@ -139,23 +141,67 @@ describe("Transcript thinking disclosure", () => {
 	});
 
 	it("renders completed thinking collapsed by default", () => {
+		const completedAt = "2026-08-16T00:00:00Z";
 		const entries: SessionEntry[] = [
 			{
 				type: "message",
 				id: "completed-thinking",
 				parentId: null,
-				timestamp: "2026-08-16T00:00:00Z",
-				message: thinkingMessage,
+				timestamp: completedAt,
+				message: {
+					...thinkingMessage,
+					content: [
+						{ type: "thinking", thinking: "first private reasoning segment" },
+						{ type: "thinking", thinking: "second private reasoning segment" },
+					],
+					timestamp: Date.parse(completedAt) - 539_000,
+				},
 			},
 		];
 		const html = renderTranscript({ working: false, entries });
 
 		expect(html).toContain('aria-expanded="false"');
+		expect(html).toContain("Worked for 8m 59s");
+		expect(countElements(html, ".tr-think")).toBe(1);
+		expect(countElements(html, ".tr-assistant-bubble")).toBe(0);
 		expect(html).not.toContain("private streamed reasoning");
 	});
 });
 
 describe("Transcript message Markdown", () => {
+	it("renders user and assistant text in distinct conversation bubbles", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "bubble-user",
+				parentId: null,
+				timestamp: "2026-08-16T00:00:00Z",
+				message: { role: "user", content: "user bubble", timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "bubble-assistant",
+				parentId: "bubble-user",
+				timestamp: "2026-08-16T00:00:01Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "OMP bubble" }],
+					model: "test/model",
+					usage: assistantUsage(),
+					stopReason: "stop",
+					timestamp: 2,
+				},
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false });
+
+		expect(countElements(html, ".tr-user-bubble")).toBe(1);
+		expect(countElements(html, ".tr-assistant-bubble")).toBe(1);
+		expect(html).toContain("user bubble");
+		expect(html).toContain("OMP bubble");
+	});
+
 	it("renders only a bounded tail for long conversations", () => {
 		const entries: SessionEntry[] = Array.from({ length: 500 }, (_, index) => ({
 			type: "message" as const,

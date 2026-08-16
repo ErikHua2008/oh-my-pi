@@ -23,19 +23,51 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(OMP_CPP_SHELL_BUILD_TESTS "Build cpp-shell unit tests" ON)
 option(OMP_CPP_SHELL_BUILD_WEB_ASSETS "Rebuild collab-web assets with the native shell" ON)
+option(OMP_CPP_SHELL_BUILD_CORE_BUNDLE "Rebuild the single-file coding-agent Core bundle" ON)
 
-if(OMP_CPP_SHELL_BUILD_WEB_ASSETS)
+if(OMP_CPP_SHELL_BUILD_WEB_ASSETS OR OMP_CPP_SHELL_BUILD_CORE_BUNDLE)
 	find_program(OMP_BUN_EXECUTABLE NAMES bun bun.exe REQUIRED)
 	get_filename_component(OMP_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-	set(OMP_COLLAB_WEB_DIRECTORY "${OMP_REPOSITORY_ROOT}/packages/collab-web")
-	add_custom_target(
-		omp_collab_web_assets ALL
-		COMMAND "${OMP_BUN_EXECUTABLE}" run build
-		WORKING_DIRECTORY "${OMP_COLLAB_WEB_DIRECTORY}"
-		COMMENT "Rebuilding collab-web assets for the C++ shell"
-		VERBATIM
-		USES_TERMINAL
-	)
+
+	if(OMP_CPP_SHELL_BUILD_WEB_ASSETS)
+		set(OMP_COLLAB_WEB_DIRECTORY "${OMP_REPOSITORY_ROOT}/packages/collab-web")
+		add_custom_target(
+			omp_collab_web_assets ALL
+			COMMAND "${OMP_BUN_EXECUTABLE}" run build
+			WORKING_DIRECTORY "${OMP_COLLAB_WEB_DIRECTORY}"
+			COMMENT "Rebuilding collab-web assets for the C++ shell"
+			VERBATIM
+			USES_TERMINAL
+		)
+	endif()
+
+	if(OMP_CPP_SHELL_BUILD_CORE_BUNDLE)
+		set(OMP_CODING_AGENT_DIRECTORY "${OMP_REPOSITORY_ROOT}/packages/coding-agent")
+		set(OMP_CODING_AGENT_BUNDLE "${OMP_CODING_AGENT_DIRECTORY}/dist/cli.js")
+		file(
+			GLOB_RECURSE OMP_CODING_AGENT_BUNDLE_INPUTS
+			CONFIGURE_DEPENDS
+			"${OMP_REPOSITORY_ROOT}/packages/*/src/*.js"
+			"${OMP_REPOSITORY_ROOT}/packages/*/src/*.json"
+			"${OMP_REPOSITORY_ROOT}/packages/*/src/*.md"
+			"${OMP_REPOSITORY_ROOT}/packages/*/src/*.ts"
+			"${OMP_REPOSITORY_ROOT}/packages/*/src/*.tsx"
+			"${OMP_CODING_AGENT_DIRECTORY}/scripts/*.ts"
+		)
+		add_custom_command(
+			OUTPUT "${OMP_CODING_AGENT_BUNDLE}"
+			COMMAND "${OMP_BUN_EXECUTABLE}" run gen:bundle
+			WORKING_DIRECTORY "${OMP_CODING_AGENT_DIRECTORY}"
+			DEPENDS
+				${OMP_CODING_AGENT_BUNDLE_INPUTS}
+				"${OMP_REPOSITORY_ROOT}/bun.lock"
+				"${OMP_REPOSITORY_ROOT}/package.json"
+				"${OMP_CODING_AGENT_DIRECTORY}/package.json"
+			COMMENT "Rebuilding the single-file OMP Core bundle"
+			VERBATIM
+		)
+		add_custom_target(omp_coding_agent_bundle DEPENDS "${OMP_CODING_AGENT_BUNDLE}")
+	endif()
 endif()
 
 include(cmake/Dependencies.cmake)
@@ -66,12 +98,16 @@ add_executable(
 	omp-cpp-shell WIN32
 	src/app.cpp
 	src/main.cpp
+	src/native_menu.cpp
 	src/native_transcript_view.cpp
 	src/omp_shell.rc
 	src/webview_host.cpp
 )
 if(TARGET omp_collab_web_assets)
 	add_dependencies(omp-cpp-shell omp_collab_web_assets)
+endif()
+if(TARGET omp_coding_agent_bundle)
+	add_dependencies(omp-cpp-shell omp_coding_agent_bundle)
 endif()
 target_include_directories(omp-cpp-shell PRIVATE include)
 target_compile_definitions(omp-cpp-shell PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

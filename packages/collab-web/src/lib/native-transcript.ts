@@ -8,6 +8,7 @@ import {
 import type { DesktopNativeTranscriptKind, DesktopNativeTranscriptRow } from "./desktop-bridge";
 
 const MAX_ROW_TEXT = 256 * 1024;
+const MAX_REASONING_DURATION_MS = 7 * 24 * 60 * 60 * 1_000;
 const STREAM_PREFIX = "__omp_native_stream__:";
 
 const NativeRowFlag = {
@@ -89,12 +90,21 @@ function estimatedHeight(text: string, kind: DesktopNativeTranscriptKind): numbe
 	return Math.max(52, Math.min(2_000, 45 + Math.max(1, explicitLines + wrappedLines) * 21));
 }
 
+function completedDurationMs(completedAt: string, startedAt: number): number | undefined {
+	const completed = Date.parse(completedAt);
+	if (!Number.isFinite(startedAt) || Number.isNaN(completed)) return undefined;
+	const duration = completed - startedAt;
+	if (duration < 0 || duration > MAX_REASONING_DURATION_MS) return undefined;
+	return Math.round(duration);
+}
+
 function row(
 	id: string,
 	kind: DesktopNativeTranscriptKind,
 	text: string,
 	flags = 0,
 	mediaIds: readonly string[] = [],
+	durationMs?: number,
 ): DesktopNativeTranscriptRow {
 	const bounded = boundedText(text);
 	return {
@@ -107,6 +117,7 @@ function row(
 				? 42
 				: estimatedHeight(bounded, kind) + mediaIds.length * 176,
 		mediaIds,
+		durationMs,
 	};
 }
 
@@ -132,20 +143,31 @@ export function projectNativeTranscript(entries: readonly SessionEntry[]): Deskt
 						break;
 					case "assistant": {
 						const failed = message.stopReason === "error" || message.stopReason === "aborted";
-						let reasoningCount = 0;
-						message.content.forEach((block, index) => {
+						const durationMs = completedDurationMs(entry.timestamp, message.timestamp);
+						const reasoningParts: string[] = [];
+						let expandableReasoning = false;
+						message.content.forEach(block => {
 							if (block.type === "thinking" && block.thinking.length > 0) {
-								reasoningCount++;
-								rows.push(
-									row(`${entry.id}:reasoning:${index}`, "reasoning", block.thinking, NativeRowFlag.Expandable),
-								);
+								reasoningParts.push(block.thinking);
+								expandableReasoning = true;
 							} else if (block.type === "redactedThinking") {
-								reasoningCount++;
-								rows.push(row(`${entry.id}:reasoning:${index}`, "reasoning", "思考内容已由模型隐藏"));
+								reasoningParts.push("思考内容已由模型隐藏");
 							}
 						});
+						if (reasoningParts.length > 0) {
+							rows.push(
+								row(
+									`${entry.id}:reasoning`,
+									"reasoning",
+									reasoningParts.join("\n\n"),
+									expandableReasoning ? NativeRowFlag.Expandable : 0,
+									[],
+									durationMs,
+								),
+							);
+						}
 						const response = assistantResponseText(message);
-						if (response.length > 0 || reasoningCount === 0) {
+						if (response.length > 0 || reasoningParts.length === 0) {
 							rows.push(
 								row(
 									entry.id,

@@ -14,6 +14,8 @@ struct NativeTranscriptPalette final {
 	NativeTranscriptColor primary;
 	NativeTranscriptColor muted;
 	NativeTranscriptColor user;
+	NativeTranscriptColor user_foreground;
+	NativeTranscriptColor assistant;
 	NativeTranscriptColor line;
 	NativeTranscriptColor selection;
 	NativeTranscriptColor scrollbar;
@@ -32,7 +34,9 @@ struct NativeTranscriptPalette final {
 			{0x151517, 1.0F}, // --bg
 			{0xF9FAFB, 1.0F}, // --fg
 			{0xCFD3D6, 1.0F}, // --fg-muted
-			{0x2C2C2E, 1.0F}, // --bg-subtle
+			{0x65C98F, 1.0F}, // WeChat-style outgoing bubble
+			{0x102419, 1.0F},
+			{0x2C2C2E, 1.0F}, // neutral OMP bubble
 			{0x313133, 1.0F}, // --border composited over --bg
 			{0x679EFE, 0.35F},
 			{0xADB2B8, 0.50F},
@@ -47,7 +51,9 @@ struct NativeTranscriptPalette final {
 		{0xFFFFFF, 1.0F}, // --bg
 		{0x0F1115, 1.0F}, // --fg
 		{0x61666B, 1.0F}, // --fg-muted
-		{0xEDF3FE, 1.0F}, // --bg-subtle
+		{0xCBE7FF, 1.0F}, // WeCom-style outgoing bubble
+		{0x0F1115, 1.0F},
+		{0xF1F2F4, 1.0F}, // neutral OMP bubble
 		{0xE5E5E5, 1.0F}, // --border composited over --bg
 		{0x4176E6, 0.25F},
 		{0x81858C, 0.48F},

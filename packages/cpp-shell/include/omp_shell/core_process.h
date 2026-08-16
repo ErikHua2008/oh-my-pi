@@ -6,8 +6,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -16,6 +18,7 @@ namespace omp::shell {
 
 enum class CoreEventKind {
 	Ready,
+	StartupSlow,
 	StartupFailed,
 	Exited,
 };
@@ -30,6 +33,7 @@ struct CoreEvent {
 struct CoreLaunch {
 	std::vector<std::wstring> arguments;
 	std::wstring project_directory;
+	std::chrono::milliseconds startup_slow_threshold{std::chrono::seconds(10)};
 	std::chrono::milliseconds startup_timeout{std::chrono::seconds(90)};
 };
 
@@ -72,5 +76,7 @@ private:
 
 [[nodiscard]] std::vector<std::wstring> ResolveOmpCommand(
 	std::wstring_view configured_omp_bin = {}, std::wstring_view configured_dev_repo = {});
+[[nodiscard]] std::optional<std::filesystem::path> FindDevelopmentRepository(
+	const std::filesystem::path& executable_or_directory);
 
 } // namespace omp::shell

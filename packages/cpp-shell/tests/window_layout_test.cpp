@@ -38,6 +38,12 @@ OMP_TEST("window layout caps expansion to the monitor work area") {
 		760);
 }
 
+OMP_TEST("frameless resize border remains easy to grab at every DPI") {
+	OMP_CHECK(ResizeBorderThicknessForDpi(8, 96) == 12);
+	OMP_CHECK(ResizeBorderThicknessForDpi(12, 144) == 18);
+	OMP_CHECK(ResizeBorderThicknessForDpi(24, 144) == 24);
+}
+
 OMP_TEST("frameless resize hit testing preserves every edge and corner") {
 	constexpr RECT bounds{100, 200, 900, 800};
 	OMP_CHECK(HitTestResizeBorder(bounds, POINT{100, 200}, 8, 8, false) == HTTOPLEFT);

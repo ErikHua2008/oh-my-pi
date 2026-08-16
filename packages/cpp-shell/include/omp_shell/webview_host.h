@@ -28,7 +28,7 @@ public:
 	void Reload() const;
 	void ExecuteScript(std::wstring_view script) const;
 	void PostJson(std::wstring_view json) const;
-	void SetDarkTheme(bool dark) const;
+	void SetDarkTheme(bool dark);
 	void ShowWelcome() const;
 	void ShowStatus(std::wstring_view title, std::wstring_view detail, bool is_error) const;
 
@@ -44,6 +44,7 @@ private:
 	Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;
 	Microsoft::WRL::ComPtr<ICoreWebView2> webview_;
 	EventRegistrationToken message_token_{};
+	bool dark_theme_ = false;
 };
 
 } // namespace omp::shell

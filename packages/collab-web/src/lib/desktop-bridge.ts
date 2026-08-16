@@ -30,6 +30,8 @@ export interface DesktopNativeTranscriptRow {
 	flags: number;
 	estimatedHeight: number;
 	mediaIds: readonly string[];
+	/** Exact completed reasoning/model-call duration when durable timestamps are available. */
+	durationMs?: number;
 }
 
 export interface DesktopNativeTranscriptImage {
@@ -51,6 +53,13 @@ export interface DesktopNativeTranscriptViewport {
 	width: number;
 	height: number;
 	theme: DesktopTheme;
+}
+
+export interface DesktopNativeTranscriptOcclusion {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
 }
 
 export type DesktopTheme = "light" | "dark";
@@ -103,6 +112,7 @@ export interface DesktopBridge {
 	upsertNativeTranscript(row: DesktopNativeTranscriptRow): Promise<boolean>;
 	removeNativeTranscript(id: string): Promise<void>;
 	setNativeTranscriptViewport(viewport: DesktopNativeTranscriptViewport): Promise<boolean>;
+	setNativeTranscriptOcclusion(occlusion: DesktopNativeTranscriptOcclusion | null): Promise<boolean>;
 	provideNativeTranscriptImage(image: DesktopNativeTranscriptImage): Promise<boolean>;
 	hideNativeTranscript(): Promise<void>;
 	takeNativeTranscriptEvents(): Promise<readonly DesktopNativeTranscriptEvent[]>;
@@ -205,6 +215,9 @@ function browserBridge(): DesktopBridge {
 		},
 		async removeNativeTranscript(_id: string) {},
 		async setNativeTranscriptViewport(_viewport: DesktopNativeTranscriptViewport) {
+			return false;
+		},
+		async setNativeTranscriptOcclusion(_occlusion: DesktopNativeTranscriptOcclusion | null) {
 			return false;
 		},
 		async provideNativeTranscriptImage(_image: DesktopNativeTranscriptImage) {
@@ -407,6 +420,9 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 		},
 		async setNativeTranscriptViewport(viewport: DesktopNativeTranscriptViewport) {
 			return invokeNativeEnabled("native_transcript_viewport", { viewport });
+		},
+		async setNativeTranscriptOcclusion(occlusion: DesktopNativeTranscriptOcclusion | null) {
+			return invokeNative("native_transcript_occlusion", { occlusion });
 		},
 		async provideNativeTranscriptImage(image: DesktopNativeTranscriptImage) {
 			return invokeNative("native_transcript_image", { image });

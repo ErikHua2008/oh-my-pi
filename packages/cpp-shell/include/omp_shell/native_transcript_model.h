@@ -46,6 +46,7 @@ struct NativeTranscriptRow final {
 	NativeTranscriptRowFlags flags = NativeTranscriptRowFlags::None;
 	std::int32_t height = 48;
 	std::vector<std::string> media_ids;
+	std::int64_t duration_ms = -1;
 };
 
 struct NativeTranscriptVisibleRange final {

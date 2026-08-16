@@ -15,6 +15,13 @@ RECT ExpandWindowBoundsForRail(const RECT& compact_bounds, const RECT& work_area
 	return RECT{left, compact_bounds.top, left + expanded_width, compact_bounds.bottom};
 }
 
+int ResizeBorderThicknessForDpi(int system_border, int dpi) noexcept {
+	constexpr int kMinimumResizeBorderDip = 12;
+	const int scaled_minimum =
+		dpi > 0 ? MulDiv(kMinimumResizeBorderDip, dpi, USER_DEFAULT_SCREEN_DPI) : kMinimumResizeBorderDip;
+	return std::max(system_border, scaled_minimum);
+}
+
 LRESULT HitTestResizeBorder(
 	const RECT& window_bounds, POINT screen_point, int horizontal_border, int vertical_border, bool maximized) noexcept {
 	if (maximized || horizontal_border <= 0 || vertical_border <= 0 || screen_point.x < window_bounds.left ||
