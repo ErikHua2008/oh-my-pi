@@ -343,7 +343,7 @@ function Summary({ name, args, result }: ToolRenderProps): ReactNode {
 	);
 }
 
-function Body({ name, args, result }: ToolRenderProps): ReactNode {
+function Body({ name, args, result, host }: ToolRenderProps): ReactNode {
 	const details = detailsRecord(result);
 	const detailCells = detailCellsOf(details);
 	const cells = renderCells(args, name, detailCells);
@@ -353,7 +353,7 @@ function Body({ name, args, result }: ToolRenderProps): ReactNode {
 		return (
 			<>
 				{badArgs && <InvalidArg what="cells" />}
-				<ResultImages result={result} />
+				<ResultImages result={result} host={host} />
 				<ResultText result={result} maxLines={12} />
 			</>
 		);
@@ -398,7 +398,7 @@ function Body({ name, args, result }: ToolRenderProps): ReactNode {
 			</div>
 			{jsonText && <Output text={jsonText} lang="json" variant="code" maxLines={12} title="display" />}
 			{notice && <Note>{notice}</Note>}
-			<ResultImages result={result} />
+			<ResultImages result={result} host={host} />
 			{detailCells.length === 0 && <ResultText result={result} maxLines={12} />}
 		</>
 	);

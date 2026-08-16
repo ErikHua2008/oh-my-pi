@@ -586,6 +586,16 @@
 	background: var(--tv-inset);
 }
 
+.tv-img--placeholder {
+	display: grid;
+	place-items: center;
+	min-width: 160px;
+	min-height: 96px;
+	color: var(--tv-faint);
+	font: 11px var(--font-ui, sans-serif);
+	cursor: default;
+}
+
 /* ---- markdown-ish prose (plain text bodies) ---- */
 
 .tv-prose {

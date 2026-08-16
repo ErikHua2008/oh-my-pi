@@ -461,7 +461,7 @@ function makeHostContext(): InteractiveModeContext {
 			sessionName: "proto test",
 			model: undefined,
 			thinkingLevel: undefined,
-			// Local v4 host.ts `#buildState()` reads these from the session.
+			// Current host.ts `#buildState()` reads these from the session.
 			configuredThinkingLevel: () => undefined,
 			getAvailableThinkingLevels: () => [],
 			// host.ts scopes agent snapshots to `getAgentScopeId()`.
@@ -545,7 +545,7 @@ describe("collab proto handshake (#4049)", () => {
 		}
 	});
 
-	it("welcomes a current-proto guest at v4 and round-trips a ui-request", async () => {
+	it("welcomes a current-proto guest at v5 and round-trips a ui-request", async () => {
 		const host = new CollabHost(makeHostContext());
 		await host.start("ws://localhost:8787");
 		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
@@ -553,7 +553,7 @@ describe("collab proto handshake (#4049)", () => {
 			const welcome = await guest.nextFrame();
 			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 			expect(welcome.proto).toBe(COLLAB_PROTO);
-			expect(welcome.proto).toBe(4);
+			expect(welcome.proto).toBe(5);
 
 			const pending = host.requestGuestUi({ kind: "select", title: "Continue?", options: ["Yes"] });
 			if (!pending) throw new Error("expected writable guest UI request");

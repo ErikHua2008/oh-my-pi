@@ -11,6 +11,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type { ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
@@ -18,6 +19,7 @@ import type {
 	CollabUiRequest,
 	CollabUiRequestDraft,
 	CollabUiResponseValue,
+	LocalFileReference,
 	AgentEvent as WireAgentEvent,
 	WireModel,
 	SessionEntry as WireSessionEntry,
@@ -32,6 +34,7 @@ import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLev
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
 import type { CollabHostContext } from "./host-context";
+import { CollabImageStore, replaceImagesWithRefs } from "./image-replication";
 import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
@@ -63,6 +66,11 @@ const STATE_DEBOUNCE_MS = 100;
 const AGENTS_DEBOUNCE_MS = 100;
 const STREAMING_STATE_INTERVAL_MS = 2000;
 const WELCOME_IMAGE_STRIP_THRESHOLD = 24 * 1024 * 1024;
+const INITIAL_HISTORY_ENTRIES = 200;
+const MAX_HISTORY_PAGE_ENTRIES = 500;
+const MAX_LOCAL_FILE_REFERENCES = 32;
+const MAX_LOCAL_FILE_PATH_LENGTH = 32_767;
+const UNSAFE_LOCAL_FILE_PATH = /[\u0000-\u001f\u007f]/;
 const WIRE_AGENT_EVENT_TYPES: Record<WireAgentEvent["type"], true> = {
 	agent_start: true,
 	agent_end: true,
@@ -81,6 +89,59 @@ const WIRE_AGENT_EVENT_TYPES: Record<WireAgentEvent["type"], true> = {
 	auto_retry_end: true,
 	thinking_level_changed: true,
 };
+
+interface NormalizedLocalFiles {
+	files: LocalFileReference[];
+	error?: string;
+}
+
+/** Validate untrusted guest metadata and derive display names from the path. */
+function normalizeLocalFiles(localFiles: readonly LocalFileReference[] | undefined): NormalizedLocalFiles {
+	if (!localFiles || localFiles.length === 0) return { files: [] };
+	if (localFiles.length > MAX_LOCAL_FILE_REFERENCES) {
+		return { files: [], error: `at most ${MAX_LOCAL_FILE_REFERENCES} local files may be referenced` };
+	}
+	const files: LocalFileReference[] = [];
+	const seen = new Set<string>();
+	for (const candidate of localFiles) {
+		if (
+			candidate === null ||
+			typeof candidate !== "object" ||
+			candidate.kind !== "local-file" ||
+			typeof candidate.path !== "string"
+		) {
+			return { files: [], error: "invalid local file reference" };
+		}
+		const filePath = candidate.path;
+		const windowsPath = path.win32.isAbsolute(filePath);
+		if (
+			filePath.length === 0 ||
+			filePath.length > MAX_LOCAL_FILE_PATH_LENGTH ||
+			UNSAFE_LOCAL_FILE_PATH.test(filePath) ||
+			(!windowsPath && !path.posix.isAbsolute(filePath))
+		) {
+			return { files: [], error: "local file references must use valid absolute paths" };
+		}
+		const key = windowsPath ? filePath.toLocaleLowerCase() : filePath;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		const name = windowsPath ? path.win32.basename(filePath) : path.posix.basename(filePath);
+		files.push({ kind: "local-file", path: filePath, name: name || filePath });
+	}
+	return { files };
+}
+
+/** Build model-visible path context without reading or copying the referenced files. */
+function promptWithLocalFileReferences(text: string, localFiles: readonly LocalFileReference[]): string {
+	if (localFiles.length === 0) return text;
+	const paths = JSON.stringify(
+		localFiles.map(file => file.path),
+		null,
+		2,
+	);
+	const prefix = text.length > 0 ? `${text}\n\n` : "";
+	return `${prefix}<local_file_references>\n${paths}\n</local_file_references>\nThe files are referenced by their existing host paths and are not embedded. Use filesystem tools only if their contents are needed.`;
+}
 
 const WIRE_SESSION_ENTRY_TYPES: Record<WireSessionEntry["type"], true> = {
 	message: true,
@@ -137,7 +198,8 @@ export class CollabHost {
 	#writeToken: Uint8Array | null = null;
 	#sessionId = "";
 	#unsubscribe?: () => void;
-	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	#peers = new Map<number, { name: string; canWrite: boolean; mediaRefs: boolean; historyPaging: boolean }>();
+	readonly #images = new CollabImageStore();
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
@@ -212,7 +274,7 @@ export class CollabHost {
 		const socket = this.#socket;
 		if (!socket) return;
 		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite) socket.send(frame, peerId);
+			if (peer.canWrite) socket.send(shrinkForReplication(frame), peerId);
 		}
 	}
 
@@ -276,7 +338,7 @@ export class CollabHost {
 		}
 
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
+			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event });
 			this.#onEventForState(event);
 		});
 		const bus = this.#ctx.eventBus;
@@ -287,7 +349,7 @@ export class CollabHost {
 		}
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
 		this.#ctx.sessionManager.onEntryAppended = entry => {
-			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
+			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry });
 			// Model/thinking/title changes land as entries while idle; refresh
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
@@ -335,16 +397,26 @@ export class CollabHost {
 			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
 			return;
 		}
-		this.#socket.send(frame);
+		for (const [peerId, peer] of this.#peers) {
+			const prepared = peer.mediaRefs ? replaceImagesWithRefs(frame, this.#images) : frame;
+			this.#socket.send(shrinkForReplication(prepared), peerId);
+		}
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
 		switch (frame.t) {
 			case "hello":
-				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
+				this.#handleHello(
+					frame.name,
+					frame.proto,
+					frame.writeToken,
+					frame.mediaRefs === true,
+					frame.historyPaging === true,
+					fromPeer,
+				);
 				break;
 			case "prompt":
-				this.#handlePrompt(frame.text, frame.images, fromPeer);
+				this.#handlePrompt(frame.text, frame.images, frame.localFiles, fromPeer);
 				break;
 			case "abort":
 				this.#handleAbort(fromPeer);
@@ -357,6 +429,12 @@ export class CollabHost {
 				break;
 			case "fetch-transcript":
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
+				break;
+			case "fetch-history":
+				this.#handleFetchHistory(frame.reqId, frame.beforeId, frame.limit, fromPeer);
+				break;
+			case "fetch-image":
+				void this.#handleFetchImage(frame.reqId, frame.imageId, frame.variant, fromPeer);
 				break;
 			case "model-list":
 				void this.#handleModelList(fromPeer);
@@ -385,7 +463,14 @@ export class CollabHost {
 		this.#socket?.send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
 	}
 
-	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
+	#handleHello(
+		name: string,
+		proto: number,
+		writeToken: string | undefined,
+		mediaRefs: boolean,
+		historyPaging: boolean,
+		fromPeer: number,
+	): void {
 		if (proto !== COLLAB_PROTO) {
 			this.#socket?.send(
 				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
@@ -395,21 +480,25 @@ export class CollabHost {
 		}
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
-		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		const useHistoryPaging = historyPaging && mediaRefs;
+		this.#peers.set(fromPeer, { name: cleanName, canWrite, mediaRefs, historyPaging: useHistoryPaging });
 
 		// Snapshot and send synchronously: no awaits between snapshot, welcome,
 		// and chunk sends, so subsequent broadcast frames (entry/event/state/bus)
 		// queue behind the snapshot on the same socket and the guest can't
 		// observe a gap between the snapshot fragment and live traffic.
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
-		if (JSON.stringify(snapshot).length > WELCOME_IMAGE_STRIP_THRESHOLD) {
+		if (!mediaRefs && JSON.stringify(snapshot).length > WELCOME_IMAGE_STRIP_THRESHOLD) {
 			let stripped = 0;
 			for (const entry of snapshot.entries) {
 				if (entry.type === "message") stripped += stripImagesFromMessage(entry.message);
 			}
 			logger.info("collab welcome exceeded size threshold; stripped images", { stripped });
 		}
-		const entries = snapshot.entries.filter(isWireSessionEntry);
+		const allEntries = snapshot.entries.filter(isWireSessionEntry);
+		const historyRemaining = useHistoryPaging ? Math.max(0, allEntries.length - INITIAL_HISTORY_ENTRIES) : 0;
+		const initialEntries = useHistoryPaging ? allEntries.slice(historyRemaining) : allEntries;
+		const entries = initialEntries.map(entry => (mediaRefs ? replaceImagesWithRefs(entry, this.#images) : entry));
 		const socket = this.#socket;
 		if (!socket) return;
 		socket.send(
@@ -420,6 +509,7 @@ export class CollabHost {
 				state: this.#buildState(),
 				agents: this.#snapshotAgents(),
 				entryCount: entries.length,
+				historyRemaining: useHistoryPaging ? historyRemaining : undefined,
 				readOnly: canWrite ? undefined : true,
 			},
 			fromPeer,
@@ -483,16 +573,37 @@ export class CollabHost {
 		this.#pendingUi.get(reqId)?.settle({ kind: "answered", value });
 	}
 
-	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
+	#handlePrompt(
+		text: string,
+		images: ImageContent[] | undefined,
+		localFiles: LocalFileReference[] | undefined,
+		fromPeer: number,
+	): void {
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#rejectReadOnly("prompting", fromPeer);
 			return;
 		}
+		const normalized = normalizeLocalFiles(localFiles);
+		if (normalized.error) {
+			this.#socket?.send({ t: "error", message: normalized.error }, fromPeer);
+			return;
+		}
 		const name = peer.name;
+		const promptText = promptWithLocalFileReferences(text, normalized.files);
 		const content: string | (TextContent | ImageContent)[] =
-			images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
+			images && images.length > 0 ? [{ type: "text", text: promptText }, ...images] : promptText;
 		const details: CollabPromptDetails = { from: name };
+		if (normalized.files.length > 0) {
+			details.displayText = text;
+			details.localFiles = normalized.files;
+		}
+		const queueChipText =
+			text.trim().length > 0
+				? text
+				: normalized.files.length === 1
+					? normalized.files[0]?.name
+					: `${normalized.files.length} local files`;
 		if (this.#ctx.session.isStreaming) {
 			this.#ctx.updatePendingMessagesDisplay();
 			this.#ctx.ui.requestRender();
@@ -507,7 +618,7 @@ export class CollabHost {
 					details,
 					attribution: "user",
 				},
-				{ streamingBehavior: "steer", queueChipText: text },
+				{ streamingBehavior: "steer", queueChipText },
 			)
 			.catch(err => {
 				logger.warn("collab guest prompt failed", { error: String(err) });
@@ -727,6 +838,51 @@ export class CollabHost {
 	}
 
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
+	#handleFetchHistory(reqId: number, beforeId: string, limit: number, fromPeer: number): void {
+		const peer = this.#peers.get(fromPeer);
+		const socket = this.#socket;
+		if (!socket || !peer?.historyPaging) {
+			socket?.send(
+				{ t: "history", reqId, entries: [], remaining: 0, error: "history paging not enabled" },
+				fromPeer,
+			);
+			return;
+		}
+		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
+			socket.send({ t: "history", reqId, entries: [], remaining: 0, error: "session changed" }, fromPeer);
+			return;
+		}
+		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
+		const entries = snapshot.entries.filter(isWireSessionEntry);
+		const beforeIndex = entries.findIndex(entry => entry.id === beforeId);
+		if (beforeIndex < 0) {
+			socket.send(
+				{ t: "history", reqId, entries: [], remaining: 0, error: "history cursor is no longer available" },
+				fromPeer,
+			);
+			return;
+		}
+		const pageLimit = Number.isSafeInteger(limit)
+			? Math.max(1, Math.min(limit, MAX_HISTORY_PAGE_ENTRIES))
+			: INITIAL_HISTORY_ENTRIES;
+		const requestedStart = Math.max(0, beforeIndex - pageLimit);
+		const page: (StoredSessionEntry & WireSessionEntry)[] = [];
+		let pageBytes = 0;
+		let start = beforeIndex;
+		while (start > requestedStart) {
+			const source = entries[start - 1];
+			if (!source) break;
+			const referenced = peer.mediaRefs ? replaceImagesWithRefs(source, this.#images) : source;
+			const prepared = shrinkForReplication(referenced);
+			const entryBytes = JSON.stringify(prepared).length;
+			if (page.length > 0 && pageBytes + entryBytes > SNAPSHOT_CHUNK_BYTES) break;
+			page.unshift(prepared);
+			pageBytes += entryBytes;
+			start--;
+		}
+		socket.send({ t: "history", reqId, entries: page, remaining: start }, fromPeer);
+	}
+
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
 		const reply = (text: string, newSize: number, error?: string) =>
 			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
@@ -773,6 +929,31 @@ export class CollabHost {
 		} catch (err) {
 			logger.debug("collab transcript read failed", { agentId, error: String(err) });
 			reply("", fromByte, String(err));
+		}
+	}
+
+	/** Serve one registered image to a media-reference-capable peer. */
+	async #handleFetchImage(
+		reqId: number,
+		imageId: string,
+		variant: "thumbnail" | "original",
+		fromPeer: number,
+	): Promise<void> {
+		const peer = this.#peers.get(fromPeer);
+		if (!peer?.mediaRefs) {
+			this.#socket?.send({ t: "image", reqId, imageId, variant, error: "media references not enabled" }, fromPeer);
+			return;
+		}
+		try {
+			const payload = await this.#images.fetch(imageId, variant);
+			if (!payload) {
+				this.#socket?.send({ t: "image", reqId, imageId, variant, error: "image unavailable" }, fromPeer);
+				return;
+			}
+			this.#socket?.send({ t: "image", reqId, imageId, variant, ...payload }, fromPeer);
+		} catch (error) {
+			logger.debug("collab image fetch failed", { imageId, variant, error: String(error) });
+			this.#socket?.send({ t: "image", reqId, imageId, variant, error: "image unavailable" }, fromPeer);
 		}
 	}
 

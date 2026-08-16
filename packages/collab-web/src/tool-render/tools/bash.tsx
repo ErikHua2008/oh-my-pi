@@ -37,7 +37,7 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 	return result?.isError ? <span className="tv-err-text">{text}</span> : <span>{text}</span>;
 }
 
-function Body({ args, result }: ToolRenderProps): ReactNode {
+function Body({ args, result, host }: ToolRenderProps): ReactNode {
 	const command = args.command === undefined ? "…" : str(args.command);
 	const prefix = isRecord(args.env) ? envPrefix(args.env) : "";
 	const cwd = str(args.cwd);
@@ -87,7 +87,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 					),
 				]}
 			/>
-			<ResultImages result={result} />
+			<ResultImages result={result} host={host} />
 			<ResultText result={result} maxLines={12} />
 			{stats.length > 0 && <Row>{stats.join(" · ")}</Row>}
 		</>

@@ -15,7 +15,12 @@ function withDetailImages(result: ToolResultLike | undefined): ToolResultLike | 
 	const extra: ToolResultBlock[] = [];
 	for (const img of details.images) {
 		if (isRecord(img) && typeof img.data === "string" && typeof img.mimeType === "string") {
-			extra.push({ type: "image", data: img.data, mimeType: img.mimeType });
+			extra.push({
+				type: "image",
+				data: img.data,
+				mimeType: img.mimeType,
+				...(typeof img.imageId === "string" ? { imageId: img.imageId } : {}),
+			});
 		}
 	}
 	if (extra.length === 0) return result;
@@ -51,7 +56,7 @@ const PROMPT_FIELDS = [
 	["image_size", "size"],
 ] as const;
 
-function Body({ args, result }: ToolRenderProps): ReactNode {
+function Body({ args, result, host }: ToolRenderProps): ReactNode {
 	const changes = Array.isArray(args.changes) ? args.changes : null;
 	const inputs = Array.isArray(args.input) ? args.input : null;
 	const details = detailsRecord(result);
@@ -108,7 +113,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			)}
 			{(provider || model) && <Badges items={[provider, model]} />}
 			{revised && <Note>revised: {truncate(revised, 400)}</Note>}
-			<ResultImages result={merged} />
+			<ResultImages result={merged} host={host} />
 			{paths.length > 0 && (
 				<div className="tv-list">
 					{paths.map((p, i) => (

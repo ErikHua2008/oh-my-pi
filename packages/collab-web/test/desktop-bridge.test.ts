@@ -16,11 +16,15 @@ function respondingInvoke(response: unknown, calls: InvokeCall[]): TauriInvoke {
 describe("DesktopBridge browser fallback", () => {
 	it("imports without Tauri and exposes no desktop capability", async () => {
 		expect(desktopBridge.available).toBe(false);
+		expect(desktopBridge.localFilesAvailable).toBe(false);
+		expect(desktopBridge.nativeTranscriptAvailable).toBe(false);
 		expect(await desktopBridge.listProjects()).toEqual([]);
 		await expect(desktopBridge.openProject()).resolves.toBeUndefined();
 		await expect(desktopBridge.switchProject("/work/project")).resolves.toBeUndefined();
 		await expect(desktopBridge.renameProject("/work/project", "Project")).resolves.toBeUndefined();
 		await expect(desktopBridge.revealPath("/work/project")).resolves.toBeUndefined();
+		expect(await desktopBridge.pickAttachments()).toEqual([]);
+		expect(await desktopBridge.checkAttachments(["/work/file.txt"])).toEqual([]);
 		expect(await desktopBridge.loadSessionPreferences()).toBeNull();
 		await expect(
 			desktopBridge.saveSessionPreferences({ pinnedSessions: [], sessionReadThrough: {} }),
@@ -28,7 +32,117 @@ describe("DesktopBridge browser fallback", () => {
 	});
 });
 
+describe("DesktopBridge native transcript capability", () => {
+	it("probes transcript commands independently and keeps message rows as metadata", async () => {
+		const calls: InvokeCall[] = [];
+		const bridge = createDesktopBridge(async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
+			calls.push({ command, args });
+			return (
+				command === "native_transcript_take_events"
+					? ["load-earlier", { type: "image-needed", imageId: "image-1" }, "unknown"]
+					: null
+			) as T;
+		});
+		const row = {
+			id: "entry-1",
+			kind: "assistant" as const,
+			text: "hello",
+			flags: 0,
+			estimatedHeight: 64,
+			mediaIds: [],
+		};
+
+		expect(bridge.nativeTranscriptAvailable).toBe(true);
+		expect(
+			await bridge.replaceNativeTranscript({
+				sessionId: "session-1",
+				rows: [row],
+				historyRemaining: 0,
+				historyLoading: false,
+			}),
+		).toBe(true);
+		expect(await bridge.upsertNativeTranscript(row)).toBe(true);
+		expect(await bridge.setNativeTranscriptViewport({ x: 10, y: 20, width: 700, height: 500 })).toBe(true);
+		await bridge.removeNativeTranscript("entry-1");
+		await bridge.hideNativeTranscript();
+		expect(await bridge.takeNativeTranscriptEvents()).toEqual([
+			"load-earlier",
+			{ type: "image-needed", imageId: "image-1" },
+		]);
+
+		expect(calls.map(call => call.command)).toEqual([
+			"native_transcript_replace",
+			"native_transcript_upsert",
+			"native_transcript_viewport",
+			"native_transcript_remove",
+			"native_transcript_hide",
+			"native_transcript_take_events",
+		]);
+	});
+
+	it("falls back to Web transcript after the native host rejects a command", async () => {
+		const bridge = createDesktopBridge(async <T>(): Promise<T> => {
+			throw new Error("unsupported desktop command");
+		});
+		const enabled = await bridge.setNativeTranscriptViewport({ x: 0, y: 0, width: 100, height: 100 });
+		expect(enabled).toBe(false);
+		expect(bridge.nativeTranscriptAvailable).toBe(false);
+	});
+
+	it("honors the host's Web compatibility mode without disabling native capability", async () => {
+		const bridge = createDesktopBridge(async <T>(): Promise<T> => ({ enabled: false }) as T);
+		const enabled = await bridge.replaceNativeTranscript({
+			sessionId: "session-1",
+			rows: [],
+			historyRemaining: 0,
+			historyLoading: false,
+		});
+		expect(enabled).toBe(false);
+		expect(bridge.nativeTranscriptAvailable).toBe(true);
+	});
+});
+
 describe("DesktopBridge Tauri capability probe", () => {
+	it("selects original file paths and batches native availability checks without copying bytes", async () => {
+		const calls: InvokeCall[] = [];
+		const invoke: TauriInvoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
+			calls.push({ command, args });
+			if (command === "attachment_pick") return ["C:\\work\\a.txt", "C:\\work\\b.png"] as T;
+			if (command === "attachment_status") {
+				const paths = args?.paths as readonly string[];
+				return paths.map(path => ({ path, available: !path.endsWith("64.txt") })) as T;
+			}
+			throw new Error(`unexpected command ${command}`);
+		};
+		const bridge = createDesktopBridge(invoke);
+
+		expect(bridge.localFilesAvailable).toBe(true);
+		expect(await bridge.pickAttachments()).toEqual(["C:\\work\\a.txt", "C:\\work\\b.png"]);
+		const paths = Array.from({ length: 65 }, (_, index) => `C:\\work\\${index}.txt`);
+		const statuses = await bridge.checkAttachments(paths);
+
+		expect(statuses).toHaveLength(65);
+		expect(statuses.at(-1)).toEqual({ path: "C:\\work\\64.txt", available: false });
+		expect(calls.map(call => call.command)).toEqual(["attachment_pick", "attachment_status", "attachment_status"]);
+		expect(calls[1]?.args?.paths).toHaveLength(64);
+		expect(calls[2]?.args?.paths).toHaveLength(1);
+	});
+
+	it("disables only local-file commands when an older native host rejects them", async () => {
+		const bridge = createDesktopBridge(async <T>(command: string): Promise<T> => {
+			if (command === "project_list") {
+				return { recent_projects: [], last_project: null, current_project: null, project_names: {} } as T;
+			}
+			throw new Error("unsupported desktop command");
+		});
+
+		await bridge.listProjects();
+		expect(bridge.available).toBe(true);
+		await expect(bridge.pickAttachments()).rejects.toThrow("unsupported desktop command");
+		expect(bridge.localFilesAvailable).toBe(false);
+		expect(bridge.available).toBe(true);
+	});
+
 	it("maps authorized projects and enables mutations only after project_list succeeds", async () => {
 		const calls: InvokeCall[] = [];
 		const bridge = createDesktopBridge(

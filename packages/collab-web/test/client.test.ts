@@ -52,8 +52,17 @@ function messageEntry(id: string, message: WireMessage): SessionEntry {
 	return { type: "message", id, parentId: null, timestamp: "2026-06-12T00:00:01Z", message };
 }
 
-function welcomeFrame(entryCount = 0, readOnly?: boolean): HostFrame {
-	return { t: "welcome", proto: COLLAB_PROTO, header: HEADER, state: STATE, agents: AGENTS, entryCount, readOnly };
+function welcomeFrame(entryCount = 0, readOnly?: boolean, historyRemaining?: number): HostFrame {
+	return {
+		t: "welcome",
+		proto: COLLAB_PROTO,
+		header: HEADER,
+		state: STATE,
+		agents: AGENTS,
+		entryCount,
+		readOnly,
+		historyRemaining,
+	};
 }
 
 function snapshotChunk(entries: SessionEntry[], final = true): HostFrame {
@@ -104,7 +113,9 @@ describe("GuestClient frame apply", () => {
 			vi.advanceTimersByTime(29_999);
 			expect(client.getSnapshot().phase).toBe("connecting");
 			client.applyFrameForTest(snapshotChunk([firstEntry], false));
-			expect(client.getSnapshot().entries).toEqual([firstEntry]);
+			// Partial trains stay private so React never repeatedly renders an
+			// ever-growing multi-megabyte history before the final chunk arrives.
+			expect(client.getSnapshot().entries).toEqual([]);
 			expect(client.getSnapshot().phase).toBe("connecting");
 
 			vi.advanceTimersByTime(29_999);
@@ -121,6 +132,52 @@ describe("GuestClient frame apply", () => {
 			expect(completeClient.getSnapshot().phase).toBe("live");
 		} finally {
 			vi.useRealTimers();
+		}
+	});
+
+	it("publishes a multi-chunk snapshot once in wire order", () => {
+		const firstEntry = messageEntry("e1", { role: "user", content: "first", timestamp: 1 });
+		const secondEntry = messageEntry("e2", assistantMessage("second"));
+		const client = new GuestClient(LINK, "tester");
+		client.applyFrameForTest(welcomeFrame(2));
+		client.applyFrameForTest(snapshotChunk([firstEntry], false));
+		expect(client.getSnapshot().entries).toEqual([]);
+		client.applyFrameForTest(snapshotChunk([secondEntry], true));
+		expect(client.getSnapshot().phase).toBe("live");
+		expect(client.getSnapshot().entries).toEqual([firstEntry, secondEntry]);
+	});
+
+	it("prepends an older host page in order and deduplicates a repeated cursor entry", () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const older = messageEntry("e1", { role: "user", content: "older", timestamp: 1 });
+			const tail = messageEntry("e2", { role: "user", content: "tail", timestamp: 2 });
+			const client = new GuestClient(LINK, "tester");
+			client.applyFrameForTest(welcomeFrame(1, false, 1));
+			client.applyFrameForTest(snapshotChunk([tail]));
+
+			expect(client.getSnapshot().historyRemaining).toBe(1);
+			client.loadEarlierHistory(200);
+			expect(client.getSnapshot().historyLoading).toBe(true);
+			const request = sent[0];
+			if (request?.t !== "fetch-history") throw new Error("expected fetch-history frame");
+			expect(request).toEqual({ t: "fetch-history", reqId: request.reqId, beforeId: "e2", limit: 200 });
+
+			client.applyFrameForTest({
+				t: "history",
+				reqId: request.reqId,
+				entries: [older, tail],
+				remaining: 0,
+			});
+			const snapshot = client.getSnapshot();
+			expect(snapshot.entries).toEqual([older, tail]);
+			expect(snapshot.historyRemaining).toBe(0);
+			expect(snapshot.historyLoading).toBe(false);
+		} finally {
+			sendSpy.mockRestore();
 		}
 	});
 
@@ -319,6 +376,62 @@ describe("GuestClient frame apply", () => {
 			const client = liveClient();
 			client.sendThinkingChange("high");
 			expect(sent).toEqual([{ t: "thinking-change", level: "high" }]);
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
+	it("sends local attachments as path metadata without reading or embedding file content", () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const client = liveClient();
+			client.sendPrompt("Inspect this", [
+				{ kind: "local-file", path: "C:\\work\\fixture.txt", name: "fixture.txt" },
+			]);
+			expect(sent).toEqual([
+				{
+					t: "prompt",
+					text: "Inspect this",
+					localFiles: [{ kind: "local-file", path: "C:\\work\\fixture.txt", name: "fixture.txt" }],
+				},
+			]);
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
+	it("deduplicates lazy image requests and reuses the resolved thumbnail", async () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const client = liveClient();
+			const imageId = "a".repeat(64);
+			const first = client.fetchImage(imageId, "thumbnail");
+			const duplicate = client.fetchImage(imageId, "thumbnail");
+			expect(duplicate).toBe(first);
+			expect(sent).toHaveLength(1);
+			const request = sent[0];
+			if (request?.t !== "fetch-image") throw new Error("expected fetch-image frame");
+
+			client.applyFrameForTest({
+				t: "image",
+				reqId: request.reqId,
+				imageId,
+				variant: "thumbnail",
+				data: "dGh1bWI=",
+				mimeType: "image/webp",
+			});
+			await expect(first).resolves.toEqual({ data: "dGh1bWI=", mimeType: "image/webp" });
+			await expect(client.fetchImage(imageId, "thumbnail")).resolves.toEqual({
+				data: "dGh1bWI=",
+				mimeType: "image/webp",
+			});
+			expect(sent).toHaveLength(1);
 		} finally {
 			sendSpy.mockRestore();
 		}

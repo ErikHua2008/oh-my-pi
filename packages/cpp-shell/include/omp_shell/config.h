@@ -1,0 +1,35 @@
+#pragma once
+
+#include <filesystem>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace omp::shell {
+
+struct ShellConfig {
+	std::wstring omp_bin = L"omp";
+	std::optional<std::wstring> dev_repo;
+	std::optional<std::wstring> last_project;
+	std::vector<std::wstring> recent_projects;
+	std::map<std::wstring, std::wstring> project_names;
+	std::vector<std::string> pinned_sessions;
+	std::map<std::string, std::string> session_read_through;
+	std::optional<int> window_x;
+	std::optional<int> window_y;
+	std::optional<int> window_width;
+	std::optional<int> window_height;
+	bool window_maximized = false;
+	bool close_to_tray = true;
+
+	void RecordProject(std::wstring project_directory);
+	[[nodiscard]] std::optional<std::wstring> ProjectName(std::wstring_view project_directory) const;
+	[[nodiscard]] bool SetProjectName(std::wstring project_directory, std::wstring name);
+};
+
+[[nodiscard]] std::filesystem::path DefaultConfigPath();
+[[nodiscard]] ShellConfig LoadConfig(const std::filesystem::path& path);
+[[nodiscard]] bool SaveConfig(const std::filesystem::path& path, const ShellConfig& config, std::string& error);
+
+} // namespace omp::shell

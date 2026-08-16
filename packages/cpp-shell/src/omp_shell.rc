@@ -1,0 +1,3 @@
+#include "omp_shell/resource.h"
+
+IDI_OMP_APP ICON "../../collab-web/public/favicon.ico"

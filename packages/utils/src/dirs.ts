@@ -774,6 +774,11 @@ export function getDocumentConversionCacheDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, path.join("cache", "document-conversions"), "cache");
 }
 
+/** Get the collab image-thumbnail cache directory (~/.omp/agent/cache/collab-thumbnails). */
+export function getCollabThumbnailCacheDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, path.join("cache", "collab-thumbnails"), "cache");
+}
+
 /** Get the sessions directory (~/.omp/agent/sessions). */
 export function getSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "sessions", "data");

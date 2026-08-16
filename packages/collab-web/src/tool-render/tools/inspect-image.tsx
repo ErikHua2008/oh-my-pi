@@ -11,7 +11,7 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 	return <span>{truncate(shortenPath(target))}</span>;
 }
 
-function Body({ args, result }: ToolRenderProps): ReactNode {
+function Body({ args, result, host }: ToolRenderProps): ReactNode {
 	const rec = detailsRecord(result);
 	const model = rec ? str(rec.model) : null;
 	const mimeType = rec ? str(rec.mimeType) : null;
@@ -22,7 +22,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			{target !== null ? <PathText path={target} /> : <InvalidArg what="image path" />}
 			{question && <Row k="question">{truncate(normalizeWs(question), 200)}</Row>}
 			<Badges items={[model && <Badge tone="accent">{model}</Badge>, mimeType && <Badge>{mimeType}</Badge>]} />
-			<ResultImages result={result} />
+			<ResultImages result={result} host={host} />
 			<ResultText result={result} maxLines={8} />
 		</>
 	);

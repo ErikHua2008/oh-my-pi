@@ -14,6 +14,8 @@ import type {
 	ControlGuestFrame,
 	ControlHostFrame,
 	GuestFrame,
+	ImageVariant,
+	LocalFileReference,
 	ParsedCollabLink,
 	Participant,
 	SessionState,
@@ -71,7 +73,7 @@ export type CollabSessionState = SessionState & {
 export type CollabFrame =
 	// guest -> host (hello/abort/agent-cmd/fetch-transcript/ui-response are taken verbatim from the wire grammar)
 	| Exclude<GuestFrame, { t: "prompt" }>
-	| { t: "prompt"; text: string; images?: ImageContent[] }
+	| { t: "prompt"; text: string; images?: ImageContent[]; localFiles?: LocalFileReference[] }
 	// host -> guest
 	| {
 			t: "welcome";
@@ -86,6 +88,8 @@ export type CollabFrame =
 			 * (or a chunk arrives with `final: true`).
 			 */
 			entryCount: number;
+			/** Older entries omitted for a guest that advertised history paging. */
+			historyRemaining?: number;
 			/** True when this peer joined through a read-only (view) link. */
 			readOnly?: boolean;
 	  }
@@ -109,6 +113,18 @@ export type CollabFrame =
 	| { t: "ui-request-end"; reqId: number }
 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
+	/** Targeted older-history page ordered oldest-to-newest. */
+	| { t: "history"; reqId: number; entries: SessionEntry[]; remaining: number; error?: string }
+	/** Targeted lazy-media reply for guests that advertised `mediaRefs`. */
+	| {
+			t: "image";
+			reqId: number;
+			imageId: string;
+			variant: ImageVariant;
+			data?: string;
+			mimeType?: string;
+			error?: string;
+	  }
 	/** Targeted reply to `model-list` (wire-shaped model descriptors). */
 	| { t: "model-list"; models: WireModel[] }
 	| { t: "bye"; reason: string }

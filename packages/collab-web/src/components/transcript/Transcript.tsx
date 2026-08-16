@@ -2,16 +2,23 @@ import {
 	type AssistantMessage,
 	COLLAB_PROMPT_MESSAGE_TYPE,
 	type ImageContent,
+	type LocalFileReference,
 	type SessionEntry,
 	type TextContent,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-wire";
-import { Check, ChevronRight, Copy, Pencil } from "lucide-react";
+import { Check, ChevronRight, Copy, File, Pencil } from "lucide-react";
 import type { ReactNode } from "react";
-import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ActiveTool } from "../../lib/client";
-import { copyText } from "../../lib/desktop-bridge";
+import {
+	copyText,
+	type DesktopBridge,
+	type DesktopNativeTranscriptEvent,
+	desktopBridge as defaultDesktopBridge,
+} from "../../lib/desktop-bridge";
 import { fmtTokens } from "../../lib/format";
+import { nativeStreamRowId, projectNativeStream, projectNativeTranscript } from "../../lib/native-transcript";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
@@ -28,6 +35,14 @@ export interface TranscriptProps {
 	host?: ToolRenderHost;
 	/** Opens the composer with the final user prompt for editing and re-sending. */
 	onEditLastUserMessage?: (text: string) => void;
+	/** Injectable native bridge used for one batched status check per visible page. */
+	desktop?: DesktopBridge;
+	/** Stable identity used to reset the local render window only when the session changes. */
+	sessionId?: string | null;
+	/** Entries still retained by a paging-capable host rather than this WebView. */
+	historyRemaining?: number;
+	historyLoading?: boolean;
+	onLoadEarlier?: () => void;
 }
 
 function Row({
@@ -82,8 +97,108 @@ function StreamStatus({ label }: { label: string }): ReactNode {
 	);
 }
 
-/** Markdown + image thumbnails for user / custom message content. */
-function MsgContent({ content }: { content: string | readonly (TextContent | ImageContent)[] }): ReactNode {
+function imageSource(mimeType: string, data: string): string {
+	return `data:${mimeType};base64,${data}`;
+}
+
+function MessageImage({ image, host }: { image: ImageContent; host?: ToolRenderHost }): ReactNode {
+	const inlineSource = image.data.length > 0 ? imageSource(image.mimeType, image.data) : null;
+	const [source, setSource] = useState<string | null>(inlineSource);
+	const [nearViewport, setNearViewport] = useState(inlineSource !== null);
+	const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">(
+		inlineSource === null ? "idle" : "ready",
+	);
+	const [original, setOriginal] = useState(false);
+	const rootRef = useRef<HTMLDivElement | null>(null);
+	const imageId = image.imageId;
+
+	useEffect(() => {
+		if (inlineSource !== null || !imageId || !host?.loadImage) return;
+		const element = rootRef.current;
+		if (!element || typeof IntersectionObserver === "undefined") {
+			setNearViewport(true);
+			return;
+		}
+		const observer = new IntersectionObserver(
+			entries => {
+				if (!entries.some(entry => entry.isIntersecting)) return;
+				setNearViewport(true);
+				observer.disconnect();
+			},
+			{ rootMargin: "800px 0px" },
+		);
+		observer.observe(element);
+		return () => observer.disconnect();
+	}, [host, imageId, inlineSource]);
+
+	useEffect(() => {
+		if (!nearViewport || source !== null || !imageId || !host?.loadImage) return;
+		let disposed = false;
+		setStatus("loading");
+		void host.loadImage(imageId, "thumbnail").then(payload => {
+			if (disposed) return;
+			if (!payload) {
+				setStatus("error");
+				return;
+			}
+			setSource(imageSource(payload.mimeType, payload.data));
+			setStatus("ready");
+		});
+		return () => {
+			disposed = true;
+		};
+	}, [host, imageId, nearViewport, source]);
+
+	const loadOriginal = (): void => {
+		if (original || !imageId || !host?.loadImage) return;
+		setStatus("loading");
+		void host.loadImage(imageId, "original").then(payload => {
+			if (!payload) {
+				setStatus(source === null ? "error" : "ready");
+				return;
+			}
+			setSource(imageSource(payload.mimeType, payload.data));
+			setOriginal(true);
+			setStatus("ready");
+		});
+	};
+
+	return (
+		<div ref={rootRef} className={`tr-msg-media tr-msg-media--${status}`} aria-busy={status === "loading"}>
+			{source !== null ? (
+				<button
+					type="button"
+					className="tr-msg-image-button"
+					onClick={loadOriginal}
+					disabled={original || !imageId || !host?.loadImage}
+					title={imageId && !original ? "Load original image" : undefined}
+				>
+					<img
+						className="tr-msg-img"
+						src={source}
+						alt="attachment"
+						loading="lazy"
+						decoding="async"
+						fetchPriority="low"
+					/>
+				</button>
+			) : (
+				<div className="tr-msg-image-placeholder" role="status">
+					{status === "error" ? "image unavailable" : "loading imageâ€¦"}
+				</div>
+			)}
+		</div>
+	);
+}
+
+/** Markdown + lazily resolved image thumbnails for user / custom message content. */
+function MsgContent({
+	content,
+	host,
+}: {
+	content: string | readonly (TextContent | ImageContent)[];
+	host?: ToolRenderHost;
+}): ReactNode {
 	if (typeof content === "string") return <Markdown text={content} />;
 	return (
 		<>
@@ -92,14 +207,7 @@ function MsgContent({ content }: { content: string | readonly (TextContent | Ima
 					case "text":
 						return <Markdown key={i} text={block.text} />;
 					case "image":
-						return (
-							<img
-								key={i}
-								className="tr-msg-img"
-								src={`data:${block.mimeType};base64,${block.data}`}
-								alt="attachment"
-							/>
-						);
+						return <MessageImage key={block.imageId ?? i} image={block} host={host} />;
 					default:
 						return null;
 				}
@@ -114,6 +222,65 @@ function messageText(content: string | readonly (TextContent | ImageContent)[]):
 		.filter((block): block is TextContent => block.type === "text")
 		.map(block => block.text)
 		.join("\n");
+}
+
+interface RenderedCollabPromptDetails {
+	from: string;
+	displayText?: string;
+	localFiles: LocalFileReference[];
+}
+
+function parseCollabPromptDetails(value: unknown): RenderedCollabPromptDetails {
+	if (value === null || typeof value !== "object") return { from: "guest", localFiles: [] };
+	const record = value as Record<string, unknown>;
+	const localFiles: LocalFileReference[] = [];
+	if (Array.isArray(record.localFiles)) {
+		for (const candidate of record.localFiles) {
+			if (candidate === null || typeof candidate !== "object") continue;
+			const file = candidate as Record<string, unknown>;
+			if (file.kind !== "local-file" || typeof file.path !== "string" || typeof file.name !== "string") continue;
+			localFiles.push({ kind: "local-file", path: file.path, name: file.name });
+		}
+	}
+	return {
+		from: typeof record.from === "string" ? record.from : "guest",
+		displayText: typeof record.displayText === "string" ? record.displayText : undefined,
+		localFiles,
+	};
+}
+
+function LocalFileChips({
+	files,
+	availability,
+}: {
+	files: readonly LocalFileReference[];
+	availability: ReadonlyMap<string, boolean>;
+}): ReactNode {
+	if (files.length === 0) return null;
+	return (
+		<div className="tr-local-files" aria-label="local file references">
+			{files.map(file => {
+				const available = availability.get(file.path);
+				return (
+					<div
+						key={file.path}
+						className={`tr-local-file${available === false ? " tr-local-file-missing" : ""}`}
+						title={file.path}
+					>
+						<File size={13} aria-hidden="true" />
+						<span className="tr-local-file-name">{file.name}</span>
+						{available === false && <span className="tr-local-file-status">unavailable</span>}
+					</div>
+				);
+			})}
+		</div>
+	);
+}
+
+function copyablePromptText(text: string, localFiles: readonly LocalFileReference[]): string {
+	if (localFiles.length === 0) return text;
+	const paths = localFiles.map(file => file.path).join("\n");
+	return text.length > 0 ? `${text}\n\n${paths}` : paths;
 }
 
 function isUserPromptEntry(entry: SessionEntry): boolean {
@@ -191,22 +358,34 @@ function MessageActions({
 
 function UserMessage({
 	content,
+	localFiles = [],
+	localFileAvailability,
 	timestamp,
 	canEdit,
 	onEdit,
+	host,
 }: {
 	content: string | readonly (TextContent | ImageContent)[];
+	localFiles?: readonly LocalFileReference[];
+	localFileAvailability: ReadonlyMap<string, boolean>;
 	timestamp: string;
 	canEdit: boolean;
 	onEdit?: () => void;
+	host?: ToolRenderHost;
 }): ReactNode {
 	const text = messageText(content);
 	return (
 		<div className="tr-user-message">
 			<div className="tr-user-bubble">
-				<MsgContent content={content} />
+				<MsgContent content={content} host={host} />
+				<LocalFileChips files={localFiles} availability={localFileAvailability} />
 			</div>
-			<MessageActions timestamp={timestamp} text={text} canEdit={canEdit} onEdit={onEdit} />
+			<MessageActions
+				timestamp={timestamp}
+				text={copyablePromptText(text, localFiles)}
+				canEdit={canEdit}
+				onEdit={onEdit}
+			/>
 		</div>
 	);
 }
@@ -278,6 +457,7 @@ interface EntryRowProps {
 	active: ReadonlyMap<string, ActiveTool>;
 	lastUserEntryId: string | undefined;
 	working: boolean;
+	localFileAvailability: ReadonlyMap<string, boolean>;
 	onEditLastUserMessage?: (text: string) => void;
 	host?: ToolRenderHost;
 }
@@ -289,6 +469,7 @@ function entryRowEqual(prev: EntryRowProps, next: EntryRowProps): boolean {
 		prev.host !== next.host ||
 		prev.lastUserEntryId !== next.lastUserEntryId ||
 		prev.working !== next.working ||
+		prev.localFileAvailability !== next.localFileAvailability ||
 		prev.onEditLastUserMessage !== next.onEditLastUserMessage
 	)
 		return false;
@@ -308,6 +489,7 @@ const EntryRow = memo(function EntryRow({
 	active,
 	lastUserEntryId,
 	working,
+	localFileAvailability,
 	onEditLastUserMessage,
 	host,
 }: EntryRowProps): ReactNode {
@@ -320,9 +502,11 @@ const EntryRow = memo(function EntryRow({
 						<Row kind="user" speaker="host" title={entry.timestamp}>
 							<UserMessage
 								content={msg.content}
+								localFileAvailability={localFileAvailability}
 								timestamp={entry.timestamp}
 								canEdit={entry.id === lastUserEntryId && onEditLastUserMessage !== undefined && !working}
 								onEdit={() => onEditLastUserMessage?.(messageText(msg.content))}
+								host={host}
 							/>
 						</Row>
 					);
@@ -339,20 +523,18 @@ const EntryRow = memo(function EntryRow({
 		}
 		case "custom_message": {
 			if (entry.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
-				const details = entry.details;
-				const from =
-					details !== null &&
-					typeof details === "object" &&
-					typeof (details as Record<string, unknown>).from === "string"
-						? ((details as Record<string, unknown>).from as string)
-						: "guest";
+				const details = parseCollabPromptDetails(entry.details);
+				const content = details.displayText ?? entry.content;
 				return (
-					<Row kind="user" speaker={from} title={entry.timestamp}>
+					<Row kind="user" speaker={details.from} title={entry.timestamp}>
 						<UserMessage
-							content={entry.content}
+							content={content}
+							localFiles={details.localFiles}
+							localFileAvailability={localFileAvailability}
 							timestamp={entry.timestamp}
 							canEdit={entry.id === lastUserEntryId && onEditLastUserMessage !== undefined && !working}
-							onEdit={() => onEditLastUserMessage?.(messageText(entry.content))}
+							onEdit={() => onEditLastUserMessage?.(messageText(content))}
+							host={host}
 						/>
 					</Row>
 				);
@@ -362,7 +544,7 @@ const EntryRow = memo(function EntryRow({
 				<Row kind="custom" speaker="system" title={entry.timestamp}>
 					<div className="tr-custom">
 						<span className="tr-marker-label">{entry.customType}</span>
-						<MsgContent content={entry.content} />
+						<MsgContent content={entry.content} host={host} />
 					</div>
 				</Row>
 			);
@@ -400,7 +582,139 @@ const EntryRow = memo(function EntryRow({
 }, entryRowEqual);
 
 export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host, onEditLastUserMessage } = props;
+	const {
+		entries,
+		stream,
+		streamDone,
+		activeTools,
+		working,
+		compact,
+		host,
+		onEditLastUserMessage,
+		desktop = defaultDesktopBridge,
+		sessionId,
+		historyRemaining = 0,
+		historyLoading = false,
+		onLoadEarlier,
+	} = props;
+	const nativeEligible = compact !== true && desktop.nativeTranscriptAvailable;
+	const [nativeEnabled, setNativeEnabled] = useState(false);
+	const [nativeRevision, setNativeRevision] = useState(0);
+	const nativeRows = useMemo(
+		() => (nativeEligible ? projectNativeTranscript(entries) : []),
+		[entries, nativeEligible],
+	);
+	const nativeHasMedia = useMemo(() => nativeRows.some(row => row.mediaIds.length > 0), [nativeRows]);
+	const loadEarlierRef = useRef(onLoadEarlier);
+	loadEarlierRef.current = onLoadEarlier;
+
+	useEffect(() => {
+		if (!nativeEligible) {
+			setNativeEnabled(false);
+			return;
+		}
+		let active = true;
+		void desktop
+			.replaceNativeTranscript({
+				sessionId: sessionId ?? null,
+				rows: nativeRows,
+				historyRemaining,
+				historyLoading,
+			})
+			.then(enabled => {
+				if (active) setNativeEnabled(enabled);
+			});
+		return () => {
+			active = false;
+		};
+	}, [desktop, historyLoading, historyRemaining, nativeEligible, nativeRevision, nativeRows, sessionId]);
+
+	useEffect(() => {
+		if (!nativeEnabled) return;
+		const projected = projectNativeStream(stream, streamDone, working, sessionId);
+		if (projected !== null) {
+			void desktop.upsertNativeTranscript(projected).then(enabled => {
+				if (!enabled) setNativeEnabled(false);
+			});
+		} else {
+			void desktop.removeNativeTranscript(nativeStreamRowId(sessionId));
+		}
+	}, [desktop, nativeEnabled, sessionId, stream, streamDone, working]);
+
+	useEffect(() => {
+		if (!nativeEligible) return;
+		const handleEvent = (event: DesktopNativeTranscriptEvent): void => {
+			if (typeof event !== "string") {
+				void host?.loadImage?.(event.imageId, "thumbnail").then(payload =>
+					desktop.provideNativeTranscriptImage({
+						imageId: event.imageId,
+						mimeType: payload?.mimeType ?? "",
+						data: payload?.data ?? "",
+					}),
+				);
+				return;
+			}
+			if (event === "load-earlier" && nativeEnabled && !historyLoading) loadEarlierRef.current?.();
+			if (event === "use-web") setNativeEnabled(false);
+			if (event === "use-native") setNativeRevision(revision => revision + 1);
+		};
+		const unsubscribe = desktop.subscribeNativeTranscriptEvents(handleEvent);
+		let polling = false;
+		const timer =
+			nativeEnabled && (historyRemaining > 0 || nativeHasMedia)
+				? window.setInterval(() => {
+						if (polling) return;
+						polling = true;
+						void desktop
+							.takeNativeTranscriptEvents()
+							.then(events => {
+								for (const event of events) handleEvent(event);
+							})
+							.finally(() => {
+								polling = false;
+							});
+					}, 750)
+				: undefined;
+		return () => {
+			if (timer !== undefined) window.clearInterval(timer);
+			unsubscribe();
+		};
+	}, [desktop, historyLoading, historyRemaining, host, nativeEligible, nativeEnabled, nativeHasMedia]);
+	const pageSize = compact === true ? 80 : 200;
+	const [visibleLimit, setVisibleLimit] = useState(pageSize);
+	const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
+
+	useEffect(() => {
+		setVisibleLimit(pageSize);
+	}, [pageSize, sessionId]);
+
+	const visibleStart = Math.max(0, entries.length - visibleLimit);
+	const visibleEntries = useMemo(() => entries.slice(visibleStart), [entries, visibleStart]);
+	const firstVisibleEntryId = visibleEntries[0]?.id ?? "";
+	const visibleLocalFiles = useMemo(() => {
+		const files = new Map<string, LocalFileReference>();
+		for (const entry of visibleEntries) {
+			if (entry.type !== "custom_message" || entry.customType !== COLLAB_PROMPT_MESSAGE_TYPE) continue;
+			for (const file of parseCollabPromptDetails(entry.details).localFiles) files.set(file.path, file);
+		}
+		return [...files.values()];
+	}, [visibleEntries]);
+	const [localFileAvailability, setLocalFileAvailability] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+
+	useEffect(() => {
+		if (!desktop.localFilesAvailable || visibleLocalFiles.length === 0) return;
+		let active = true;
+		void desktop
+			.checkAttachments(visibleLocalFiles.map(file => file.path))
+			.then(statuses => {
+				if (!active) return;
+				setLocalFileAvailability(new Map(statuses.map(status => [status.path, status.available])));
+			})
+			.catch(() => {});
+		return () => {
+			active = false;
+		};
+	}, [desktop, visibleLocalFiles]);
 
 	const lastUserEntryId = useMemo(() => [...entries].reverse().find(isUserPromptEntry)?.id, [entries]);
 
@@ -417,6 +731,52 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const lockRef = useRef(true);
 
+	useLayoutEffect(() => {
+		const element = rootRef.current;
+		if (!nativeEnabled || element === null) return;
+		let disposed = false;
+		let frame = 0;
+		const syncBounds = (): void => {
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(() => {
+				if (disposed) return;
+				const bounds = element.getBoundingClientRect();
+				const scale = window.devicePixelRatio || 1;
+				void desktop
+					.setNativeTranscriptViewport({
+						x: Math.round(bounds.left * scale),
+						y: Math.round(bounds.top * scale),
+						width: Math.round(bounds.width * scale),
+						height: Math.round(bounds.height * scale),
+					})
+					.then(enabled => {
+						if (!enabled && !disposed) setNativeEnabled(false);
+					});
+			});
+		};
+		const observer = new ResizeObserver(syncBounds);
+		observer.observe(element);
+		window.addEventListener("resize", syncBounds);
+		window.visualViewport?.addEventListener("resize", syncBounds);
+		syncBounds();
+		return () => {
+			disposed = true;
+			cancelAnimationFrame(frame);
+			observer.disconnect();
+			window.removeEventListener("resize", syncBounds);
+			window.visualViewport?.removeEventListener("resize", syncBounds);
+			void desktop.hideNativeTranscript();
+		};
+	}, [desktop, nativeEnabled]);
+
+	useLayoutEffect(() => {
+		const restore = restoreScrollRef.current;
+		const element = rootRef.current;
+		if (restore === null || element === null) return;
+		element.scrollTop = restore.top + (element.scrollHeight - restore.height);
+		restoreScrollRef.current = null;
+	}, [firstVisibleEntryId, visibleStart]);
+
 	// Follow the tail while bottom-locked; releasing/re-arming happens in onScroll.
 	useEffect(() => {
 		const el = rootRef.current;
@@ -425,7 +785,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 
 	// Active tools not already represented as toolCall blocks in committed rows or the stream ghost.
 	const renderedToolIds = new Set<string>();
-	for (const entry of entries) {
+	for (const entry of visibleEntries) {
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 		for (const block of entry.message.content) {
 			if (block.type === "toolCall") renderedToolIds.add(block.id);
@@ -445,6 +805,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		<div
 			ref={rootRef}
 			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
+			data-native={nativeEnabled ? "true" : undefined}
 			onScroll={() => {
 				const el = rootRef.current;
 				if (el !== null) {
@@ -452,51 +813,79 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				}
 			}}
 		>
-			{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
-			{entries.map(entry => (
-				<EntryRow
-					key={entry.id}
-					entry={entry}
-					results={results}
-					active={activeTools}
-					lastUserEntryId={lastUserEntryId}
-					working={working}
-					onEditLastUserMessage={onEditLastUserMessage}
-					host={host}
-				/>
-			))}
-			{stream !== null && (
-				<Row kind="assistant" speaker="agent">
-					<AssistantBody
-						message={stream}
-						results={results}
-						active={activeTools}
-						pending={!streamDone}
-						host={host}
-					/>
-					{!streamDone && <StreamStatus label="responding…" />}
-				</Row>
-			)}
-			{tailTools.length > 0 && (
-				<Row kind="assistant" speaker="agent">
-					{tailTools.map(tool => (
-						<ToolCard
-							key={tool.toolCallId}
-							toolCallId={tool.toolCallId}
-							name={tool.toolName}
-							intent={tool.intent}
-							args={tool.args}
-							running
-							partialResult={tool.partialResult}
+			{nativeEnabled ? (
+				<div className="tr-native-placeholder" />
+			) : (
+				<>
+					{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
+					{visibleStart + historyRemaining > 0 && (
+						<div className="tr-history-gate">
+							<button
+								type="button"
+								disabled={historyLoading}
+								onClick={() => {
+									const element = rootRef.current;
+									if (element !== null) {
+										restoreScrollRef.current = { height: element.scrollHeight, top: element.scrollTop };
+									}
+									lockRef.current = false;
+									setVisibleLimit(limit => limit + pageSize);
+									if (visibleStart === 0 && historyRemaining > 0) onLoadEarlier?.();
+								}}
+							>
+								{historyLoading
+									? "Loading earlier messages…"
+									: `Load ${Math.min(pageSize, visibleStart + historyRemaining)} earlier messages · ${visibleStart + historyRemaining} hidden`}
+							</button>
+						</div>
+					)}
+					{visibleEntries.map(entry => (
+						<EntryRow
+							key={entry.id}
+							entry={entry}
+							results={results}
+							active={activeTools}
+							lastUserEntryId={lastUserEntryId}
+							working={working}
+							localFileAvailability={localFileAvailability}
+							onEditLastUserMessage={onEditLastUserMessage}
 							host={host}
 						/>
 					))}
-				</Row>
-			)}
-			{working && stream === null && activeTools.size === 0 && (
-				<Row kind="assistant" speaker="agent">
-					<StreamStatus label="thinking…" />
-				</Row>
+					{stream !== null && (
+						<Row kind="assistant" speaker="agent">
+							<AssistantBody
+								message={stream}
+								results={results}
+								active={activeTools}
+								pending={!streamDone}
+								host={host}
+							/>
+							{!streamDone && <StreamStatus label="responding…" />}
+						</Row>
+					)}
+					{tailTools.length > 0 && (
+						<Row kind="assistant" speaker="agent">
+							{tailTools.map(tool => (
+								<ToolCard
+									key={tool.toolCallId}
+									toolCallId={tool.toolCallId}
+									name={tool.toolName}
+									intent={tool.intent}
+									args={tool.args}
+									running
+									partialResult={tool.partialResult}
+									host={host}
+								/>
+							))}
+						</Row>
+					)}
+					{working && stream === null && activeTools.size === 0 && (
+						<Row kind="assistant" speaker="agent">
+							<StreamStatus label="thinking…" />
+						</Row>
+					)}
+				</>
 			)}
 		</div>
 	);

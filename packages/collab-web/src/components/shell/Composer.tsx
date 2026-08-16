@@ -1,7 +1,9 @@
-import { ArrowUp, Folder, SendHorizontal, Square } from "lucide-react";
+import type { LocalFileReference } from "@oh-my-pi/pi-wire";
+import { ArrowUp, File, Folder, Paperclip, SendHorizontal, Square, X } from "lucide-react";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { GuestClient, GuestSnapshot } from "../../lib/client";
+import { type DesktopBridge, desktopBridge as defaultDesktopBridge } from "../../lib/desktop-bridge";
 import { shortenPath } from "../../lib/format";
 import { ModelPicker } from "./ModelPicker";
 
@@ -11,12 +13,28 @@ export interface ComposerProps {
 	/** Optional prompt text selected from the transcript for edit-and-resend. */
 	prefill?: string;
 	onPrefillConsumed?: () => void;
+	/** Injectable native bridge; defaults to the process-wide WebView bridge. */
+	desktop?: DesktopBridge;
 }
 
 /** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with composer.css). */
 const LINE_PX = 20;
 const PAD_Y = 16;
 const MAX_ROWS = 8;
+
+interface DraftLocalFile extends LocalFileReference {
+	available: boolean;
+}
+
+function localFileName(path: string): string {
+	const withoutTrailingSeparators = path.replace(/[\\/]+$/, "");
+	return withoutTrailingSeparators.split(/[\\/]/).pop() || path;
+}
+
+function comparableLocalPath(path: string): string {
+	const normalized = path.replaceAll("\\", "/");
+	return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//") ? normalized.toLocaleLowerCase() : normalized;
+}
 
 const THINKING_LABELS: Readonly<Record<string, string>> = {
 	off: "Off",
@@ -141,8 +159,17 @@ function Workspace({ cwd }: { cwd: string | undefined }): ReactNode {
 	);
 }
 
-export function Composer({ client, snapshot, prefill, onPrefillConsumed }: ComposerProps): ReactNode {
+export function Composer({
+	client,
+	snapshot,
+	prefill,
+	onPrefillConsumed,
+	desktop = defaultDesktopBridge,
+}: ComposerProps): ReactNode {
 	const [text, setText] = useState(prefill ?? "");
+	const [localFiles, setLocalFiles] = useState<readonly DraftLocalFile[]>([]);
+	const [attachmentError, setAttachmentError] = useState<string | null>(null);
+	const [attachmentBusy, setAttachmentBusy] = useState(false);
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 
@@ -152,7 +179,11 @@ export function Composer({ client, snapshot, prefill, onPrefillConsumed }: Compo
 	const canPrompt = live && !readOnly;
 	const busy = snapshot.working;
 	const queued = snapshot.state?.queuedMessageCount ?? 0;
-	const canSend = canPrompt && text.trim().length > 0;
+	const canSend =
+		canPrompt &&
+		!attachmentBusy &&
+		(text.trim().length > 0 || localFiles.length > 0) &&
+		localFiles.every(file => file.available);
 	const thinkingLevels = snapshot.state?.availableThinkingLevels ?? [];
 	const configuredThinkingLevel = snapshot.state?.configuredThinkingLevel;
 
@@ -169,18 +200,72 @@ export function Composer({ client, snapshot, prefill, onPrefillConsumed }: Compo
 		});
 	}, [prefill]);
 
-	const send = useCallback((): void => {
+	const pickAttachments = useCallback(async (): Promise<void> => {
+		setAttachmentBusy(true);
+		setAttachmentError(null);
+		try {
+			const paths = await desktop.pickAttachments();
+			setLocalFiles(current => {
+				const seen = new Set(current.map(file => comparableLocalPath(file.path)));
+				const additions: DraftLocalFile[] = [];
+				for (const path of paths) {
+					const key = comparableLocalPath(path);
+					if (seen.has(key)) continue;
+					seen.add(key);
+					additions.push({ kind: "local-file", path, name: localFileName(path), available: true });
+				}
+				return additions.length > 0 ? [...current, ...additions] : current;
+			});
+		} catch {
+			setAttachmentError("The native file picker is unavailable.");
+		} finally {
+			setAttachmentBusy(false);
+		}
+	}, [desktop]);
+
+	const removeAttachment = useCallback((path: string): void => {
+		setLocalFiles(current => current.filter(file => file.path !== path));
+		setAttachmentError(null);
+	}, []);
+
+	const send = useCallback(async (): Promise<void> => {
 		const trimmed = text.trim();
-		if (!trimmed || !live || readOnly) return;
-		client.sendPrompt(trimmed);
-		setText("");
-		onPrefillConsumed?.();
-	}, [client, live, onPrefillConsumed, readOnly, text]);
+		if ((!trimmed && localFiles.length === 0) || !live || readOnly || attachmentBusy) return;
+		setAttachmentBusy(true);
+		setAttachmentError(null);
+		try {
+			if (localFiles.length > 0) {
+				const statuses = await desktop.checkAttachments(localFiles.map(file => file.path));
+				const availability = new Map(statuses.map(status => [comparableLocalPath(status.path), status.available]));
+				const checked = localFiles.map(file => ({
+					...file,
+					available: availability.get(comparableLocalPath(file.path)) === true,
+				}));
+				const unavailable = checked.some(file => !file.available);
+				if (unavailable) {
+					setLocalFiles(checked);
+					setAttachmentError("One or more referenced files are no longer available.");
+					return;
+				}
+			}
+			client.sendPrompt(
+				trimmed,
+				localFiles.map(({ kind, path, name }) => ({ kind, path, name })),
+			);
+			setText("");
+			setLocalFiles([]);
+			onPrefillConsumed?.();
+		} catch {
+			setAttachmentError("The referenced files could not be checked.");
+		} finally {
+			setAttachmentBusy(false);
+		}
+	}, [attachmentBusy, client, desktop, live, localFiles, onPrefillConsumed, readOnly, text]);
 
 	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
 		if (shouldSubmitOnEnter(e, composingRef.current)) {
 			e.preventDefault();
-			send();
+			void send();
 		}
 	};
 
@@ -253,6 +338,34 @@ export function Composer({ client, snapshot, prefill, onPrefillConsumed }: Compo
 	return (
 		<div className="sh-composer">
 			<div className="sh-composer-card">
+				{localFiles.length > 0 && (
+					<div className="sh-composer-attachments" aria-label="local file references">
+						{localFiles.map(file => (
+							<div
+								key={file.path}
+								className={`sh-composer-attachment${file.available ? "" : " sh-composer-attachment-missing"}`}
+								title={file.path}
+							>
+								<File size={13} aria-hidden="true" />
+								<span>{file.name}</span>
+								{!file.available && <span className="sh-composer-attachment-status">unavailable</span>}
+								<button
+									type="button"
+									onClick={() => removeAttachment(file.path)}
+									title={`remove ${file.name}`}
+									aria-label={`remove ${file.name}`}
+								>
+									<X size={12} aria-hidden="true" />
+								</button>
+							</div>
+						))}
+					</div>
+				)}
+				{attachmentError && (
+					<div className="sh-composer-attachment-error" role="alert">
+						{attachmentError}
+					</div>
+				)}
 				<textarea
 					ref={taRef}
 					className="sh-composer-input"
@@ -273,6 +386,18 @@ export function Composer({ client, snapshot, prefill, onPrefillConsumed }: Compo
 					spellCheck={false}
 				/>
 				<div className="sh-composer-controls">
+					{desktop.localFilesAvailable && (
+						<button
+							type="button"
+							className="sh-composer-attach"
+							onClick={() => void pickAttachments()}
+							disabled={!canPrompt || attachmentBusy}
+							title="reference local files"
+							aria-label="reference local files"
+						>
+							<Paperclip size={15} aria-hidden="true" />
+						</button>
+					)}
 					<Workspace cwd={snapshot.state?.cwd} />
 					{thinkingLevels.length > 0 && configuredThinkingLevel && (
 						<select
@@ -316,7 +441,7 @@ export function Composer({ client, snapshot, prefill, onPrefillConsumed }: Compo
 					<button
 						type="button"
 						className="sh-composer-send"
-						onClick={send}
+						onClick={() => void send()}
 						disabled={!canSend}
 						title="send (Enter)"
 						aria-label="send prompt"

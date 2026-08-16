@@ -30,6 +30,8 @@ interface SizedSnapshot {
 	entries: SessionEntry[];
 }
 
+const SNAPSHOT_IMAGE = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=";
+
 /**
  * Build a synthetic transcript whose total serialized size comfortably
  * exceeds the host's `SNAPSHOT_CHUNK_BYTES` (512 KB), forcing several
@@ -48,9 +50,34 @@ function makeLargeSnapshot(): SizedSnapshot {
 			message: { role: "user", content: body, timestamp: 0 },
 		});
 	}
+	entries.push({
+		type: "message",
+		id: "image-entry",
+		parentId: null,
+		timestamp: "2026-06-20T00:00:01Z",
+		message: {
+			role: "user",
+			content: [{ type: "image", data: SNAPSHOT_IMAGE, mimeType: "image/png" }],
+			timestamp: 0,
+		},
+	});
 	return {
 		header: { type: "session", id: "sess-large", timestamp: "2026-06-20T00:00:00Z", cwd: "/tmp" },
 		entries,
+	};
+}
+
+function makeHistorySnapshot(count: number): SizedSnapshot {
+	const body = "history ".repeat(128);
+	return {
+		header: { type: "session", id: "sess-history", timestamp: "2026-06-20T00:00:00Z", cwd: "/tmp" },
+		entries: Array.from({ length: count }, (_, index) => ({
+			type: "message",
+			id: `history-${index}`,
+			parentId: null,
+			timestamp: "2026-06-20T00:00:00Z",
+			message: { role: "user", content: `${body}${index}`, timestamp: index },
+		})),
 	};
 }
 
@@ -69,6 +96,7 @@ function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 			sessionName: "large",
 			model: undefined,
 			thinkingLevel: undefined,
+			configuredThinkingLevel: () => undefined,
 			// host.ts scopes agent snapshots to `getAgentScopeId()`.
 			getAgentScopeId: () => snapshot.header.id,
 			subscribe: () => () => {},
@@ -158,13 +186,20 @@ describe("collab chunked welcome (#3144)", () => {
 
 		const frames: CollabFrame[] = [];
 		const trainDone = Promise.withResolvers<void>();
+		const imageDone = Promise.withResolvers<Extract<CollabFrame, { t: "image" }>>();
 		socket.onFrame = frame => {
 			frames.push(frame);
 			if (frame.t === "snapshot-chunk" && frame.final) trainDone.resolve();
+			if (frame.t === "image" && frame.reqId === 17) imageDone.resolve(frame);
 		};
-		socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name: "test", writeToken });
+		socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name: "test", writeToken, mediaRefs: true });
 		socket.connect();
-		await trainDone.promise;
+		await Promise.race([
+			trainDone.promise,
+			Bun.sleep(2_000).then(() => {
+				throw new Error(`snapshot train timed out; frames: ${frames.map(frame => frame.t).join(",")}`);
+			}),
+		]);
 
 		const welcomeIdx = frames.findIndex(f => f.t === "welcome");
 		expect(welcomeIdx).toBeGreaterThanOrEqual(0);
@@ -172,6 +207,7 @@ describe("collab chunked welcome (#3144)", () => {
 		if (welcome?.t !== "welcome") throw new Error("expected welcome frame");
 
 		expect(welcome.entryCount).toBe(snapshot.entries.length);
+		expect(welcome.historyRemaining).toBeUndefined();
 		expect(welcome.header.id).toBe(snapshot.header.id);
 		// Critical fix: the welcome itself MUST NOT carry the transcript inline —
 		// inline bytes were what spent the guest's 30s timeout in #3144.
@@ -201,6 +237,87 @@ describe("collab chunked welcome (#3144)", () => {
 		for (const chunk of chunks) flattened.push(...chunk.entries);
 		expect(flattened.length).toBe(snapshot.entries.length);
 		expect(flattened.map(e => e.id)).toEqual(snapshot.entries.map(e => e.id));
+		const imageEntry = flattened.find(entry => entry.id === "image-entry");
+		if (imageEntry?.type !== "message" || imageEntry.message.role !== "user") {
+			throw new Error("expected replicated image entry");
+		}
+		const content = imageEntry.message.content;
+		if (typeof content === "string" || content[0]?.type !== "image") throw new Error("expected image block");
+		const wireImage = content[0] as { type: "image"; data: string; mimeType: string; imageId?: string };
+		expect(wireImage.data).toBe("");
+		expect(wireImage.imageId).toMatch(/^[a-f0-9]{64}$/);
+
+		socket.send({ t: "fetch-image", reqId: 17, imageId: wireImage.imageId ?? "", variant: "original" });
+		const fetched = await Promise.race([
+			imageDone.promise,
+			Bun.sleep(2_000).then(() => {
+				throw new Error(`image reply timed out; frames: ${frames.map(frame => frame.t).join(",")}`);
+			}),
+		]);
+		expect(fetched.error).toBeUndefined();
+		expect(fetched.data).toBe(SNAPSHOT_IMAGE);
+		expect(fetched.mimeType).toBe("image/png");
+	});
+
+	it("sends only the newest 200 entries to a paging WebView and fetches older pages by stable id", async () => {
+		const historySnapshot = makeHistorySnapshot(1_000);
+		const originalEntries = snapshot.entries;
+		snapshot.entries = historySnapshot.entries;
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+		const key = await importRoomKey(parsed.key);
+		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		try {
+			const frames: CollabFrame[] = [];
+			const trainDone = Promise.withResolvers<void>();
+			const historyDone = Promise.withResolvers<Extract<CollabFrame, { t: "history" }>>();
+			socket.onFrame = frame => {
+				frames.push(frame);
+				if (frame.t === "snapshot-chunk" && frame.final) trainDone.resolve();
+				if (frame.t === "history" && frame.reqId === 41) historyDone.resolve(frame);
+			};
+			socket.onOpen = () =>
+				socket.send({
+					t: "hello",
+					proto: COLLAB_PROTO,
+					name: "paged-web",
+					writeToken,
+					mediaRefs: true,
+					historyPaging: true,
+				});
+			socket.connect();
+			await Promise.race([
+				trainDone.promise,
+				Bun.sleep(2_000).then(() => Promise.reject(new Error("paged welcome timed out"))),
+			]);
+
+			const welcome = frames.find(frame => frame.t === "welcome");
+			if (welcome?.t !== "welcome") throw new Error("expected paged welcome");
+			expect(welcome.entryCount).toBe(200);
+			expect(welcome.historyRemaining).toBe(800);
+			const initialEntries = frames
+				.filter((frame): frame is Extract<CollabFrame, { t: "snapshot-chunk" }> => frame.t === "snapshot-chunk")
+				.flatMap(frame => frame.entries);
+			expect(initialEntries).toHaveLength(200);
+			expect(initialEntries[0]?.id).toBe("history-800");
+			expect(initialEntries.at(-1)?.id).toBe("history-999");
+			expect(JSON.stringify(initialEntries).length * 4).toBeLessThan(JSON.stringify(historySnapshot.entries).length);
+
+			socket.send({ t: "fetch-history", reqId: 41, beforeId: "history-800", limit: 200 });
+			const page = await Promise.race([
+				historyDone.promise,
+				Bun.sleep(2_000).then(() => Promise.reject(new Error("history page timed out"))),
+			]);
+			expect(page.error).toBeUndefined();
+			expect(page.remaining).toBe(600);
+			expect(page.entries).toHaveLength(200);
+			expect(page.entries[0]?.id).toBe("history-600");
+			expect(page.entries.at(-1)?.id).toBe("history-799");
+		} finally {
+			socket.close();
+			snapshot.entries = originalEntries;
+		}
 	});
 
 	it("rejects the pending join when snapshot resume fails", async () => {
@@ -212,7 +329,7 @@ describe("collab chunked welcome (#3144)", () => {
 			await expect(
 				Promise.race([
 					joinAttempt,
-					Bun.sleep(250).then(() => {
+					Bun.sleep(2_000).then(() => {
 						throw new Error("join did not reject");
 					}),
 				]),

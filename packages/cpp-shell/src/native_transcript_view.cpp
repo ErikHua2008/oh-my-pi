@@ -1,0 +1,1422 @@
+#include "omp_shell/native_transcript_view.h"
+
+#include "omp_shell/text_utils.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstring>
+#include <limits>
+#include <string_view>
+
+namespace omp::shell {
+namespace {
+
+constexpr wchar_t kTranscriptWindowClass[] = L"OmpNativeTranscriptWindow";
+constexpr float kHorizontalPadding = 22.0F;
+constexpr float kRowVerticalPadding = 12.0F;
+constexpr float kLabelHeight = 17.0F;
+constexpr float kTextGap = 5.0F;
+constexpr float kUserWidthRatio = 0.78F;
+constexpr std::int64_t kEstimatedLineScroll = 54;
+constexpr std::int64_t kOverscan = 360;
+constexpr std::size_t kMaximumCachedLayouts = 256;
+constexpr std::size_t kMaximumCachedMedia = 32;
+constexpr std::size_t kMaximumMediaBytes = 32 * 1024 * 1024;
+constexpr std::size_t kMaximumSingleMediaBytes = 4 * 1024 * 1024;
+constexpr float kThumbnailHeight = 160.0F;
+constexpr float kMediaGap = 8.0F;
+constexpr float kScrollbarHotWidth = 5.0F;
+constexpr UINT_PTR kScrollbarHideTimer = 1;
+constexpr UINT kScrollbarHideDelayMs = 1'100;
+constexpr UINT kContextCopy = 1;
+constexpr UINT kContextSelectAll = 2;
+
+[[nodiscard]] D2D1_COLOR_F Color(std::uint32_t rgb, float alpha = 1.0F) noexcept {
+	return D2D1::ColorF(
+		static_cast<float>((rgb >> 16) & 0xFFU) / 255.0F,
+		static_cast<float>((rgb >> 8) & 0xFFU) / 255.0F,
+		static_cast<float>(rgb & 0xFFU) / 255.0F,
+		alpha);
+}
+
+[[nodiscard]] std::wstring_view RowLabel(NativeTranscriptRowKind kind) noexcept {
+	switch (kind) {
+	case NativeTranscriptRowKind::User:
+		return L"你";
+	case NativeTranscriptRowKind::Assistant:
+		return L"OMP";
+	case NativeTranscriptRowKind::Reasoning:
+		return L"思考";
+	case NativeTranscriptRowKind::Tool:
+		return L"工具";
+	case NativeTranscriptRowKind::System:
+		return L"系统";
+	case NativeTranscriptRowKind::Compaction:
+		return L"上下文压缩";
+	case NativeTranscriptRowKind::Error:
+		return L"错误";
+	}
+	return L"";
+}
+
+[[nodiscard]] D2D1_RECT_F ToD2DRect(const NativeTranscriptRectF& rect) noexcept {
+	return D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom);
+}
+
+} // namespace
+
+NativeTranscriptView::~NativeTranscriptView() {
+	Destroy();
+}
+
+bool NativeTranscriptView::Create(HWND parent, HINSTANCE instance) {
+	if (window_ != nullptr) {
+		return true;
+	}
+	if (!RegisterWindowClass(instance)) {
+		return false;
+	}
+
+	window_ = CreateWindowExW(
+		0,
+		kTranscriptWindowClass,
+		L"",
+		WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP,
+		0,
+		0,
+		1,
+		1,
+		parent,
+		nullptr,
+		instance,
+		this);
+	if (window_ == nullptr) {
+		return false;
+	}
+
+	HRESULT result = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d_factory_.ReleaseAndGetAddressOf());
+	if (SUCCEEDED(result)) {
+		result = DWriteCreateFactory(
+			DWRITE_FACTORY_TYPE_SHARED,
+			__uuidof(IDWriteFactory),
+			reinterpret_cast<IUnknown**>(dwrite_factory_.ReleaseAndGetAddressOf()));
+	}
+	if (FAILED(result)) {
+		Destroy();
+		return false;
+	}
+
+	result = dwrite_factory_->CreateTextFormat(
+		L"Segoe UI",
+		nullptr,
+		DWRITE_FONT_WEIGHT_NORMAL,
+		DWRITE_FONT_STYLE_NORMAL,
+		DWRITE_FONT_STRETCH_NORMAL,
+		15.0F,
+		L"zh-CN",
+		text_format_.ReleaseAndGetAddressOf());
+	if (SUCCEEDED(result)) {
+		result = dwrite_factory_->CreateTextFormat(
+			L"Segoe UI",
+			nullptr,
+			DWRITE_FONT_WEIGHT_SEMI_BOLD,
+			DWRITE_FONT_STYLE_NORMAL,
+			DWRITE_FONT_STRETCH_NORMAL,
+			11.0F,
+			L"zh-CN",
+			label_format_.ReleaseAndGetAddressOf());
+	}
+	if (FAILED(result)) {
+		Destroy();
+		return false;
+	}
+	HRESULT wic_result = CoCreateInstance(
+		CLSID_WICImagingFactory2,
+		nullptr,
+		CLSCTX_INPROC_SERVER,
+		IID_PPV_ARGS(wic_factory_.ReleaseAndGetAddressOf()));
+	if (FAILED(wic_result)) {
+		static_cast<void>(CoCreateInstance(
+			CLSID_WICImagingFactory,
+			nullptr,
+			CLSCTX_INPROC_SERVER,
+			IID_PPV_ARGS(wic_factory_.ReleaseAndGetAddressOf())));
+	}
+	text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+	text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+	return true;
+}
+
+void NativeTranscriptView::Destroy() {
+	if (window_ != nullptr) {
+		KillTimer(window_, kScrollbarHideTimer);
+	}
+	DiscardDeviceResources();
+	layout_cache_.clear();
+	media_cache_.clear();
+	requested_media_.clear();
+	text_format_.Reset();
+	label_format_.Reset();
+	dwrite_factory_.Reset();
+	wic_factory_.Reset();
+	d2d_factory_.Reset();
+	if (window_ != nullptr) {
+		const HWND owned = window_;
+		window_ = nullptr;
+		DestroyWindow(owned);
+	}
+	visible_ = false;
+}
+
+void NativeTranscriptView::SetBounds(const RECT& bounds) {
+	if (window_ == nullptr) {
+		return;
+	}
+	const int width = std::max(0L, bounds.right - bounds.left);
+	const int height = std::max(0L, bounds.bottom - bounds.top);
+	SetWindowPos(
+		window_, HWND_TOP, bounds.left, bounds.top, width, height, SWP_NOACTIVATE | (visible_ ? SWP_SHOWWINDOW : 0));
+	ScrollTo(scroll_offset_, false);
+}
+
+void NativeTranscriptView::SetVisible(bool visible) {
+	visible_ = visible;
+	if (window_ == nullptr) {
+		return;
+	}
+	ShowWindow(window_, visible ? SW_SHOWNA : SW_HIDE);
+	if (visible) {
+		SetWindowPos(window_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		InvalidateRect(window_, nullptr, FALSE);
+		MaybeRequestEarlier();
+	}
+}
+
+void NativeTranscriptView::Clear() {
+	if (window_ != nullptr) {
+		KillTimer(window_, kScrollbarHideTimer);
+	}
+	model_.Clear();
+	layout_cache_.clear();
+	media_cache_.clear();
+	requested_media_.clear();
+	ClearSelection();
+	scroll_offset_ = 0;
+	history_remaining_ = 0;
+	history_loading_ = false;
+	history_request_sent_ = false;
+	history_request_delivered_ = false;
+	overlay_scrollbar_visible_ = false;
+	scrollbar_hovered_ = false;
+	scrollbar_dragging_ = false;
+	jump_button_hovered_ = false;
+	jump_button_pressed_ = false;
+	mouse_tracking_ = false;
+	stick_to_bottom_ = true;
+	UpdateScrollInfo();
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows) {
+	const bool keep_tail = stick_to_bottom_ || scroll_offset_ >= MaximumScroll() - 2;
+	model_.ReplaceSnapshot(std::move(rows));
+	if ((selection_anchor_ && !model_.IndexOf(selection_anchor_->row_id)) ||
+		(selection_focus_ && !model_.IndexOf(selection_focus_->row_id))) {
+		ClearSelection();
+	}
+	layout_cache_.clear();
+	if (keep_tail) {
+		ScrollToBottom();
+	} else {
+		ScrollTo(scroll_offset_, false);
+	}
+	UpdateScrollInfo();
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+void NativeTranscriptView::Upsert(NativeTranscriptRow row) {
+	const bool keep_tail = stick_to_bottom_ || scroll_offset_ >= MaximumScroll() - 2;
+	const std::string id = row.id;
+	static_cast<void>(model_.Upsert(std::move(row)));
+	layout_cache_.erase(id);
+	if (keep_tail) {
+		ScrollToBottom();
+	} else {
+		ScrollTo(scroll_offset_, false);
+	}
+	UpdateScrollInfo();
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+void NativeTranscriptView::Remove(std::string_view id) {
+	const bool keep_tail = stick_to_bottom_ || scroll_offset_ >= MaximumScroll() - 2;
+	if (!model_.Remove(id)) {
+		return;
+	}
+	if ((selection_anchor_ && selection_anchor_->row_id == id) ||
+		(selection_focus_ && selection_focus_->row_id == id)) {
+		ClearSelection();
+	}
+	layout_cache_.erase(std::string(id));
+	if (keep_tail) {
+		ScrollToBottom();
+	} else {
+		ScrollTo(scroll_offset_, false);
+	}
+	UpdateScrollInfo();
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+void NativeTranscriptView::SetHistoryState(std::size_t remaining, bool loading) {
+	if (remaining != history_remaining_ || (history_loading_ && !loading)) {
+		history_request_sent_ = false;
+		history_request_delivered_ = false;
+	}
+	history_remaining_ = remaining;
+	history_loading_ = loading;
+	MaybeRequestEarlier();
+}
+
+void NativeTranscriptView::SetHistoryRequestHandler(std::function<void()> handler) {
+	history_request_handler_ = std::move(handler);
+	MaybeRequestEarlier();
+}
+
+bool NativeTranscriptView::TakeHistoryRequest() noexcept {
+	if (!history_request_sent_ || history_request_delivered_) {
+		return false;
+	}
+	history_request_delivered_ = true;
+	return true;
+}
+
+void NativeTranscriptView::SetImageRequestHandler(std::function<void(std::string_view)> handler) {
+	image_request_handler_ = std::move(handler);
+}
+
+void NativeTranscriptView::ProvideImage(std::string image_id, std::vector<std::uint8_t> encoded_bytes) {
+	if (image_id.empty()) {
+		return;
+	}
+	requested_media_.erase(image_id);
+	MediaEntry& entry = media_cache_[image_id];
+	entry.bitmap.Reset();
+	entry.last_use = ++media_use_clock_;
+	if (encoded_bytes.empty() || encoded_bytes.size() > kMaximumSingleMediaBytes) {
+		entry.encoded_bytes.clear();
+		entry.failed = true;
+	} else {
+		entry.encoded_bytes = std::move(encoded_bytes);
+		entry.failed = false;
+	}
+	TrimMediaCache();
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+LRESULT CALLBACK NativeTranscriptView::WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+	NativeTranscriptView* view = reinterpret_cast<NativeTranscriptView*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+	if (message == WM_NCCREATE) {
+		const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+		view = static_cast<NativeTranscriptView*>(create->lpCreateParams);
+		view->window_ = window;
+		SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(view));
+	}
+	if (view != nullptr) {
+		return view->HandleMessage(message, wparam, lparam);
+	}
+	return DefWindowProcW(window, message, wparam, lparam);
+}
+
+LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
+	switch (message) {
+	case WM_PAINT:
+		Paint();
+		return 0;
+	case WM_ERASEBKGND:
+		return 1;
+	case WM_SIZE:
+		if (render_target_ != nullptr) {
+			const UINT width = LOWORD(lparam);
+			const UINT height = HIWORD(lparam);
+			render_target_->Resize(D2D1::SizeU(width, height));
+		}
+		ScrollTo(scroll_offset_, false);
+		return 0;
+	case WM_DPICHANGED_AFTERPARENT:
+		DiscardDeviceResources();
+		layout_cache_.clear();
+		UpdateScrollInfo();
+		InvalidateRect(window_, nullptr, FALSE);
+		return 0;
+	case WM_TIMER:
+		if (wparam == kScrollbarHideTimer && !scrollbar_hovered_ && !scrollbar_dragging_) {
+			KillTimer(window_, kScrollbarHideTimer);
+			if (overlay_scrollbar_visible_) {
+				overlay_scrollbar_visible_ = false;
+				InvalidateRect(window_, nullptr, FALSE);
+			}
+			return 0;
+		}
+		break;
+	case WM_MOUSEWHEEL: {
+		RevealOverlayScrollbar();
+		wheel_remainder_ += GET_WHEEL_DELTA_WPARAM(wparam);
+		UINT lines = 3;
+		SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+		if (lines == WHEEL_PAGESCROLL) {
+			const int pages = wheel_remainder_ / WHEEL_DELTA;
+			wheel_remainder_ %= WHEEL_DELTA;
+			ScrollBy(-static_cast<std::int64_t>(pages) * ClientHeightDip(), true);
+		} else {
+			const int notches = wheel_remainder_ / WHEEL_DELTA;
+			wheel_remainder_ %= WHEEL_DELTA;
+			ScrollBy(-static_cast<std::int64_t>(notches) * lines * kEstimatedLineScroll, true);
+		}
+		return 0;
+	}
+	case WM_VSCROLL: {
+		RevealOverlayScrollbar();
+		SCROLLINFO info{};
+		info.cbSize = sizeof(info);
+		info.fMask = SIF_TRACKPOS;
+		GetScrollInfo(window_, SB_VERT, &info);
+		switch (LOWORD(wparam)) {
+		case SB_LINEUP:
+			ScrollBy(-kEstimatedLineScroll, true);
+			break;
+		case SB_LINEDOWN:
+			ScrollBy(kEstimatedLineScroll, true);
+			break;
+		case SB_PAGEUP:
+			ScrollBy(-ClientHeightDip() * 9 / 10, true);
+			break;
+		case SB_PAGEDOWN:
+			ScrollBy(ClientHeightDip() * 9 / 10, true);
+			break;
+		case SB_THUMBPOSITION:
+		case SB_THUMBTRACK:
+			ScrollTo(info.nTrackPos, true);
+			break;
+		case SB_TOP:
+			ScrollTo(0, true);
+			break;
+		case SB_BOTTOM:
+			ScrollToBottom();
+			break;
+		default:
+			break;
+		}
+		return 0;
+	}
+	case WM_KEYDOWN:
+		if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 && wparam == 'C') {
+			CopySelectionToClipboard();
+			return 0;
+		}
+		if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 && wparam == 'A') {
+			SelectAll();
+			return 0;
+		}
+		switch (wparam) {
+		case VK_UP:
+			ScrollBy(-kEstimatedLineScroll, true);
+			return 0;
+		case VK_DOWN:
+			ScrollBy(kEstimatedLineScroll, true);
+			return 0;
+		case VK_PRIOR:
+			ScrollBy(-ClientHeightDip() * 9 / 10, true);
+			return 0;
+		case VK_NEXT:
+			ScrollBy(ClientHeightDip() * 9 / 10, true);
+			return 0;
+		case VK_HOME:
+			if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+				ScrollTo(0, true);
+				return 0;
+			}
+			break;
+		case VK_END:
+			if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+				ScrollToBottom();
+				return 0;
+			}
+			break;
+		default:
+			break;
+		}
+		break;
+	case WM_LBUTTONDOWN: {
+		SetFocus(window_);
+		const POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+		const D2D1_POINT_2F dip_point = PointToDip(point);
+		if (JumpButtonVisible() && CurrentJumpButton().Contains(dip_point.x, dip_point.y)) {
+			SetCapture(window_);
+			jump_button_pressed_ = true;
+			jump_button_hovered_ = true;
+			InvalidateRect(window_, nullptr, FALSE);
+			return 0;
+		}
+		NativeTranscriptScrollbarGeometry scrollbar = CurrentScrollbarGeometry();
+		if (scrollbar.scrollable && scrollbar.hit_area.Contains(dip_point.x, dip_point.y)) {
+			SetCapture(window_);
+			selecting_ = false;
+			scrollbar_dragging_ = true;
+			scrollbar_hovered_ = true;
+			RevealOverlayScrollbar();
+			if (!scrollbar.thumb.Contains(dip_point.x, dip_point.y)) {
+				const float centered_top = dip_point.y - scrollbar.thumb.Height() / 2.0F;
+				ScrollTo(
+					NativeTranscriptOffsetForThumbTop(scrollbar, centered_top, MaximumScroll()), true);
+				scrollbar = CurrentScrollbarGeometry();
+			}
+			scrollbar_drag_anchor_y_ = dip_point.y;
+			scrollbar_drag_anchor_offset_ = scroll_offset_;
+			return 0;
+		}
+		SetCapture(window_);
+		selecting_ = true;
+		if (const auto hit = HitTestText(point)) {
+			if ((GetKeyState(VK_SHIFT) & 0x8000) == 0 || !selection_anchor_) {
+				selection_anchor_ = hit;
+			}
+			selection_focus_ = hit;
+			InvalidateRect(window_, nullptr, FALSE);
+		}
+		return 0;
+	}
+	case WM_MOUSEMOVE: {
+		const POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+		if (!mouse_tracking_) {
+			TRACKMOUSEEVENT tracking{};
+			tracking.cbSize = sizeof(tracking);
+			tracking.dwFlags = TME_LEAVE;
+			tracking.hwndTrack = window_;
+			mouse_tracking_ = TrackMouseEvent(&tracking) != FALSE;
+		}
+		UpdateOverlayHover(point);
+		if (scrollbar_dragging_ && (wparam & MK_LBUTTON) != 0) {
+			const NativeTranscriptScrollbarGeometry scrollbar = CurrentScrollbarGeometry();
+			const float travel = scrollbar.track.Height() - scrollbar.thumb.Height();
+			if (scrollbar.scrollable && travel > 0.0F) {
+				const float delta = PointToDip(point).y - scrollbar_drag_anchor_y_;
+				const auto offset_delta = static_cast<std::int64_t>(
+					std::llround(delta / travel * static_cast<float>(MaximumScroll())));
+				ScrollTo(scrollbar_drag_anchor_offset_ + offset_delta, true);
+			}
+			return 0;
+		}
+		if (jump_button_pressed_) {
+			return 0;
+		}
+		if (selecting_ && (wparam & MK_LBUTTON) != 0) {
+			RECT client{};
+			GetClientRect(window_, &client);
+			if (point.y < 0) {
+				ScrollBy(-kEstimatedLineScroll, true);
+			} else if (point.y >= client.bottom) {
+				ScrollBy(kEstimatedLineScroll, true);
+			}
+			if (const auto hit = HitTestText(point)) {
+				selection_focus_ = hit;
+				InvalidateRect(window_, nullptr, FALSE);
+			}
+			return 0;
+		}
+		break;
+	}
+	case WM_LBUTTONUP: {
+		const POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+		if (scrollbar_dragging_) {
+			scrollbar_dragging_ = false;
+			if (GetCapture() == window_) {
+				ReleaseCapture();
+			}
+			ScheduleOverlayScrollbarHide();
+			return 0;
+		}
+		if (jump_button_pressed_) {
+			const D2D1_POINT_2F dip_point = PointToDip(point);
+			const bool activate = JumpButtonVisible() && CurrentJumpButton().Contains(dip_point.x, dip_point.y);
+			jump_button_pressed_ = false;
+			if (GetCapture() == window_) {
+				ReleaseCapture();
+			}
+			if (activate) {
+				ScrollToBottom();
+			}
+			InvalidateRect(window_, nullptr, FALSE);
+			return 0;
+		}
+		if (selecting_) {
+			if (const auto hit = HitTestText(point)) {
+				selection_focus_ = hit;
+			}
+			selecting_ = false;
+			if (GetCapture() == window_) {
+				ReleaseCapture();
+			}
+			InvalidateRect(window_, nullptr, FALSE);
+		}
+		return 0;
+	}
+	case WM_MOUSELEAVE:
+		mouse_tracking_ = false;
+		if (scrollbar_hovered_ || jump_button_hovered_) {
+			scrollbar_hovered_ = false;
+			jump_button_hovered_ = false;
+			InvalidateRect(window_, nullptr, FALSE);
+		}
+		ScheduleOverlayScrollbarHide();
+		return 0;
+	case WM_SETCURSOR:
+		if (LOWORD(lparam) == HTCLIENT) {
+			POINT point{};
+			if (GetCursorPos(&point) && ScreenToClient(window_, &point)) {
+				const D2D1_POINT_2F dip_point = PointToDip(point);
+				if (JumpButtonVisible() && CurrentJumpButton().Contains(dip_point.x, dip_point.y)) {
+					SetCursor(LoadCursorW(nullptr, IDC_HAND));
+					return TRUE;
+				}
+				const NativeTranscriptScrollbarGeometry scrollbar = CurrentScrollbarGeometry();
+				if (scrollbar.scrollable && scrollbar.hit_area.Contains(dip_point.x, dip_point.y)) {
+					SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+					return TRUE;
+				}
+			}
+			SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+			return TRUE;
+		}
+		break;
+	case WM_LBUTTONDBLCLK: {
+		const POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+		if (const auto hit = HitTestText(point)) {
+			SelectRow(*hit);
+		}
+		return 0;
+	}
+	case WM_CAPTURECHANGED:
+		selecting_ = false;
+		scrollbar_dragging_ = false;
+		jump_button_pressed_ = false;
+		ScheduleOverlayScrollbarHide();
+		return 0;
+	case WM_CONTEXTMENU: {
+		POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+		if (point.x == -1 && point.y == -1) {
+			RECT client{};
+			GetClientRect(window_, &client);
+			point = {(client.left + client.right) / 2, (client.top + client.bottom) / 2};
+			ClientToScreen(window_, &point);
+		}
+		ShowContextMenu(point);
+		return 0;
+	}
+	case WM_GETDLGCODE:
+		return DLGC_WANTARROWS | DLGC_WANTCHARS;
+	case WM_NCDESTROY:
+		KillTimer(window_, kScrollbarHideTimer);
+		SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
+		window_ = nullptr;
+		return 0;
+	default:
+		break;
+	}
+	return DefWindowProcW(window_, message, wparam, lparam);
+}
+
+bool NativeTranscriptView::RegisterWindowClass(HINSTANCE instance) const {
+	WNDCLASSEXW window_class{};
+	window_class.cbSize = sizeof(window_class);
+	window_class.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+	window_class.lpfnWndProc = WindowProcedure;
+	window_class.hInstance = instance;
+	window_class.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
+	window_class.hbrBackground = nullptr;
+	window_class.lpszClassName = kTranscriptWindowClass;
+	return RegisterClassExW(&window_class) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+HRESULT NativeTranscriptView::EnsureDeviceResources() {
+	if (render_target_ != nullptr) {
+		return S_OK;
+	}
+	if (window_ == nullptr || d2d_factory_ == nullptr) {
+		return E_UNEXPECTED;
+	}
+
+	RECT client{};
+	GetClientRect(window_, &client);
+	const UINT width = static_cast<UINT>(std::max(1L, client.right - client.left));
+	const UINT height = static_cast<UINT>(std::max(1L, client.bottom - client.top));
+	const float dpi = static_cast<float>(GetDpiForWindow(window_));
+	HRESULT result = d2d_factory_->CreateHwndRenderTarget(
+		D2D1::RenderTargetProperties(
+			D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(), dpi, dpi, D2D1_RENDER_TARGET_USAGE_NONE),
+		D2D1::HwndRenderTargetProperties(window_, D2D1::SizeU(width, height), D2D1_PRESENT_OPTIONS_NONE),
+		render_target_.ReleaseAndGetAddressOf());
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(Color(0xECECEC), primary_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(Color(0x969696), muted_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(Color(0x2B2D31), user_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(Color(0x35373B), line_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(Color(0x4D73B9, 0.72F), selection_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(Color(0x74777D, 0.62F), scrollbar_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(
+			Color(0xA7AAB0, 0.88F), scrollbar_hot_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(
+			Color(0x2C2E32, 0.98F), jump_button_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(
+			Color(0x3A3D42, 0.98F), jump_button_hot_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(
+			Color(0x555960, 0.92F), jump_button_border_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(
+			Color(0x000000, 0.34F), jump_button_shadow_brush_.ReleaseAndGetAddressOf());
+	}
+	if (FAILED(result)) {
+		DiscardDeviceResources();
+	}
+	return result;
+}
+
+void NativeTranscriptView::DiscardDeviceResources() {
+	for (auto& [id, media] : media_cache_) {
+		static_cast<void>(id);
+		media.bitmap.Reset();
+	}
+	jump_button_shadow_brush_.Reset();
+	jump_button_border_brush_.Reset();
+	jump_button_hot_brush_.Reset();
+	jump_button_brush_.Reset();
+	scrollbar_hot_brush_.Reset();
+	scrollbar_brush_.Reset();
+	selection_brush_.Reset();
+	line_brush_.Reset();
+	user_brush_.Reset();
+	muted_brush_.Reset();
+	primary_brush_.Reset();
+	render_target_.Reset();
+}
+
+void NativeTranscriptView::Paint() {
+	PAINTSTRUCT paint{};
+	BeginPaint(window_, &paint);
+	if (SUCCEEDED(EnsureDeviceResources())) {
+		render_target_->BeginDraw();
+		render_target_->SetTransform(D2D1::Matrix3x2F::Identity());
+		render_target_->Clear(Color(0x202123));
+		const D2D1_SIZE_F size = render_target_->GetSize();
+		layout_changed_during_paint_ = false;
+		const auto range = model_.VisibleRange(
+			scroll_offset_, static_cast<std::int64_t>(std::ceil(size.height)), kOverscan);
+		for (std::size_t index = range.first; index < range.last; ++index) {
+			DrawRow(index, size.width);
+		}
+		TrimLayoutCache(range);
+		DrawOverlayControls(size.width, size.height);
+		const HRESULT result = render_target_->EndDraw();
+		if (result == D2DERR_RECREATE_TARGET) {
+			DiscardDeviceResources();
+		} else if (layout_changed_during_paint_) {
+			if (stick_to_bottom_) {
+				scroll_offset_ = MaximumScroll();
+			} else {
+				scroll_offset_ = std::min(scroll_offset_, MaximumScroll());
+			}
+			UpdateScrollInfo();
+			InvalidateRect(window_, nullptr, FALSE);
+		}
+	}
+	EndPaint(window_, &paint);
+}
+
+void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
+	const NativeTranscriptRow& row = model_.RowAt(index);
+	const bool user = row.kind == NativeTranscriptRowKind::User;
+	const float available_width = std::max(80.0F, viewport_width - 2.0F * kHorizontalPadding);
+	const float content_width = user ? std::max(80.0F, available_width * kUserWidthRatio) : available_width;
+	TextLayout* cached = GetTextLayout(row, content_width);
+	if (cached == nullptr) {
+		return;
+	}
+
+	const std::int32_t measured_height = static_cast<std::int32_t>(
+		std::ceil(
+			cached->measured_height + 2.0F * kRowVerticalPadding + kLabelHeight + kTextGap +
+			static_cast<float>(row.media_ids.size()) * (kThumbnailHeight + kMediaGap)));
+	if (row.height != measured_height) {
+		static_cast<void>(model_.UpdateHeight(row.id, measured_height));
+		layout_changed_during_paint_ = true;
+	}
+	const float row_top = static_cast<float>(model_.RowTop(index) - scroll_offset_);
+	const float row_height = static_cast<float>(model_.RowAt(index).height);
+	const float content_left = user ? viewport_width - kHorizontalPadding - content_width : kHorizontalPadding;
+
+	if (user) {
+		const D2D1_ROUNDED_RECT bubble = D2D1::RoundedRect(
+			D2D1::RectF(
+				content_left - 12.0F,
+				row_top + 5.0F,
+				viewport_width - kHorizontalPadding + 12.0F,
+				row_top + row_height - 5.0F),
+			10.0F,
+			10.0F);
+		render_target_->FillRoundedRectangle(bubble, user_brush_.Get());
+	}
+
+	const std::wstring_view label = RowLabel(row.kind);
+	const D2D1_RECT_F label_rect = D2D1::RectF(
+		content_left,
+		row_top + kRowVerticalPadding,
+		content_left + content_width,
+		row_top + kRowVerticalPadding + kLabelHeight);
+	render_target_->DrawTextW(
+		label.data(),
+		static_cast<UINT32>(label.size()),
+		label_format_.Get(),
+		label_rect,
+		row.kind == NativeTranscriptRowKind::Error ? primary_brush_.Get() : muted_brush_.Get(),
+		D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+	const D2D1_POINT_2F origin = D2D1::Point2F(
+		content_left, row_top + kRowVerticalPadding + kLabelHeight + kTextGap);
+	DrawSelection(index, *cached, origin.x, origin.y);
+	render_target_->DrawTextLayout(origin, cached->layout.Get(), primary_brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+	DrawMedia(row, content_left, origin.y + cached->measured_height + kMediaGap, content_width);
+	if (!user) {
+		render_target_->DrawLine(
+			D2D1::Point2F(kHorizontalPadding, row_top + row_height - 1.0F),
+			D2D1::Point2F(viewport_width - kHorizontalPadding, row_top + row_height - 1.0F),
+			line_brush_.Get(),
+			1.0F);
+	}
+}
+
+void NativeTranscriptView::DrawOverlayControls(float viewport_width, float viewport_height) {
+	const NativeTranscriptScrollbarGeometry scrollbar = ComputeNativeTranscriptScrollbar(
+		viewport_width, viewport_height, model_.TotalHeight(), scroll_offset_);
+	if (scrollbar.scrollable && (overlay_scrollbar_visible_ || scrollbar_hovered_ || scrollbar_dragging_)) {
+		NativeTranscriptRectF thumb = scrollbar.thumb;
+		ID2D1SolidColorBrush* brush = scrollbar_brush_.Get();
+		if (scrollbar_hovered_ || scrollbar_dragging_) {
+			const float center = (thumb.left + thumb.right) / 2.0F;
+			thumb.left = center - kScrollbarHotWidth / 2.0F;
+			thumb.right = center + kScrollbarHotWidth / 2.0F;
+			brush = scrollbar_hot_brush_.Get();
+		}
+		const float radius = std::max(1.5F, thumb.Width() / 2.0F);
+		render_target_->FillRoundedRectangle(D2D1::RoundedRect(ToD2DRect(thumb), radius, radius), brush);
+	}
+
+	if (!ShouldShowNativeTranscriptJumpButton(
+			model_.TotalHeight(), static_cast<std::int64_t>(std::floor(viewport_height)), scroll_offset_)) {
+		return;
+	}
+	const NativeTranscriptRectF button = ComputeNativeTranscriptJumpButton(viewport_width, viewport_height);
+	if (button.Width() <= 0.0F || button.Height() <= 0.0F) {
+		return;
+	}
+	const float radius = button.Width() / 2.0F;
+	const D2D1_POINT_2F center = D2D1::Point2F(
+		(button.left + button.right) / 2.0F,
+		(button.top + button.bottom) / 2.0F + (jump_button_pressed_ ? 1.0F : 0.0F));
+	const D2D1_ELLIPSE shadow = D2D1::Ellipse(D2D1::Point2F(center.x, center.y + 2.0F), radius + 1.0F, radius + 1.0F);
+	render_target_->FillEllipse(shadow, jump_button_shadow_brush_.Get());
+	const D2D1_ELLIPSE face = D2D1::Ellipse(center, radius, radius);
+	render_target_->FillEllipse(
+		face, jump_button_hovered_ ? jump_button_hot_brush_.Get() : jump_button_brush_.Get());
+	render_target_->DrawEllipse(face, jump_button_border_brush_.Get(), 1.0F);
+
+	const float arrow_top = center.y - 5.0F;
+	const float arrow_bottom = center.y + 5.0F;
+	render_target_->DrawLine(
+		D2D1::Point2F(center.x, arrow_top),
+		D2D1::Point2F(center.x, arrow_bottom),
+		primary_brush_.Get(),
+		1.6F);
+	render_target_->DrawLine(
+		D2D1::Point2F(center.x - 4.5F, center.y + 1.0F),
+		D2D1::Point2F(center.x, arrow_bottom),
+		primary_brush_.Get(),
+		1.6F);
+	render_target_->DrawLine(
+		D2D1::Point2F(center.x + 4.5F, center.y + 1.0F),
+		D2D1::Point2F(center.x, arrow_bottom),
+		primary_brush_.Get(),
+		1.6F);
+}
+
+void NativeTranscriptView::DrawMedia(const NativeTranscriptRow& row, float left, float top, float width) {
+	for (const std::string& image_id : row.media_ids) {
+		RequestMedia(image_id);
+		ID2D1Bitmap* bitmap = GetMediaBitmap(image_id);
+		const D2D1_RECT_F slot = D2D1::RectF(left, top, left + width, top + kThumbnailHeight);
+		if (bitmap != nullptr) {
+			const D2D1_SIZE_F image_size = bitmap->GetSize();
+			if (image_size.width > 0.0F && image_size.height > 0.0F) {
+				const float scale = std::min(width / image_size.width, kThumbnailHeight / image_size.height);
+				const float draw_width = image_size.width * scale;
+				const float draw_height = image_size.height * scale;
+				const D2D1_RECT_F destination = D2D1::RectF(
+					left,
+					top,
+					left + draw_width,
+					top + draw_height);
+				render_target_->DrawBitmap(
+					bitmap, &destination, 1.0F, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
+			}
+		} else {
+			render_target_->FillRoundedRectangle(D2D1::RoundedRect(slot, 8.0F, 8.0F), user_brush_.Get());
+			const auto found = media_cache_.find(image_id);
+			const bool failed = found != media_cache_.end() && found->second.failed;
+			const wchar_t* label = failed ? L"图片不可用" : L"图片加载中…";
+			const UINT32 label_length = failed ? 5U : 6U;
+			render_target_->DrawTextW(
+				label,
+				label_length,
+				label_format_.Get(),
+				D2D1::RectF(left + 12.0F, top + 12.0F, left + width - 12.0F, top + 36.0F),
+				muted_brush_.Get());
+		}
+		top += kThumbnailHeight + kMediaGap;
+	}
+}
+
+ID2D1Bitmap* NativeTranscriptView::GetMediaBitmap(std::string_view image_id) {
+	const auto found = media_cache_.find(std::string(image_id));
+	if (found == media_cache_.end() || found->second.failed || found->second.encoded_bytes.empty()) {
+		return nullptr;
+	}
+	MediaEntry& entry = found->second;
+	entry.last_use = ++media_use_clock_;
+	if (entry.bitmap != nullptr) {
+		return entry.bitmap.Get();
+	}
+	if (wic_factory_ == nullptr || render_target_ == nullptr ||
+		entry.encoded_bytes.size() > std::numeric_limits<DWORD>::max()) {
+		return nullptr;
+	}
+
+	Microsoft::WRL::ComPtr<IWICStream> stream;
+	Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+	Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+	Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+	HRESULT result = wic_factory_->CreateStream(stream.ReleaseAndGetAddressOf());
+	if (SUCCEEDED(result)) {
+		result = stream->InitializeFromMemory(
+			entry.encoded_bytes.data(), static_cast<DWORD>(entry.encoded_bytes.size()));
+	}
+	if (SUCCEEDED(result)) {
+		result = wic_factory_->CreateDecoderFromStream(
+			stream.Get(), nullptr, WICDecodeMetadataCacheOnLoad, decoder.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = decoder->GetFrame(0, frame.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = wic_factory_->CreateFormatConverter(converter.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = converter->Initialize(
+			frame.Get(),
+			GUID_WICPixelFormat32bppPBGRA,
+			WICBitmapDitherTypeNone,
+			nullptr,
+			0.0,
+			WICBitmapPaletteTypeMedianCut);
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateBitmapFromWicBitmap(
+			converter.Get(), nullptr, entry.bitmap.ReleaseAndGetAddressOf());
+	}
+	if (FAILED(result)) {
+		entry.bitmap.Reset();
+		entry.encoded_bytes.clear();
+		entry.failed = true;
+		return nullptr;
+	}
+	return entry.bitmap.Get();
+}
+
+void NativeTranscriptView::RequestMedia(std::string_view image_id) {
+	if (image_id.empty() || media_cache_.contains(std::string(image_id)) ||
+		requested_media_.contains(std::string(image_id)) || !image_request_handler_) {
+		return;
+	}
+	const std::string owned(image_id);
+	requested_media_.insert(owned);
+	image_request_handler_(owned);
+}
+
+void NativeTranscriptView::TrimMediaCache() {
+	std::size_t total_bytes = 0;
+	for (const auto& [id, entry] : media_cache_) {
+		static_cast<void>(id);
+		total_bytes += entry.encoded_bytes.size();
+	}
+	while (media_cache_.size() > kMaximumCachedMedia || total_bytes > kMaximumMediaBytes) {
+		const auto oldest = std::min_element(
+			media_cache_.begin(),
+			media_cache_.end(),
+			[](const auto& left, const auto& right) { return left.second.last_use < right.second.last_use; });
+		if (oldest == media_cache_.end()) {
+			break;
+		}
+		total_bytes -= oldest->second.encoded_bytes.size();
+		requested_media_.erase(oldest->first);
+		media_cache_.erase(oldest);
+	}
+}
+
+void NativeTranscriptView::DrawSelection(
+	std::size_t index,
+	const TextLayout& layout,
+	float origin_x,
+	float origin_y) {
+	if (selection_brush_ == nullptr || layout.layout == nullptr) {
+		return;
+	}
+	const auto selection = NormalizedSelection();
+	if (!selection || index < selection->first_index || index > selection->last_index) {
+		return;
+	}
+	const auto text_size = static_cast<std::uint32_t>(
+		std::min<std::size_t>(layout.text.size(), std::numeric_limits<std::uint32_t>::max()));
+	const std::uint32_t start =
+		index == selection->first_index ? std::min(selection->first_position, text_size) : 0;
+	const std::uint32_t end =
+		index == selection->last_index ? std::min(selection->last_position, text_size) : text_size;
+	if (end <= start) {
+		return;
+	}
+
+	UINT32 metric_count = 0;
+	static_cast<void>(layout.layout->HitTestTextRange(
+		start, end - start, origin_x, origin_y, nullptr, 0, &metric_count));
+	if (metric_count == 0) {
+		return;
+	}
+	std::vector<DWRITE_HIT_TEST_METRICS> metrics(metric_count);
+	if (FAILED(layout.layout->HitTestTextRange(
+			start, end - start, origin_x, origin_y, metrics.data(), metric_count, &metric_count))) {
+		return;
+	}
+	for (UINT32 metric_index = 0; metric_index < metric_count; ++metric_index) {
+		const DWRITE_HIT_TEST_METRICS& metric = metrics[metric_index];
+		render_target_->FillRectangle(
+			D2D1::RectF(metric.left, metric.top, metric.left + metric.width, metric.top + metric.height),
+			selection_brush_.Get());
+	}
+}
+
+std::optional<NativeTranscriptView::SelectionPoint> NativeTranscriptView::HitTestText(POINT point) {
+	if (model_.Empty() || window_ == nullptr) {
+		return std::nullopt;
+	}
+	RECT client{};
+	GetClientRect(window_, &client);
+	if (client.right <= client.left || client.bottom <= client.top) {
+		return std::nullopt;
+	}
+	point.x = std::clamp(point.x, client.left, client.right - 1);
+	point.y = std::clamp(point.y, client.top, client.bottom - 1);
+	const float scale = DpiScale();
+	const float x = static_cast<float>(point.x) / scale;
+	const float y = static_cast<float>(point.y) / scale;
+	const float viewport_width = static_cast<float>(client.right - client.left) / scale;
+	const std::int64_t content_y = scroll_offset_ + static_cast<std::int64_t>(std::floor(y));
+	const NativeTranscriptVisibleRange range = model_.VisibleRange(content_y, 1);
+	if (range.Empty() || range.first >= model_.Size()) {
+		return std::nullopt;
+	}
+
+	const std::size_t index = range.first;
+	const NativeTranscriptRow& row = model_.RowAt(index);
+	const bool user = row.kind == NativeTranscriptRowKind::User;
+	const float available_width = std::max(80.0F, viewport_width - 2.0F * kHorizontalPadding);
+	const float content_width = user ? std::max(80.0F, available_width * kUserWidthRatio) : available_width;
+	TextLayout* layout = GetTextLayout(row, content_width);
+	if (layout == nullptr) {
+		return std::nullopt;
+	}
+	const float content_left = user ? viewport_width - kHorizontalPadding - content_width : kHorizontalPadding;
+	const float text_top = static_cast<float>(model_.RowTop(index) - scroll_offset_) + kRowVerticalPadding +
+		kLabelHeight + kTextGap;
+	if (y <= text_top) {
+		return SelectionPoint{row.id, 0};
+	}
+	const auto text_size = static_cast<std::uint32_t>(
+		std::min<std::size_t>(layout->text.size(), std::numeric_limits<std::uint32_t>::max()));
+	if (y >= text_top + layout->measured_height) {
+		return SelectionPoint{row.id, text_size};
+	}
+
+	BOOL trailing = FALSE;
+	BOOL inside = FALSE;
+	DWRITE_HIT_TEST_METRICS metric{};
+	if (FAILED(layout->layout->HitTestPoint(x - content_left, y - text_top, &trailing, &inside, &metric))) {
+		return std::nullopt;
+	}
+	std::uint32_t position = metric.textPosition;
+	if (trailing) {
+		position = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+			static_cast<std::uint64_t>(position) + metric.length,
+			std::numeric_limits<std::uint32_t>::max()));
+	}
+	return SelectionPoint{row.id, std::min(position, text_size)};
+}
+
+std::optional<NativeTranscriptView::SelectionSpan> NativeTranscriptView::NormalizedSelection() const {
+	if (!selection_anchor_ || !selection_focus_) {
+		return std::nullopt;
+	}
+	const auto anchor_index = model_.IndexOf(selection_anchor_->row_id);
+	const auto focus_index = model_.IndexOf(selection_focus_->row_id);
+	if (!anchor_index || !focus_index) {
+		return std::nullopt;
+	}
+	if (*anchor_index < *focus_index) {
+		return SelectionSpan{*anchor_index, *focus_index, selection_anchor_->position, selection_focus_->position};
+	}
+	if (*anchor_index > *focus_index) {
+		return SelectionSpan{*focus_index, *anchor_index, selection_focus_->position, selection_anchor_->position};
+	}
+	const std::uint32_t first = std::min(selection_anchor_->position, selection_focus_->position);
+	const std::uint32_t last = std::max(selection_anchor_->position, selection_focus_->position);
+	return SelectionSpan{*anchor_index, *anchor_index, first, last};
+}
+
+bool NativeTranscriptView::HasSelection() const {
+	const auto selection = NormalizedSelection();
+	return selection &&
+		(selection->first_index != selection->last_index || selection->first_position != selection->last_position);
+}
+
+void NativeTranscriptView::ClearSelection() {
+	selection_anchor_.reset();
+	selection_focus_.reset();
+	selecting_ = false;
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+void NativeTranscriptView::SelectAll() {
+	if (model_.Empty()) {
+		ClearSelection();
+		return;
+	}
+	const NativeTranscriptRow& first = model_.RowAt(0);
+	const NativeTranscriptRow& last = model_.RowAt(model_.Size() - 1);
+	const std::wstring last_text = Utf8ToWide(last.text);
+	selection_anchor_ = SelectionPoint{first.id, 0};
+	selection_focus_ = SelectionPoint{
+		last.id,
+		static_cast<std::uint32_t>(
+			std::min<std::size_t>(last_text.size(), std::numeric_limits<std::uint32_t>::max()))};
+	InvalidateRect(window_, nullptr, FALSE);
+}
+
+void NativeTranscriptView::SelectRow(const SelectionPoint& point) {
+	const auto index = model_.IndexOf(point.row_id);
+	if (!index) {
+		return;
+	}
+	const std::wstring text = Utf8ToWide(model_.RowAt(*index).text);
+	const auto text_size = static_cast<std::uint32_t>(
+		std::min<std::size_t>(text.size(), std::numeric_limits<std::uint32_t>::max()));
+	selection_anchor_ = SelectionPoint{point.row_id, 0};
+	selection_focus_ = SelectionPoint{point.row_id, text_size};
+	InvalidateRect(window_, nullptr, FALSE);
+}
+
+void NativeTranscriptView::CopySelectionToClipboard() {
+	const auto selection = NormalizedSelection();
+	if (!selection || !HasSelection()) {
+		return;
+	}
+	const std::wstring text = ExtractNativeTranscriptText(
+		model_,
+		NativeTranscriptTextRange{
+			selection->first_index,
+			selection->last_index,
+			selection->first_position,
+			selection->last_position});
+	if (text.empty() || !OpenClipboard(window_)) {
+		return;
+	}
+	if (!EmptyClipboard()) {
+		CloseClipboard();
+		return;
+	}
+	const std::size_t byte_count = (text.size() + 1) * sizeof(wchar_t);
+	HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, byte_count);
+	if (memory != nullptr) {
+		void* destination = GlobalLock(memory);
+		if (destination != nullptr) {
+			std::memcpy(destination, text.c_str(), byte_count);
+			GlobalUnlock(memory);
+			if (SetClipboardData(CF_UNICODETEXT, memory) != nullptr) {
+				memory = nullptr;
+			}
+		}
+	}
+	if (memory != nullptr) {
+		GlobalFree(memory);
+	}
+	CloseClipboard();
+}
+
+void NativeTranscriptView::ShowContextMenu(POINT screen_point) {
+	HMENU menu = CreatePopupMenu();
+	AppendMenuW(menu, MF_STRING | (HasSelection() ? MF_ENABLED : MF_GRAYED), kContextCopy, L"复制\tCtrl+C");
+	AppendMenuW(menu, MF_STRING, kContextSelectAll, L"全选\tCtrl+A");
+	const UINT command = TrackPopupMenu(
+		menu,
+		TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+		screen_point.x,
+		screen_point.y,
+		0,
+		window_,
+		nullptr);
+	DestroyMenu(menu);
+	if (command == kContextCopy) {
+		CopySelectionToClipboard();
+	} else if (command == kContextSelectAll) {
+		SelectAll();
+	}
+}
+
+D2D1_POINT_2F NativeTranscriptView::PointToDip(POINT point) const noexcept {
+	const float scale = std::max(0.01F, DpiScale());
+	return D2D1::Point2F(static_cast<float>(point.x) / scale, static_cast<float>(point.y) / scale);
+}
+
+NativeTranscriptScrollbarGeometry NativeTranscriptView::CurrentScrollbarGeometry() const noexcept {
+	if (window_ == nullptr) {
+		return {};
+	}
+	RECT client{};
+	GetClientRect(window_, &client);
+	const float scale = std::max(0.01F, DpiScale());
+	return ComputeNativeTranscriptScrollbar(
+		static_cast<float>(client.right - client.left) / scale,
+		static_cast<float>(client.bottom - client.top) / scale,
+		model_.TotalHeight(),
+		scroll_offset_);
+}
+
+NativeTranscriptRectF NativeTranscriptView::CurrentJumpButton() const noexcept {
+	if (window_ == nullptr) {
+		return {};
+	}
+	RECT client{};
+	GetClientRect(window_, &client);
+	const float scale = std::max(0.01F, DpiScale());
+	return ComputeNativeTranscriptJumpButton(
+		static_cast<float>(client.right - client.left) / scale,
+		static_cast<float>(client.bottom - client.top) / scale);
+}
+
+bool NativeTranscriptView::JumpButtonVisible() const noexcept {
+	return ShouldShowNativeTranscriptJumpButton(model_.TotalHeight(), ClientHeightDip(), scroll_offset_);
+}
+
+void NativeTranscriptView::UpdateOverlayHover(POINT point) {
+	const D2D1_POINT_2F dip_point = PointToDip(point);
+	const NativeTranscriptScrollbarGeometry scrollbar = CurrentScrollbarGeometry();
+	const bool next_scrollbar_hovered = scrollbar.scrollable && scrollbar.hit_area.Contains(dip_point.x, dip_point.y);
+	const bool next_jump_hovered =
+		JumpButtonVisible() && CurrentJumpButton().Contains(dip_point.x, dip_point.y);
+	const bool changed = next_scrollbar_hovered != scrollbar_hovered_ || next_jump_hovered != jump_button_hovered_;
+	scrollbar_hovered_ = next_scrollbar_hovered;
+	jump_button_hovered_ = next_jump_hovered;
+	if (scrollbar_hovered_) {
+		RevealOverlayScrollbar();
+	} else {
+		ScheduleOverlayScrollbarHide();
+	}
+	if (changed && window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+void NativeTranscriptView::RevealOverlayScrollbar() {
+	if (window_ == nullptr || !CurrentScrollbarGeometry().scrollable) {
+		return;
+	}
+	const bool changed = !overlay_scrollbar_visible_;
+	overlay_scrollbar_visible_ = true;
+	if (scrollbar_hovered_ || scrollbar_dragging_) {
+		KillTimer(window_, kScrollbarHideTimer);
+	} else {
+		SetTimer(window_, kScrollbarHideTimer, kScrollbarHideDelayMs, nullptr);
+	}
+	if (changed) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+void NativeTranscriptView::ScheduleOverlayScrollbarHide() {
+	if (window_ == nullptr || !overlay_scrollbar_visible_) {
+		return;
+	}
+	if (scrollbar_hovered_ || scrollbar_dragging_) {
+		KillTimer(window_, kScrollbarHideTimer);
+		return;
+	}
+	SetTimer(window_, kScrollbarHideTimer, kScrollbarHideDelayMs, nullptr);
+}
+
+NativeTranscriptView::TextLayout* NativeTranscriptView::GetTextLayout(
+	const NativeTranscriptRow& row, float width) {
+	if (dwrite_factory_ == nullptr || text_format_ == nullptr) {
+		return nullptr;
+	}
+	const std::size_t text_hash = std::hash<std::string>{}(row.text);
+	auto found = layout_cache_.find(row.id);
+	if (found != layout_cache_.end() && found->second.text_hash == text_hash &&
+		std::abs(found->second.width - width) < 0.5F) {
+		return &found->second;
+	}
+
+	TextLayout replacement{};
+	replacement.text_hash = text_hash;
+	replacement.width = width;
+	replacement.text = Utf8ToWide(row.text);
+	const HRESULT result = dwrite_factory_->CreateTextLayout(
+		replacement.text.data(),
+		static_cast<UINT32>(replacement.text.size()),
+		text_format_.Get(),
+		width,
+		100'000.0F,
+		replacement.layout.ReleaseAndGetAddressOf());
+	if (FAILED(result)) {
+		return nullptr;
+	}
+	DWRITE_TEXT_METRICS metrics{};
+	if (FAILED(replacement.layout->GetMetrics(&metrics))) {
+		return nullptr;
+	}
+	replacement.measured_height = std::max(18.0F, metrics.height);
+	if (found == layout_cache_.end()) {
+		found = layout_cache_.emplace(row.id, std::move(replacement)).first;
+	} else {
+		found->second = std::move(replacement);
+	}
+	return &found->second;
+}
+
+void NativeTranscriptView::UpdateScrollInfo() {
+	if (window_ == nullptr) {
+		return;
+	}
+	if ((GetWindowLongPtrW(window_, GWL_STYLE) & WS_VSCROLL) != 0) {
+		ShowScrollBar(window_, SB_VERT, FALSE);
+	}
+}
+
+void NativeTranscriptView::ScrollTo(std::int64_t offset, bool user_action) {
+	const std::int64_t maximum = MaximumScroll();
+	const std::int64_t next = std::clamp<std::int64_t>(offset, 0, maximum);
+	if (user_action) {
+		stick_to_bottom_ = maximum - next <= 2;
+		RevealOverlayScrollbar();
+	}
+	if (next == scroll_offset_) {
+		UpdateScrollInfo();
+		MaybeRequestEarlier();
+		return;
+	}
+	scroll_offset_ = next;
+	UpdateScrollInfo();
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+	MaybeRequestEarlier();
+}
+
+void NativeTranscriptView::ScrollBy(std::int64_t delta, bool user_action) {
+	ScrollTo(scroll_offset_ + delta, user_action);
+}
+
+void NativeTranscriptView::ScrollToBottom() {
+	stick_to_bottom_ = true;
+	ScrollTo(MaximumScroll(), false);
+}
+
+std::int64_t NativeTranscriptView::MaximumScroll() const noexcept {
+	return std::max<std::int64_t>(0, model_.TotalHeight() - ClientHeightDip());
+}
+
+std::int64_t NativeTranscriptView::ClientHeightDip() const noexcept {
+	if (window_ == nullptr) {
+		return 0;
+	}
+	RECT client{};
+	GetClientRect(window_, &client);
+	const float scale = DpiScale();
+	return static_cast<std::int64_t>(std::max(0.0F, static_cast<float>(client.bottom - client.top) / scale));
+}
+
+float NativeTranscriptView::DpiScale() const noexcept {
+	return window_ == nullptr ? 1.0F : static_cast<float>(GetDpiForWindow(window_)) / 96.0F;
+}
+
+void NativeTranscriptView::TrimLayoutCache(const NativeTranscriptVisibleRange& range) {
+	if (layout_cache_.size() <= kMaximumCachedLayouts) {
+		return;
+	}
+	std::unordered_map<std::string, TextLayout> retained;
+	retained.reserve(range.Size());
+	for (std::size_t index = range.first; index < range.last; ++index) {
+		auto node = layout_cache_.extract(model_.RowAt(index).id);
+		if (!node.empty()) {
+			retained.insert(std::move(node));
+		}
+	}
+	layout_cache_.swap(retained);
+}
+
+void NativeTranscriptView::MaybeRequestEarlier() {
+	if (!visible_ || history_remaining_ == 0 || history_loading_ || history_request_sent_ || scroll_offset_ > kOverscan ||
+		!history_request_handler_) {
+		return;
+	}
+	history_request_sent_ = true;
+	history_request_delivered_ = false;
+	history_request_handler_();
+}
+
+} // namespace omp::shell

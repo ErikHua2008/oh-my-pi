@@ -3,7 +3,7 @@
  * instead of inventing new CSS — see tool-render.css for the `tv-` classes.
  */
 import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ToolRenderHost, ToolResultImage, ToolResultLike } from "./types";
 import { getHljs, replaceTabs, resultImagesOf, resultTextOf, shortenPath, stripAnsi } from "./util";
 
@@ -191,22 +191,67 @@ function openImage(img: ToolResultImage): void {
 	}
 }
 
-/** Thumbnails for every image block in a result; click opens full size. */
-export function ResultImages({ result }: { result: ToolResultLike | undefined }): ReactNode {
+function ResultImage({ img, index, host }: { img: ToolResultImage; index: number; host?: ToolRenderHost }): ReactNode {
+	const [resolved, setResolved] = useState<ToolResultImage>(img);
+
+	useEffect(() => {
+		setResolved(img);
+		if (img.data.length > 0 || !img.imageId || !host?.loadImage) return;
+		let disposed = false;
+		void host.loadImage(img.imageId, "thumbnail").then(payload => {
+			if (!disposed && payload) setResolved({ ...img, ...payload });
+		});
+		return () => {
+			disposed = true;
+		};
+	}, [host, img, img.data, img.imageId]);
+
+	const open = async (): Promise<void> => {
+		let image = resolved;
+		if (img.imageId && host?.loadImage) {
+			const original = await host.loadImage(img.imageId, "original");
+			if (original) image = { ...img, ...original };
+		}
+		if (image.data.length > 0) openImage(image);
+	};
+
+	return (
+		<button
+			type="button"
+			style={{ all: "unset", display: "inline-flex" }}
+			onClick={() => void open()}
+			disabled={resolved.data.length === 0 && (!img.imageId || !host?.loadImage)}
+			aria-label={`Open tool result image ${index + 1}`}
+		>
+			{resolved.data.length > 0 ? (
+				<img
+					className="tv-img"
+					src={`data:${resolved.mimeType};base64,${resolved.data}`}
+					alt={`tool result ${index + 1}`}
+					loading="lazy"
+					decoding="async"
+				/>
+			) : (
+				<span className="tv-img tv-img--placeholder">loading imageâ€¦</span>
+			)}
+		</button>
+	);
+}
+
+/** Thumbnails for every image block in a result; click fetches and opens the original. */
+export function ResultImages({
+	result,
+	host,
+}: {
+	result: ToolResultLike | undefined;
+	host?: ToolRenderHost;
+}): ReactNode {
 	const images = resultImagesOf(result);
 	if (images.length === 0) return null;
 	return (
 		<div className="tv-imgs">
 			{images.map((img, i) => (
-				<button
-					key={i}
-					type="button"
-					style={{ all: "unset", display: "inline-flex" }}
-					onClick={() => openImage(img)}
-					aria-label={`Open tool result image ${i + 1}`}
-				>
-					<img className="tv-img" src={`data:${img.mimeType};base64,${img.data}`} alt={`tool result ${i + 1}`} />
-				</button>
+				<ResultImage key={img.imageId ?? i} img={img} index={i} host={host} />
 			))}
 		</div>
 	);

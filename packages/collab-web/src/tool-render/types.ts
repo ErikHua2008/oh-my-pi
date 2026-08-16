@@ -20,10 +20,12 @@ export interface ToolResultText {
 
 export interface ToolResultImage {
 	type: "image";
-	/** Base64-encoded image data. */
+	/** Base64-encoded image data; empty for lazy collab media. */
 	data: string;
 	/** e.g. "image/png". */
 	mimeType: string;
+	/** Host-side content id used when `data` is omitted from replication. */
+	imageId?: string;
 }
 
 export type ToolResultBlock = ToolResultText | ToolResultImage | { type: string };
@@ -44,6 +46,8 @@ export interface ToolRenderHost {
 	hasAgent?(id: string): boolean;
 	/** Open the sub-session/transcript view for an agent id. */
 	openAgent?(id: string): void;
+	/** Resolve media omitted from a live collab transcript. */
+	loadImage?(imageId: string, variant: "thumbnail" | "original"): Promise<{ data: string; mimeType: string } | null>;
 }
 
 export interface ToolRenderProps {

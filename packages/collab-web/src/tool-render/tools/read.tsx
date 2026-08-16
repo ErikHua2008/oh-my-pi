@@ -66,7 +66,7 @@ function Summary(props: ToolRenderProps): ReactNode {
 	return <PathText path={path || "…"} from={from} to={to} sel={sel} />;
 }
 
-function Body({ args, result }: ToolRenderProps): ReactNode {
+function Body({ args, result, host }: ToolRenderProps): ReactNode {
 	const { path } = readArgs(args);
 	const d = readDetails(detailsRecord(result));
 	const conflictBadge = d.conflictCount !== null && d.conflictCount > 0 && (
@@ -94,7 +94,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 				</KvGrid>
 			)}
 			<Badges items={[conflictBadge, elidedBadge, truncatedBadge]} />
-			<ResultImages result={result} />
+			<ResultImages result={result} host={host} />
 			<ResultText result={result} maxLines={12} lang={languageFromPath(path)} variant="code" />
 		</>
 	);

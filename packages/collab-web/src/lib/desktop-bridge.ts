@@ -9,15 +9,78 @@ export interface DesktopSessionPreferences {
 	sessionReadThrough: Readonly<Record<string, string>>;
 }
 
+export interface DesktopAttachmentStatus {
+	path: string;
+	available: boolean;
+}
+
+export type DesktopNativeTranscriptKind =
+	| "user"
+	| "assistant"
+	| "reasoning"
+	| "tool"
+	| "system"
+	| "compaction"
+	| "error";
+
+export interface DesktopNativeTranscriptRow {
+	id: string;
+	kind: DesktopNativeTranscriptKind;
+	text: string;
+	flags: number;
+	estimatedHeight: number;
+	mediaIds: readonly string[];
+}
+
+export interface DesktopNativeTranscriptImage {
+	imageId: string;
+	mimeType: string;
+	data: string;
+}
+
+export interface DesktopNativeTranscriptSnapshot {
+	sessionId: string | null;
+	rows: readonly DesktopNativeTranscriptRow[];
+	historyRemaining: number;
+	historyLoading: boolean;
+}
+
+export interface DesktopNativeTranscriptViewport {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+export type DesktopNativeTranscriptEvent =
+	| "load-earlier"
+	| "use-native"
+	| "use-web"
+	| { type: "image-needed"; imageId: string };
+
 export interface DesktopBridge {
 	available: boolean;
+	/** True while the native host supports, or has not yet rejected, local-file commands. */
+	localFilesAvailable: boolean;
+	/** Native virtual transcript is probed independently from project/file capabilities. */
+	nativeTranscriptAvailable: boolean;
 	listProjects(): Promise<readonly DesktopProject[]>;
 	openProject(): Promise<void>;
 	switchProject(path: string): Promise<void>;
 	renameProject(path: string, name: string): Promise<void>;
 	revealPath(path: string): Promise<void>;
+	pickAttachments(): Promise<readonly string[]>;
+	checkAttachments(paths: readonly string[]): Promise<readonly DesktopAttachmentStatus[]>;
 	loadSessionPreferences(): Promise<DesktopSessionPreferences | null>;
 	saveSessionPreferences(preferences: DesktopSessionPreferences): Promise<void>;
+	replaceNativeTranscript(snapshot: DesktopNativeTranscriptSnapshot): Promise<boolean>;
+	upsertNativeTranscript(row: DesktopNativeTranscriptRow): Promise<boolean>;
+	removeNativeTranscript(id: string): Promise<void>;
+	setNativeTranscriptViewport(viewport: DesktopNativeTranscriptViewport): Promise<boolean>;
+	provideNativeTranscriptImage(image: DesktopNativeTranscriptImage): Promise<boolean>;
+	hideNativeTranscript(): Promise<void>;
+	takeNativeTranscriptEvents(): Promise<readonly DesktopNativeTranscriptEvent[]>;
+	subscribeNativeTranscriptEvents(handler: (event: DesktopNativeTranscriptEvent) => void): () => void;
 }
 
 interface ProjectListResponse {
@@ -32,11 +95,19 @@ interface SessionPreferencesResponse {
 	session_read_through: Record<string, string>;
 }
 
+const ATTACHMENT_STATUS_BATCH = 64;
+
 export type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
 interface TauriWindow extends Window {
 	__TAURI_INTERNALS__?: {
 		invoke?: TauriInvoke;
+	};
+	chrome?: {
+		webview?: {
+			addEventListener(type: "message", listener: (event: MessageEvent<unknown>) => void): void;
+			removeEventListener(type: "message", listener: (event: MessageEvent<unknown>) => void): void;
+		};
 	};
 }
 
@@ -67,6 +138,8 @@ function projectAlias(path: string, aliases: Readonly<Record<string, string>>): 
 function browserBridge(): DesktopBridge {
 	return {
 		available: false,
+		localFilesAvailable: false,
+		nativeTranscriptAvailable: false,
 		async listProjects() {
 			return [];
 		},
@@ -74,19 +147,75 @@ function browserBridge(): DesktopBridge {
 		async switchProject(_path: string) {},
 		async renameProject(_path: string, _name: string) {},
 		async revealPath(_path: string) {},
+		async pickAttachments() {
+			return [];
+		},
+		async checkAttachments(_paths: readonly string[]) {
+			return [];
+		},
 		async loadSessionPreferences() {
 			return null;
 		},
 		async saveSessionPreferences(_preferences: DesktopSessionPreferences) {},
+		async replaceNativeTranscript(_snapshot: DesktopNativeTranscriptSnapshot) {
+			return false;
+		},
+		async upsertNativeTranscript(_row: DesktopNativeTranscriptRow) {
+			return false;
+		},
+		async removeNativeTranscript(_id: string) {},
+		async setNativeTranscriptViewport(_viewport: DesktopNativeTranscriptViewport) {
+			return false;
+		},
+		async provideNativeTranscriptImage(_image: DesktopNativeTranscriptImage) {
+			return false;
+		},
+		async hideNativeTranscript() {},
+		async takeNativeTranscriptEvents() {
+			return [];
+		},
+		subscribeNativeTranscriptEvents(_handler: (event: DesktopNativeTranscriptEvent) => void) {
+			return () => {};
+		},
 	};
 }
 
 function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 	let authorization: "unknown" | "authorized" | "denied" = "unknown";
+	let localFileAuthorization: "unknown" | "authorized" | "denied" = "unknown";
+	let nativeTranscriptAuthorization: "unknown" | "authorized" | "denied" = "unknown";
+	const invokeNative = async (command: string, args?: Record<string, unknown>): Promise<boolean> => {
+		if (nativeTranscriptAuthorization === "denied") return false;
+		try {
+			await invoke<unknown>(command, args);
+			nativeTranscriptAuthorization = "authorized";
+			return true;
+		} catch {
+			nativeTranscriptAuthorization = "denied";
+			return false;
+		}
+	};
+	const invokeNativeEnabled = async (command: string, args?: Record<string, unknown>): Promise<boolean> => {
+		if (nativeTranscriptAuthorization === "denied") return false;
+		try {
+			const value = await invoke<unknown>(command, args);
+			nativeTranscriptAuthorization = "authorized";
+			return value === null || typeof value !== "object" || (value as Record<string, unknown>).enabled !== false;
+		} catch {
+			nativeTranscriptAuthorization = "denied";
+			return false;
+		}
+	};
 
 	return {
 		get available() {
 			return authorization === "authorized";
+		},
+		get localFilesAvailable() {
+			return localFileAuthorization !== "denied";
+		},
+		get nativeTranscriptAvailable() {
+			return nativeTranscriptAuthorization !== "denied";
 		},
 		async listProjects() {
 			if (authorization === "denied") return [];
@@ -149,6 +278,35 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 				throw error;
 			}
 		},
+		async pickAttachments() {
+			if (localFileAuthorization === "denied") return [];
+			try {
+				const paths = await invoke<string[]>("attachment_pick");
+				localFileAuthorization = "authorized";
+				return paths;
+			} catch (error) {
+				localFileAuthorization = "denied";
+				throw error;
+			}
+		},
+		async checkAttachments(paths: readonly string[]) {
+			if (localFileAuthorization === "denied" || paths.length === 0) return [];
+			try {
+				const statuses: DesktopAttachmentStatus[] = [];
+				for (let offset = 0; offset < paths.length; offset += ATTACHMENT_STATUS_BATCH) {
+					statuses.push(
+						...(await invoke<DesktopAttachmentStatus[]>("attachment_status", {
+							paths: paths.slice(offset, offset + ATTACHMENT_STATUS_BATCH),
+						})),
+					);
+				}
+				localFileAuthorization = "authorized";
+				return statuses;
+			} catch (error) {
+				localFileAuthorization = "denied";
+				throw error;
+			}
+		},
 		async loadSessionPreferences() {
 			if (authorization !== "authorized") return null;
 			try {
@@ -173,6 +331,102 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 				authorization = "denied";
 				throw error;
 			}
+		},
+		async replaceNativeTranscript(snapshot: DesktopNativeTranscriptSnapshot) {
+			return invokeNativeEnabled("native_transcript_replace", { snapshot });
+		},
+		async upsertNativeTranscript(row: DesktopNativeTranscriptRow) {
+			return invokeNative("native_transcript_upsert", { row });
+		},
+		async removeNativeTranscript(id: string) {
+			await invokeNative("native_transcript_remove", { id });
+		},
+		async setNativeTranscriptViewport(viewport: DesktopNativeTranscriptViewport) {
+			return invokeNativeEnabled("native_transcript_viewport", { viewport });
+		},
+		async provideNativeTranscriptImage(image: DesktopNativeTranscriptImage) {
+			return invokeNative("native_transcript_image", { image });
+		},
+		async hideNativeTranscript() {
+			await invokeNative("native_transcript_hide");
+		},
+		async takeNativeTranscriptEvents() {
+			if (nativeTranscriptAuthorization === "denied") return [];
+			try {
+				const events = await invoke<unknown>("native_transcript_take_events");
+				nativeTranscriptAuthorization = "authorized";
+				if (!Array.isArray(events)) return [];
+				const filtered: DesktopNativeTranscriptEvent[] = [];
+				for (const event of events) {
+					if (event === "load-earlier") {
+						filtered.push(event);
+					} else if (
+						event !== null &&
+						typeof event === "object" &&
+						(event as Record<string, unknown>).type === "image-needed" &&
+						typeof (event as Record<string, unknown>).imageId === "string"
+					) {
+						filtered.push({
+							type: "image-needed",
+							imageId: (event as Record<string, unknown>).imageId as string,
+						});
+					}
+				}
+				return filtered;
+			} catch {
+				nativeTranscriptAuthorization = "denied";
+				return [];
+			}
+		},
+		subscribeNativeTranscriptEvents(handler: (event: DesktopNativeTranscriptEvent) => void) {
+			if (typeof window === "undefined") return () => {};
+			const webview = (window as TauriWindow).chrome?.webview;
+			if (webview !== undefined) {
+				const listener = (event: MessageEvent<unknown>): void => {
+					const message = event.data;
+					if (
+						message !== null &&
+						typeof message === "object" &&
+						(message as Record<string, unknown>).channel === "omp-native-transcript-event" &&
+						typeof (message as Record<string, unknown>).event === "string"
+					) {
+						const nativeEvent = (message as Record<string, unknown>).event;
+						if (nativeEvent === "load-earlier" || nativeEvent === "use-native" || nativeEvent === "use-web") {
+							handler(nativeEvent);
+						} else if (
+							nativeEvent === "image-needed" &&
+							typeof (message as Record<string, unknown>).imageId === "string"
+						) {
+							handler({
+								type: "image-needed",
+								imageId: (message as Record<string, unknown>).imageId as string,
+							});
+						}
+					}
+				};
+				webview.addEventListener("message", listener);
+				return () => webview.removeEventListener("message", listener);
+			}
+			const listener = (event: Event): void => {
+				const detail = (event as CustomEvent<unknown>).detail;
+				if (detail === "load-earlier" || detail === "use-native" || detail === "use-web") handler(detail);
+				if (detail !== null && typeof detail === "object") {
+					const nativeEvent = (detail as Record<string, unknown>).event;
+					if (nativeEvent === "load-earlier" || nativeEvent === "use-native" || nativeEvent === "use-web") {
+						handler(nativeEvent);
+					} else if (
+						nativeEvent === "image-needed" &&
+						typeof (detail as Record<string, unknown>).imageId === "string"
+					) {
+						handler({
+							type: "image-needed",
+							imageId: (detail as Record<string, unknown>).imageId as string,
+						});
+					}
+				}
+			};
+			window.addEventListener("omp-native-transcript", listener);
+			return () => window.removeEventListener("omp-native-transcript", listener);
 		},
 	};
 }

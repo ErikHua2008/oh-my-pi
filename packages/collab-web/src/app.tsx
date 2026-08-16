@@ -379,8 +379,9 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 			openAgent: id => {
 				if (agentIds.has(id)) setSelectedId(id);
 			},
+			loadImage: (imageId, variant) => client.fetchImage(imageId, variant),
 		}),
-		[agentIds],
+		[agentIds, client],
 	);
 
 	// Auto-open the rail the first time a subagent appears.
@@ -485,6 +486,10 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 							streamDone={snap.streamDone}
 							activeTools={snap.activeTools}
 							working={snap.working}
+							sessionId={snap.header?.id}
+							historyRemaining={snap.historyRemaining}
+							historyLoading={snap.historyLoading}
+							onLoadEarlier={() => client.loadEarlierHistory()}
 							host={toolHost}
 							onEditLastUserMessage={setComposerPrefill}
 						/>

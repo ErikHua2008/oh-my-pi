@@ -22,10 +22,28 @@ export interface TextContent {
 
 export interface ImageContent {
 	type: "image";
-	/** Base64-encoded image data. */
+	/**
+	 * Base64-encoded image data. Empty when {@link imageId} identifies media
+	 * that the guest must fetch lazily through `fetch-image`.
+	 */
 	data: string;
 	/** e.g. "image/png". */
 	mimeType: string;
+	/** SHA-256 id of host-side media omitted from a replication frame. */
+	imageId?: string;
+}
+
+export type ImageVariant = "thumbnail" | "original";
+
+/**
+ * Reference to a file that remains at its original path on the host machine.
+ * The file bytes are deliberately not embedded in the collaboration frame or
+ * copied into the session artifacts directory.
+ */
+export interface LocalFileReference {
+	kind: "local-file";
+	path: string;
+	name: string;
 }
 
 export interface ThinkingContent {
@@ -172,6 +190,10 @@ export const COLLAB_PROMPT_MESSAGE_TYPE = "collab-prompt";
 /** `details` shape of `custom_message` entries with `customType === "collab-prompt"`. */
 export interface CollabPromptDetails {
 	from?: string;
+	/** Original composer text, without the model-only local-file reference block. */
+	displayText?: string;
+	/** Host-local paths shown as attachment chips in capable clients. */
+	localFiles?: LocalFileReference[];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -337,12 +359,27 @@ export type GuestFrame =
 			 * read-only and rejects their mutating frames.
 			 */
 			writeToken?: string;
+			/**
+			 * Advertises support for image references and lazy `fetch-image`
+			 * replies. Hosts keep sending inline media to guests that omit it.
+			 */
+			mediaRefs?: boolean;
+			/**
+			 * Requests a bounded tail snapshot followed by explicit older-history
+			 * pages. Hosts that do not understand this field keep sending the full
+			 * snapshot, so protocol-v5 clients remain backwards compatible.
+			 */
+			historyPaging?: boolean;
 	  }
-	| { t: "prompt"; text: string; images?: ImageContent[] }
+	| { t: "prompt"; text: string; images?: ImageContent[]; localFiles?: LocalFileReference[] }
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
 	| { t: "abort" }
 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
 	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
+	/** Fetch entries immediately preceding the stable first visible entry id. */
+	| { t: "fetch-history"; reqId: number; beforeId: string; limit: number }
+	/** Fetch one image exposed through an `ImageContent.imageId`. */
+	| { t: "fetch-image"; reqId: number; imageId: string; variant: ImageVariant }
 	/** Request the available models for the session room (targeted reply: `model-list` host frame). */
 	| { t: "model-list" }
 	/** Switch the session model; success is broadcast to all guests through the regular `state` frame. */
@@ -367,6 +404,8 @@ export type HostFrame =
 			 * with `final: true`).
 			 */
 			entryCount: number;
+			/** Older entries omitted from the initial snapshot for paging-capable guests. */
+			historyRemaining?: number;
 			/** True when this peer joined through a read-only (view) link. */
 			readOnly?: boolean;
 	  }
@@ -387,6 +426,18 @@ export type HostFrame =
 	| { t: "ui-request-end"; reqId: number }
 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
+	/** Targeted page of session entries ordered oldest-to-newest. */
+	| { t: "history"; reqId: number; entries: SessionEntry[]; remaining: number; error?: string }
+	/** Targeted lazy-media reply. `error` replies omit `data` and `mimeType`. */
+	| {
+			t: "image";
+			reqId: number;
+			imageId: string;
+			variant: ImageVariant;
+			data?: string;
+			mimeType?: string;
+			error?: string;
+	  }
 	/** Targeted reply to `model-list`. */
 	| { t: "model-list"; models: WireModel[] }
 	| { t: "bye"; reason: string }
@@ -444,8 +495,13 @@ export type SessionStatus = "complete" | "interrupted" | "aborted" | "error" | "
  *   session model (`model-change`), and select a host-advertised thinking
  *   effort (`thinking-change`); the host broadcasts authoritative model and
  *   thinking state through the regular `state` frame.
+ * - `5`: capability-negotiated desktop optimizations: media-reference-capable
+ *   guests receive content-addressed image ids and fetch thumbnails/originals
+ *   lazily; history-paging guests receive a bounded tail snapshot and request
+ *   older entries by stable id. Guests omitting either capability retain the
+ *   full legacy snapshot behavior.
  */
-export const COLLAB_PROTO = 4;
+export const COLLAB_PROTO = 5;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";

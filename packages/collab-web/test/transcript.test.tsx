@@ -56,6 +56,8 @@ function renderTranscript(props: {
 	activeTools?: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
 	onEditLastUserMessage?: (text: string) => void;
+	historyRemaining?: number;
+	historyLoading?: boolean;
 }): string {
 	return renderToStaticMarkup(
 		<Transcript
@@ -65,6 +67,8 @@ function renderTranscript(props: {
 			activeTools={props.activeTools ?? new Map()}
 			working={props.working}
 			onEditLastUserMessage={props.onEditLastUserMessage}
+			historyRemaining={props.historyRemaining}
+			historyLoading={props.historyLoading}
 		/>,
 	);
 }
@@ -116,6 +120,41 @@ describe("Transcript live tool rendering", () => {
 });
 
 describe("Transcript message Markdown", () => {
+	it("renders only a bounded tail for long conversations", () => {
+		const entries: SessionEntry[] = Array.from({ length: 500 }, (_, index) => ({
+			type: "message" as const,
+			id: `user-${index}`,
+			parentId: index === 0 ? null : `user-${index - 1}`,
+			timestamp: "2026-07-15T14:24:00Z",
+			message: { role: "user" as const, content: `prompt-${index}`, timestamp: index },
+		}));
+
+		const html = renderTranscript({ entries, working: false });
+
+		expect(countElements(html, ".tr-row--user")).toBe(200);
+		expect(html).toContain("prompt-499");
+		expect(html).not.toContain("prompt-299");
+		expect(html).toContain("200 earlier messages · 300 hidden");
+	});
+
+	it("reports older host-side pages without placing them in the initial WebView tree", () => {
+		const entries = Array.from({ length: 200 }, (_, index): SessionEntry => ({
+			type: "message",
+			id: `tail-${index}`,
+			parentId: null,
+			timestamp: "2026-07-15T00:00:00Z",
+			message: { role: "user", content: `tail prompt ${index}`, timestamp: index },
+		}));
+
+		const html = renderTranscript({ entries, working: false, historyRemaining: 9_800 });
+		const loading = renderTranscript({ entries, working: false, historyRemaining: 9_800, historyLoading: true });
+
+		expect(html).toContain("Load 200 earlier messages · 9800 hidden");
+		expect(html).not.toContain("9800 earlier entries");
+		expect(loading).toContain("Loading earlier messages…");
+		expect(loading).toContain('disabled=""');
+	});
+
 	it("renders host strings and guest text blocks as Markdown", () => {
 		const entries: SessionEntry[] = [
 			{
@@ -145,6 +184,61 @@ describe("Transcript message Markdown", () => {
 
 		expect(countElements(html, ".tr-row--user .tr-md code")).toBe(1);
 		expect(countElements(html, ".tr-row--user .tr-md strong")).toBe(1);
+	});
+
+	it("renders local-file metadata as lightweight chips while hiding the model-only reference block", () => {
+		const path = "C:\\work\\large-video.mp4";
+		const entries: SessionEntry[] = [
+			{
+				type: "custom_message",
+				id: "local-file-ref",
+				parentId: null,
+				timestamp: "2026-07-15T00:00:00Z",
+				customType: "collab-prompt",
+				content: `Review this file\n\n<local_file_references>\n[${JSON.stringify(path)}]\n</local_file_references>`,
+				details: {
+					from: "desktop",
+					displayText: "Review this file",
+					localFiles: [{ kind: "local-file", path, name: "large-video.mp4" }],
+				},
+				display: true,
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false });
+
+		expect(html).toContain("Review this file");
+		expect(html).toContain("large-video.mp4");
+		expect(html).toContain(`title="${path}"`);
+		expect(html).not.toContain("local_file_references");
+	});
+
+	it("keeps referenced image base64 out of the initial transcript markup", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "image-ref",
+				parentId: null,
+				timestamp: "2026-07-15T00:00:00Z",
+				message: {
+					role: "user",
+					content: [
+						{
+							type: "image",
+							data: "",
+							mimeType: "image/png",
+							imageId: "b".repeat(64),
+						},
+					],
+					timestamp: 1,
+				},
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false });
+
+		expect(html).toContain("tr-msg-image-placeholder");
+		expect(html).not.toContain("data:image/png;base64");
 	});
 
 	it("shows time and copy actions for user prompts but edits only the final prompt", () => {

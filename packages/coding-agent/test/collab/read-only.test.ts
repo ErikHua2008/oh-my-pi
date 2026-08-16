@@ -9,12 +9,15 @@
  * in-memory transport, so the suite stays fast and time-independent.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, getAgentTombstonePath } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
@@ -54,6 +57,7 @@ function makeHostContext(): HostHarness {
 			sessionName: "test",
 			model: undefined,
 			thinkingLevel: undefined,
+			configuredThinkingLevel: () => undefined,
 			// host.ts scopes agent snapshots/control to `getAgentScopeId()`;
 			// the harness session is the "sess-1" tree.
 			getAgentScopeId: () => "sess-1",
@@ -147,6 +151,7 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 // runs once. Per-test guest state is reset in afterEach.
 
 const guestCleanups: (() => void)[] = [];
+const tombstoneCleanups: string[] = [];
 let harness: HostHarness;
 let host: CollabHost;
 
@@ -158,8 +163,9 @@ beforeAll(async () => {
 	await host.start("ws://localhost:8787");
 });
 
-afterEach(() => {
+afterEach(async () => {
 	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
+	for (const file of tombstoneCleanups.splice(0)) await fs.rm(file, { force: true });
 	harness.prompts.length = 0;
 	harness.aborts.count = 0;
 });
@@ -223,6 +229,8 @@ describe("collab read-only links", () => {
 		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 
 		const id = "Remote-Killed-Sub";
+		const sessionFile = path.join(os.tmpdir(), `omp-${id}-${process.pid}-${Date.now()}.jsonl`);
+		tombstoneCleanups.push(getAgentTombstonePath(sessionFile));
 		const registry = AgentRegistry.global();
 		let aborts = 0;
 		const session = {
@@ -239,7 +247,7 @@ describe("collab read-only links", () => {
 			// rejects agent-cmd for refs registered under another scope.
 			scopeId: "sess-1",
 			session,
-			sessionFile: "/tmp/Remote-Killed-Sub.jsonl",
+			sessionFile,
 			status: "running",
 		});
 		const killed = Promise.withResolvers<void>();

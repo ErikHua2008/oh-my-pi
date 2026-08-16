@@ -75,7 +75,8 @@ function startTestRelay(): { url: string; stop(): void } {
 }
 
 interface CapturedPrompt {
-	details?: { from?: string };
+	content?: unknown;
+	details?: { from?: string; displayText?: string; localFiles?: unknown[] };
 	options?: { streamingBehavior?: "steer"; queueChipText?: string };
 }
 
@@ -109,12 +110,13 @@ function makeStreamingHostContext(): StreamingHostHarness {
 			sessionName: "test",
 			model: undefined,
 			thinkingLevel: undefined,
+			configuredThinkingLevel: () => undefined,
 			// host.ts scopes agent snapshots to `getAgentScopeId()`.
 			getAgentScopeId: () => "sess-1",
 			subscribe: () => () => {},
 			emitNotice: () => {},
 			promptCustomMessage: (message: CapturedPrompt, options?: CapturedPrompt["options"]) => {
-				const captured: CapturedPrompt = { details: message.details, options };
+				const captured: CapturedPrompt = { content: message.content, details: message.details, options };
 				prompts.push(captured);
 				for (const waiter of promptWaiters.splice(0)) waiter(captured);
 				return Promise.resolve();
@@ -208,5 +210,38 @@ describe("collab mid-turn guest prompts", () => {
 			if (frame.t === "state" && frame.state.queuedMessageCount === 1) sawQueuedCount = true;
 		}
 		expect(sawQueuedCount).toBe(true);
+	});
+
+	it("keeps desktop attachments as host-path references without embedding file bytes", async () => {
+		const relay = startTestRelay();
+		cleanups.push(relay.stop);
+		const harness = makeStreamingHostContext();
+		const host = new CollabHost(harness.ctx);
+		await host.start(relay.url);
+		cleanups.push(() => host.stop("test done"));
+
+		const guest = await joinAsGuest(host.link, "desktop");
+		cleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		const filePath = "C:\\work\\reports\\report.txt";
+		const prompted = harness.nextPrompt();
+		guest.socket.send({
+			t: "prompt",
+			text: "Summarize the report",
+			localFiles: [{ kind: "local-file", path: filePath, name: "spoofed-name.bin" }],
+		});
+		const prompt = await prompted;
+
+		expect(prompt.details).toEqual({
+			from: "desktop",
+			displayText: "Summarize the report",
+			localFiles: [{ kind: "local-file", path: filePath, name: "report.txt" }],
+		});
+		expect(prompt.content).toContain("Summarize the report");
+		expect(prompt.content).toContain(JSON.stringify(filePath));
+		expect(prompt.content).toContain("not embedded");
+		expect(prompt.options).toEqual({ streamingBehavior: "steer", queueChipText: "Summarize the report" });
 	});
 });

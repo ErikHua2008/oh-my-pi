@@ -14,6 +14,8 @@ import type {
 	CollabUiRequest,
 	CollabUiResponseValue,
 	HostFrame,
+	ImageVariant,
+	LocalFileReference,
 	SessionEntry,
 	SessionHeader,
 	SessionState,
@@ -66,12 +68,18 @@ export interface GuestSnapshot {
 	uiRequest: CollabUiRequest | null;
 	/** Available models from the host's `model-list` reply; null until first loaded. */
 	models: WireModel[] | null;
+	/** Older session entries retained by a paging-capable host. */
+	historyRemaining: number;
+	/** True while one older-history page is in flight. */
+	historyLoading: boolean;
 	/** Capped at 50, newest last. */
 	notices: readonly Notice[];
 }
 
 const MAX_NOTICES = 50;
 const TRANSCRIPT_TIMEOUT_MS = 10_000;
+const HISTORY_TIMEOUT_MS = 10_000;
+const DEFAULT_HISTORY_PAGE = 200;
 /** Mirrors the TUI guest's WELCOME_TIMEOUT_MS: a host that never answers hello ends the join. */
 const WELCOME_TIMEOUT_MS = 30_000;
 /** Mirrors the TUI guest's SNAPSHOT_PROGRESS_TIMEOUT_MS: every snapshot chunk must make progress. */
@@ -86,10 +94,29 @@ const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
  */
 export type TranscriptResult = { kind: "rows"; text: string; newSize: number } | { kind: "error"; message: string };
 
+/** Decoded lazy-media payload returned to transcript image components. */
+export interface RemoteImage {
+	data: string;
+	mimeType: string;
+}
+
 interface PendingTranscript {
 	resolve: (result: TranscriptResult | null) => void;
 	timer: Timer;
 }
+
+interface PendingImage {
+	key: string;
+	resolve: (result: RemoteImage | null) => void;
+	timer: Timer;
+}
+
+interface PendingHistory {
+	reqId: number;
+	timer: Timer;
+}
+
+const IMAGE_TIMEOUT_MS = 15_000;
 
 export class GuestClient {
 	readonly #socket: CollabSocket;
@@ -98,17 +125,23 @@ export class GuestClient {
 	readonly #writeToken: string | undefined;
 	readonly #listeners = new Set<() => void>();
 	readonly #pendingTranscripts = new Map<number, PendingTranscript>();
+	readonly #pendingImages = new Map<number, PendingImage>();
+	readonly #imageRequests = new Map<string, Promise<RemoteImage | null>>();
+	readonly #imageCache = new Map<string, RemoteImage>();
 	#reqSeq = 0;
 	#noticeSeq = 0;
 	#everConnected = false;
 	#welcomed = false;
 	#welcomeTimer: Timer | null = null;
 	#snapshotProgressTimer: Timer | null = null;
+	#pendingHistory: PendingHistory | null = null;
 
 	#phase: ConnectionPhase = "connecting";
 	#endedReason: string | null = null;
 	#header: SessionHeader | null = null;
 	#entries: readonly SessionEntry[] = [];
+	/** Mutable only while a welcome snapshot train is loading; published once on final. */
+	#snapshotEntries: SessionEntry[] | null = null;
 	#state: SessionState | null = null;
 	#agents: readonly AgentSnapshot[] = [];
 	#progress: ReadonlyMap<string, SubagentProgressPayload> = new Map();
@@ -121,6 +154,8 @@ export class GuestClient {
 	#uiRequest: CollabUiRequest | null = null;
 	#uiRequestQueue: CollabUiRequest[] = [];
 	#models: WireModel[] | null = null;
+	#historyRemaining = 0;
+	#historyLoading = false;
 	#notices: readonly Notice[] = [];
 	#snapshot: GuestSnapshot;
 
@@ -160,6 +195,7 @@ export class GuestClient {
 	close(): void {
 		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();
+		this.#clearPendingHistory();
 		this.#socket.close();
 	}
 
@@ -175,8 +211,8 @@ export class GuestClient {
 		return this.#snapshot;
 	}
 
-	sendPrompt(text: string): void {
-		this.#socket.send({ t: "prompt", text });
+	sendPrompt(text: string, localFiles?: readonly LocalFileReference[]): void {
+		this.#socket.send({ t: "prompt", text, localFiles: localFiles ? [...localFiles] : undefined });
 	}
 
 	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {
@@ -203,6 +239,25 @@ export class GuestClient {
 		this.#socket.send({ t: "thinking-change", level });
 	}
 
+	/** Request one page immediately before the oldest entry currently held. */
+	loadEarlierHistory(limit = DEFAULT_HISTORY_PAGE): void {
+		const beforeId = this.#entries[0]?.id;
+		if (this.#phase !== "live" || this.#historyLoading || this.#historyRemaining <= 0 || beforeId === undefined)
+			return;
+		const reqId = ++this.#reqSeq;
+		this.#historyLoading = true;
+		const timer = setTimeout(() => {
+			if (this.#pendingHistory?.reqId !== reqId) return;
+			this.#pendingHistory = null;
+			this.#historyLoading = false;
+			this.#pushNotice("warning", "older history request timed out");
+			this.#commit();
+		}, HISTORY_TIMEOUT_MS);
+		this.#pendingHistory = { reqId, timer };
+		this.#socket.send({ t: "fetch-history", reqId, beforeId, limit });
+		this.#commit();
+	}
+
 	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): void {
 		this.#socket.send({ t: "agent-cmd", cmd, agentId, text });
 	}
@@ -224,13 +279,43 @@ export class GuestClient {
 		return promise;
 	}
 
+	/** Fetch and deduplicate one thumbnail/original exposed by an image reference. */
+	fetchImage(imageId: string, variant: ImageVariant): Promise<RemoteImage | null> {
+		const key = `${variant}:${imageId}`;
+		const cached = this.#imageCache.get(key);
+		if (cached) return Promise.resolve(cached);
+		const existing = this.#imageRequests.get(key);
+		if (existing) return existing;
+
+		const reqId = ++this.#reqSeq;
+		const { promise, resolve } = Promise.withResolvers<RemoteImage | null>();
+		const timer = setTimeout(() => {
+			this.#pendingImages.delete(reqId);
+			resolve(null);
+		}, IMAGE_TIMEOUT_MS);
+		this.#pendingImages.set(reqId, { key, resolve, timer });
+		const request = promise.finally(() => {
+			this.#imageRequests.delete(key);
+		});
+		this.#imageRequests.set(key, request);
+		this.#socket.send({ t: "fetch-image", reqId, imageId, variant });
+		return request;
+	}
+
 	/** Test seam: apply a synthetic host frame through the real apply path. */
 	applyFrameForTest(frame: HostFrame): void {
 		this.#applyFrameSafe(frame);
 	}
 
 	#handleOpen(): void {
-		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		this.#socket.send({
+			t: "hello",
+			proto: COLLAB_PROTO,
+			name: this.#name,
+			writeToken: this.#writeToken,
+			mediaRefs: true,
+			historyPaging: true,
+		});
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
 		this.#everConnected = true;
 		this.#commit();
@@ -251,6 +336,8 @@ export class GuestClient {
 		if (this.#phase === "ended") return;
 		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();
+		this.#clearPendingHistory();
+		this.#snapshotEntries = null;
 		this.#phase = "ended";
 		this.#endedReason = reason;
 		for (const [, pending] of this.#pendingTranscripts) {
@@ -258,6 +345,13 @@ export class GuestClient {
 			pending.resolve(null);
 		}
 		this.#pendingTranscripts.clear();
+		for (const [, pending] of this.#pendingImages) {
+			clearTimeout(pending.timer);
+			pending.resolve(null);
+		}
+		this.#pendingImages.clear();
+		this.#imageRequests.clear();
+		this.#imageCache.clear();
 		this.#clearUiRequests();
 		this.#commit();
 		this.#socket.close();
@@ -285,6 +379,14 @@ export class GuestClient {
 		}
 	}
 
+	#clearPendingHistory(): void {
+		if (this.#pendingHistory !== null) {
+			clearTimeout(this.#pendingHistory.timer);
+			this.#pendingHistory = null;
+		}
+		this.#historyLoading = false;
+	}
+
 	/** Surfaces apply failures instead of letting the socket's recv chain swallow them. */
 	#applyFrameSafe(frame: HostFrame): void {
 		try {
@@ -307,6 +409,7 @@ export class GuestClient {
 				// supersedes any partially-streamed snapshot from the prior session.
 				this.#header = frame.header;
 				this.#entries = [];
+				this.#snapshotEntries = frame.entryCount === 0 ? null : [];
 				this.#state = frame.state;
 				this.#agents = [...frame.agents];
 				this.#stream = null;
@@ -316,6 +419,8 @@ export class GuestClient {
 				this.#lifecycle = new Map();
 				this.#working = frame.state.isStreaming;
 				this.#readOnly = frame.readOnly === true;
+				this.#clearPendingHistory();
+				this.#historyRemaining = Math.max(0, frame.historyRemaining ?? 0);
 				this.#clearUiRequests();
 				this.#welcomed = true;
 				this.#clearWelcomeTimer();
@@ -328,11 +433,15 @@ export class GuestClient {
 				this.#endedReason = null;
 				break;
 			case "snapshot-chunk": {
-				// Stream transcript fragments into the live snapshot. The host
-				// always closes the train with `final: true`; that flip is what
-				// moves the guest from "waiting" to "live".
-				this.#entries = [...this.#entries, ...frame.entries];
+				// Accumulate privately and publish once. Rebuilding the public array
+				// and React transcript after every 512 KiB frame made large histories
+				// quadratic and repeatedly decoded their images while still loading.
+				const accumulator = this.#snapshotEntries ?? [];
+				accumulator.push(...frame.entries);
+				this.#snapshotEntries = accumulator;
 				if (frame.final) {
+					this.#entries = accumulator;
+					this.#snapshotEntries = null;
 					this.#clearSnapshotProgressTimer();
 					this.#phase = "live";
 				} else {
@@ -341,7 +450,8 @@ export class GuestClient {
 				break;
 			}
 			case "entry":
-				this.#entries = [...this.#entries, frame.entry];
+				if (this.#snapshotEntries !== null) this.#snapshotEntries.push(frame.entry);
+				else this.#entries = [...this.#entries, frame.entry];
 				if (this.#streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {
 					this.#stream = null;
 					this.#streamDone = false;
@@ -402,6 +512,39 @@ export class GuestClient {
 					);
 				}
 				break;
+			}
+			case "history": {
+				if (this.#pendingHistory?.reqId !== frame.reqId) return;
+				this.#clearPendingHistory();
+				if (frame.error !== undefined) {
+					this.#pushNotice("error", frame.error);
+					break;
+				}
+				const existingIds = new Set(this.#entries.map(entry => entry.id));
+				const older = frame.entries.filter(entry => !existingIds.has(entry.id));
+				this.#entries = [...older, ...this.#entries];
+				this.#historyRemaining = Math.max(0, frame.remaining);
+				break;
+			}
+			case "image": {
+				const pending = this.#pendingImages.get(frame.reqId);
+				if (!pending) return;
+				this.#pendingImages.delete(frame.reqId);
+				clearTimeout(pending.timer);
+				const expectedKey = `${frame.variant}:${frame.imageId}`;
+				if (
+					pending.key !== expectedKey ||
+					frame.error !== undefined ||
+					frame.data === undefined ||
+					frame.mimeType === undefined
+				) {
+					pending.resolve(null);
+					return;
+				}
+				const image = { data: frame.data, mimeType: frame.mimeType };
+				this.#imageCache.set(pending.key, image);
+				pending.resolve(image);
+				return;
 			}
 			case "bye":
 				this.#end(frame.reason);
@@ -541,6 +684,8 @@ export class GuestClient {
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
 			models: this.#models,
+			historyRemaining: this.#historyRemaining,
+			historyLoading: this.#historyLoading,
 			notices: this.#notices,
 		};
 	}

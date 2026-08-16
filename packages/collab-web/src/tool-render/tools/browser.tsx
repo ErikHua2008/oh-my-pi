@@ -68,7 +68,7 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 	);
 }
 
-function Body({ args, result }: ToolRenderProps): ReactNode {
+function Body({ args, result, host }: ToolRenderProps): ReactNode {
 	const details = detailsOf(result);
 	const action = str(args.action) ?? details.action;
 	const app = appOf(args);
@@ -97,7 +97,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 				)}
 			</span>
 			{action === "run" && code !== null && <CodeBlock code={code.replace(/\s+$/, "")} lang="javascript" />}
-			<ResultImages result={result} />
+			<ResultImages result={result} host={host} />
 			<ResultText result={result} maxLines={10} />
 		</>
 	);

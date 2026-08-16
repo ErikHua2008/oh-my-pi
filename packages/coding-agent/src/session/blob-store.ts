@@ -175,6 +175,16 @@ export class BlobStore {
 			return false;
 		}
 	}
+
+	/** Synchronous variant of {@link has}. */
+	hasSync(hash: string): boolean {
+		try {
+			fs.accessSync(path.join(this.dir, hash));
+			return true;
+		} catch {
+			return false;
+		}
+	}
 }
 
 /** Check if a data string is a blob reference. */

@@ -8,7 +8,7 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 	return <span>{argsDigest(args)}</span>;
 }
 
-function Body({ args, result }: ToolRenderProps): ReactNode {
+function Body({ args, result, host }: ToolRenderProps): ReactNode {
 	let argText = "";
 	try {
 		argText = JSON.stringify(args, null, 2) ?? "";
@@ -20,7 +20,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			{argText && argText !== "{}" && (
 				<Output text={argText} lang="json" variant="code" maxLines={12} title="args" />
 			)}
-			<ResultImages result={result} />
+			<ResultImages result={result} host={host} />
 			<ResultText result={result} maxLines={10} />
 		</>
 	);

@@ -1,5 +1,11 @@
 /* Transcript — conversational message flow with transcript-owned renderer chrome. tr-* namespace. */
 
+.tr-native-placeholder {
+	width: 100%;
+	height: 100%;
+	min-height: 0;
+}
+
 .tr-root {
 	height: 100%;
 	overflow-x: hidden;
@@ -18,9 +24,33 @@
 	text-align: center;
 }
 
+.tr-history-gate {
+	display: flex;
+	justify-content: center;
+	margin: 0 0 24px;
+}
+
+.tr-history-gate button {
+	min-height: 32px;
+	padding: 6px 12px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: var(--bg-subtle);
+	color: var(--fg-muted);
+	font: 12px var(--font-ui);
+	cursor: pointer;
+}
+
+.tr-history-gate button:hover {
+	border-color: var(--border-strong);
+	color: var(--fg);
+}
+
 /* ---- message flow ---- */
 
 .tr-row {
+	content-visibility: auto;
+	contain-intrinsic-size: auto 120px;
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;
@@ -75,6 +105,49 @@
 	padding: 10px 14px;
 	border-radius: var(--radius-xl) var(--radius-xl) var(--radius-sm) var(--radius-xl);
 	background: var(--bg-subtle);
+}
+
+.tr-local-files {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 8px;
+}
+
+.tr-local-files:only-child {
+	margin-top: 0;
+}
+
+.tr-local-file {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	max-width: min(320px, 100%);
+	height: 28px;
+	padding: 0 8px;
+	font: 500 11px / 28px var(--font-mono);
+	color: var(--fg-muted);
+	background: var(--bg-inset);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+}
+
+.tr-local-file-name {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.tr-local-file-missing {
+	color: var(--err);
+	border-color: color-mix(in srgb, var(--err) 38%, var(--border));
+}
+
+.tr-local-file-status {
+	flex: none;
+	font-size: 10px;
+	color: var(--err);
 }
 
 .tr-message-actions {
@@ -169,6 +242,40 @@
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	background: var(--bg-subtle);
+}
+
+.tr-msg-media {
+	display: inline-flex;
+	max-width: 100%;
+}
+
+.tr-msg-image-button {
+	display: inline-flex;
+	max-width: 100%;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	cursor: zoom-in;
+}
+
+.tr-msg-image-button:disabled {
+	cursor: default;
+}
+
+.tr-msg-image-placeholder {
+	display: grid;
+	place-items: center;
+	width: min(240px, 65vw);
+	height: 150px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--bg-subtle);
+	color: var(--fg-faint);
+	font: 12px var(--font-ui);
+}
+
+.tr-msg-media--loading .tr-msg-img {
+	opacity: 0.72;
 }
 
 /* ---- status and result feedback ---- */

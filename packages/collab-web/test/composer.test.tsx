@@ -27,6 +27,8 @@ function snapshot(uiRequest: GuestSnapshot["uiRequest"]): GuestSnapshot {
 		readOnly: false,
 		uiRequest,
 		models: null,
+		historyRemaining: 0,
+		historyLoading: false,
 		notices: [],
 	};
 }
