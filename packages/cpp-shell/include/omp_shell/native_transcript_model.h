@@ -40,6 +40,13 @@ enum class NativeTranscriptRowFlags : std::uint8_t {
 	return (static_cast<std::uint8_t>(value) & static_cast<std::uint8_t>(flag)) != 0;
 }
 
+struct NativeTranscriptProcessItem final {
+	std::string id;
+	std::string summary;
+	std::string detail;
+	bool failed = false;
+};
+
 struct NativeTranscriptRow final {
 	std::string id;
 	NativeTranscriptRowKind kind = NativeTranscriptRowKind::System;
@@ -48,6 +55,7 @@ struct NativeTranscriptRow final {
 	std::int32_t height = 48;
 	std::vector<std::string> media_ids;
 	std::int64_t duration_ms = -1;
+	std::vector<NativeTranscriptProcessItem> process_items;
 };
 
 struct NativeTranscriptVisibleRange final {

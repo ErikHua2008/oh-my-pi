@@ -89,12 +89,31 @@
 }
 
 .sh-sessions-mark {
-	display: block;
+	display: grid;
+	place-items: center;
 	width: 24px;
 	height: 24px;
 	flex: none;
-	border-radius: var(--radius-sm);
+}
+
+.sh-sessions-mark img {
+	grid-area: 1 / 1;
+	display: block;
+	width: 24px;
+	height: 24px;
 	object-fit: contain;
+}
+
+.sh-sessions-mark .sh-sessions-mark-on-dark {
+	display: none;
+}
+
+[data-theme="dark"] .sh-sessions-mark .sh-sessions-mark-on-light {
+	display: none;
+}
+
+[data-theme="dark"] .sh-sessions-mark .sh-sessions-mark-on-dark {
+	display: block;
 }
 
 .sh-sessions-brand-copy {
@@ -108,6 +127,7 @@
 	font-size: 14px;
 	font-weight: 650;
 	color: var(--fg);
+	white-space: nowrap;
 }
 
 .sh-sessions-brand-status {
@@ -142,7 +162,6 @@
 }
 
 .sh-sessions-action,
-.sh-sessions-open-project,
 .sh-sessions-settings,
 .sh-sessions-leave {
 	display: flex;
@@ -161,6 +180,13 @@
 		color var(--dur-fast) var(--ease);
 }
 
+.sh-sessions-primary-actions {
+	display: grid;
+	gap: 8px;
+	flex: none;
+	margin-bottom: 12px;
+}
+
 .sh-sessions-action {
 	height: 38px;
 	min-height: 38px;
@@ -169,12 +195,10 @@
 	color: var(--fg);
 	background: var(--bg-raised);
 	border: 1px solid var(--border);
-	margin-bottom: 12px;
 	box-shadow: 0 1px 0 rgb(0 0 0 / 8%);
 }
 
 .sh-sessions-action:hover:not(:disabled),
-.sh-sessions-open-project:hover,
 .sh-sessions-settings:hover,
 .sh-sessions-leave:hover {
 	color: var(--fg);
@@ -215,7 +239,7 @@
 	box-shadow: none;
 }
 
-.sh-sessions-open-project:disabled,
+.sh-sessions-action:disabled,
 .sh-project-switch:disabled {
 	cursor: default;
 	opacity: 0.55;
@@ -237,14 +261,9 @@
 	color: var(--fg-faint);
 }
 
-.sh-sessions-open-project {
-	min-height: 36px;
-	font-size: 12px;
-	margin-bottom: 4px;
-}
-
 .sh-sessions-project-error {
-	padding: 4px 12px 8px;
+	flex: none;
+	padding: 0 12px 8px;
 	font-size: 11px;
 	line-height: 16px;
 	color: var(--err);
@@ -883,7 +902,6 @@
 
 @media (hover: none) and (pointer: coarse) {
 	.sh-sessions-action,
-	.sh-sessions-open-project,
 	.sh-sessions-settings,
 	.sh-sessions-leave,
 	.sh-project-row,

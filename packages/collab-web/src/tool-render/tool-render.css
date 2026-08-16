@@ -349,6 +349,41 @@
 	color: var(--tv-err);
 }
 
+.tv-pre--scroll {
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	scrollbar-color: color-mix(in oklch, var(--tv-faint) 55%, transparent) transparent;
+	scrollbar-width: thin;
+}
+
+.tv-pre--lines-3 {
+	max-height: 80px;
+}
+
+.tv-pre--lines-4 {
+	max-height: 102px;
+}
+
+.tv-pre--lines-5 {
+	max-height: 124px;
+}
+
+.tv-pre--scroll::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+
+.tv-pre--scroll::-webkit-scrollbar-thumb {
+	border: 2px solid transparent;
+	border-radius: 999px;
+	background: color-mix(in oklch, var(--tv-faint) 55%, transparent);
+	background-clip: padding-box;
+}
+
+.tv-pre--scroll::-webkit-scrollbar-track {
+	background: transparent;
+}
+
 .tv-out-title {
 	padding: 0 1px 3px;
 	font-size: 12px;

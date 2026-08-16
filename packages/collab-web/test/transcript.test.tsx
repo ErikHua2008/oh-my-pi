@@ -107,11 +107,13 @@ describe("Transcript live tool rendering", () => {
 		});
 
 		expect(countElements(html, ".tv-card")).toBe(1);
-		expect(countElements(html, ".tr-assistant-bubble")).toBe(1);
-		expect(countElements(html, ".tr-assistant-bubble .tv-card")).toBe(0);
+		expect(countElements(html, ".tr-work-note")).toBe(1);
+		expect(countElements(html, ".tr-assistant-bubble")).toBe(0);
+		expect(countElements(html, '.tr-think-head[aria-expanded="true"]')).toBe(1);
+		expect(countElements(html, '.tv-head[aria-expanded="false"]')).toBe(1);
 		expect(countElements(html, ".tv-status-dots--run")).toBe(1);
 		expect(countOccurrences(html, TOOL_NAME)).toBe(1);
-		expect(html).not.toContain("thinking…");
+		expect(html).toContain("正在思考并工作…");
 		expect(html).toContain(ACTIVE_TOOL_TARGET);
 		expect(html).not.toContain(RAW_ASSISTANT_TARGET);
 	});
@@ -119,7 +121,7 @@ describe("Transcript live tool rendering", () => {
 	it("keeps the working shimmer when no tool is active", () => {
 		const html = renderTranscript({ working: true, activeTools: new Map() });
 
-		expect(html).toContain("thinking…");
+		expect(html).toContain("正在思考并工作…");
 	});
 
 	it("renders todo results as a concise plan card instead of a raw tool dump", () => {
@@ -165,7 +167,7 @@ describe("Transcript live tool rendering", () => {
 			},
 		];
 
-		const html = renderTranscript({ entries, working: false });
+		const html = renderTranscript({ entries, working: true });
 		expect(countElements(html, ".tr-plan-card")).toBe(1);
 		expect(countElements(html, ".tv-card")).toBe(0);
 		expect(html).toContain("Current task");
@@ -238,10 +240,147 @@ describe("Transcript thinking disclosure", () => {
 		const html = renderTranscript({ working: false, entries });
 
 		expect(html).toContain('aria-expanded="false"');
-		expect(html).toContain("Worked for 8m 59s");
+		expect(html).toContain("思考并工作了 8分钟59秒");
 		expect(countElements(html, ".tr-think")).toBe(1);
 		expect(countElements(html, ".tr-assistant-bubble")).toBe(0);
 		expect(html).not.toContain("private streamed reasoning");
+	});
+
+	it("merges every process step in one turn and leaves only the final answer outside", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "turn-user",
+				parentId: null,
+				timestamp: "2026-08-16T00:00:00Z",
+				message: { role: "user", content: "完成这项工作", timestamp: Date.parse("2026-08-16T00:00:00Z") },
+			},
+			{
+				type: "message",
+				id: "turn-work",
+				parentId: "turn-user",
+				timestamp: "2026-08-16T00:00:01Z",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "先分析实现" },
+						{ type: "text", text: "我先读取并修改文件。" },
+						{ type: "toolCall", id: "turn-plan", name: "todo", arguments: { task: "实现聚合" } },
+						{ type: "toolCall", id: "turn-command", name: "bash", arguments: { command: "bun test" } },
+					],
+					model: "test/model",
+					usage: assistantUsage(),
+					stopReason: "toolUse",
+					timestamp: Date.parse("2026-08-16T00:00:01Z"),
+				},
+			},
+			{
+				type: "message",
+				id: "turn-plan-result",
+				parentId: "turn-work",
+				timestamp: "2026-08-16T00:00:02Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "turn-plan",
+					toolName: "todo",
+					content: [{ type: "text", text: "raw plan" }],
+					details: { phases: [{ name: "Work", tasks: [{ content: "实现聚合", status: "completed" }] }] },
+					isError: false,
+					timestamp: Date.parse("2026-08-16T00:00:02Z"),
+				},
+			},
+			{
+				type: "message",
+				id: "turn-command-result",
+				parentId: "turn-plan-result",
+				timestamp: "2026-08-16T00:00:03Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "turn-command",
+					toolName: "bash",
+					content: [{ type: "text", text: "all tests passed" }],
+					isError: false,
+					timestamp: Date.parse("2026-08-16T00:00:03Z"),
+				},
+			},
+			{
+				type: "message",
+				id: "turn-final",
+				parentId: "turn-command-result",
+				timestamp: "2026-08-16T00:00:05Z",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "确认结果" },
+						{ type: "text", text: "已经完成，测试也通过了。" },
+					],
+					model: "test/model",
+					usage: assistantUsage(),
+					stopReason: "stop",
+					timestamp: Date.parse("2026-08-16T00:00:04Z"),
+				},
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false });
+
+		expect(countElements(html, ".tr-think")).toBe(1);
+		expect(countElements(html, ".tr-assistant-bubble")).toBe(1);
+		expect(html).toContain("思考并工作了 4秒");
+		expect(html).toContain("已经完成，测试也通过了。");
+		expect(html).not.toContain("先分析实现");
+		expect(html).not.toContain("all tests passed");
+		expect(countElements(html, ".tr-work-content")).toBe(0);
+	});
+
+	it("keeps a terminal error visible even when the provider returned no message text", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "empty-error",
+				parentId: null,
+				timestamp: "2026-08-16T00:00:00Z",
+				message: {
+					role: "assistant",
+					content: [],
+					model: "test/model",
+					usage: assistantUsage(),
+					stopReason: "error",
+					timestamp: Date.parse("2026-08-16T00:00:00Z"),
+				},
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false });
+
+		expect(countElements(html, ".tr-chip--err")).toBe(1);
+		expect(html).toContain("error");
+	});
+});
+
+describe("Transcript final answer presentation", () => {
+	const finalAnswerStream: AssistantMessage = {
+		role: "assistant",
+		content: [{ type: "text", text: "完整回答一次出现" }],
+		model: "test/model",
+		usage: assistantUsage(),
+		stopReason: "stop",
+		timestamp: 1,
+	};
+
+	it("hides an unfinished final answer behind the working state", () => {
+		const html = renderTranscript({ working: true, stream: finalAnswerStream, streamDone: false });
+
+		expect(countElements(html, ".tr-assistant-bubble")).toBe(0);
+		expect(html).not.toContain("完整回答一次出现");
+		expect(html).toContain("正在思考并工作…");
+	});
+
+	it("shows the complete final answer as one bubble after the stream finishes", () => {
+		const html = renderTranscript({ working: false, stream: finalAnswerStream, streamDone: true });
+
+		expect(countElements(html, ".tr-assistant-bubble")).toBe(1);
+		expect(html).toContain("完整回答一次出现");
 	});
 });
 

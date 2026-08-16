@@ -35,7 +35,7 @@ const MENUS: Readonly<Record<MenuName, readonly MenuItem[]>> = {
 		{ label: "Reload", action: "reload", shortcut: "Ctrl+R" },
 		{ label: "Native high-speed transcript", action: "toggle_native_transcript" },
 	],
-	help: [{ label: "About OMP", action: "about" }],
+	help: [{ label: "About Grimoire Router App", action: "about" }],
 };
 
 const RESIZE_HANDLES: readonly { edge: string; action: DesktopWindowAction }[] = [

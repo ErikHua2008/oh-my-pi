@@ -89,6 +89,25 @@ describe("SessionsPanel project grouping", () => {
 });
 
 describe("SessionsPanel session actions", () => {
+	it("uses the Grimoire Router App name and both monochrome theme marks", () => {
+		const html = renderPanel(snapshot([]));
+
+		expect(html).toContain("Grimoire Router App");
+		expect(html).toContain("grimoire-brain-on-light.svg");
+		expect(html).toContain("grimoire-brain-on-dark.svg");
+		expect(html).not.toContain(">OMP<");
+	});
+
+	it("places the future Codex import action directly after the new-session action", () => {
+		const html = renderPanel(snapshot([]));
+		const newSessionIndex = html.indexOf("New session");
+		const importIndex = html.indexOf("Import Chat from Codex");
+
+		expect(newSessionIndex).toBeGreaterThan(-1);
+		expect(importIndex).toBeGreaterThan(newSessionIndex);
+		expect(html).toContain('disabled="" title="Coming soon"');
+	});
+
 	it("keeps context menus inside every viewport edge", () => {
 		expect(placeContextMenu(900, 700, 220, 214, 960, 720)).toEqual({ x: 732, y: 498 });
 		expect(placeContextMenu(-20, -10, 220, 214, 960, 720)).toEqual({ x: 8, y: 8 });
@@ -126,6 +145,7 @@ describe("SessionsPanel session actions", () => {
 		expect(html).not.toContain('title="Open Read only session"');
 		expect(html).not.toContain("Resume");
 		expect(html).not.toContain("New session");
+		expect(html).not.toContain("Import Chat from Codex");
 		expect(html).not.toContain("Drop Read only session");
 		expect(html).not.toContain("Rename session Read only session");
 	});

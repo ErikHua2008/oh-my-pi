@@ -130,7 +130,7 @@ constexpr std::wstring_view kFallbackTitlebar = LR"html(
 <div class="resize-edge resize-bottom-left" aria-hidden="true"
   onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'resize_bottom_left'})"></div>
 <header class="shellbar">
-  <span class="shellbar-title">OMP</span>
+  <span class="shellbar-title">Grimoire Router App</span>
   <div class="shellbar-drag"
     onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'drag'})"
     ondblclick="window.__TAURI_INTERNALS__?.invoke('window_action',{action:'toggle_maximize'})"></div>
@@ -285,12 +285,12 @@ void WebViewHost::ShowWelcome() const {
 	}
 	std::wstring page = LR"html(<!doctype html><html lang="zh-CN" data-theme=")html";
 	page.append(dark_theme_ ? L"dark" : L"light");
-	page.append(LR"html("><meta charset="utf-8"><title>OMP</title>)html");
+	page.append(LR"html("><meta charset="utf-8"><title>Grimoire Router App</title>)html");
 	page.append(kPageStyle);
 	page.append(L"<body>");
 	page.append(kFallbackTitlebar);
 	page.append(LR"html(<main class="card"><h1>从一个项目开始</h1>
-<p>选择本地项目后，OMP 会在后台启动 Core，并在这个原生窗口中打开会话。模型凭据仍由 OMP 管理。</p>
+<p>选择本地项目后，Grimoire Router App 会在后台启动 Core，并在这个原生窗口中打开会话。模型凭据仍由 Core 管理。</p>
 <button onclick="chrome.webview.postMessage('open-project')">打开项目</button></main></body></html>)html");
 	webview_->NavigateToString(page.c_str());
 }
@@ -301,7 +301,7 @@ void WebViewHost::ShowStatus(std::wstring_view title, std::wstring_view detail, 
 	}
 	std::wstring page = LR"html(<!doctype html><html lang="zh-CN" data-theme=")html";
 	page.append(dark_theme_ ? L"dark" : L"light");
-	page.append(LR"html("><meta charset="utf-8"><title>OMP</title>)html");
+	page.append(LR"html("><meta charset="utf-8"><title>Grimoire Router App</title>)html");
 	page.append(kPageStyle);
 	page.append(L"<body>");
 	page.append(kFallbackTitlebar);

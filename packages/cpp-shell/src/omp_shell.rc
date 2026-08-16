@@ -1,3 +1,4 @@
 #include "omp_shell/resource.h"
 
-IDI_OMP_APP ICON "../../collab-web/public/favicon.ico"
+IDI_GRIMOIRE_ON_LIGHT ICON "../../collab-web/public/grimoire-brain-on-light.ico"
+IDI_GRIMOIRE_ON_DARK ICON "../../collab-web/public/grimoire-brain-on-dark.ico"

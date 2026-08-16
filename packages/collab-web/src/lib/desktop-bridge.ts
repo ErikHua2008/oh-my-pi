@@ -33,6 +33,15 @@ export interface DesktopNativeTranscriptRow {
 	mediaIds: readonly string[];
 	/** Exact completed reasoning/model-call duration when durable timestamps are available. */
 	durationMs?: number;
+	/** Second-level operation disclosures shown after the reasoning row is opened. */
+	processItems?: readonly DesktopNativeTranscriptProcessItem[];
+}
+
+export interface DesktopNativeTranscriptProcessItem {
+	id: string;
+	summary: string;
+	detail: string;
+	failed?: boolean;
 }
 
 export interface DesktopNativeTranscriptImage {

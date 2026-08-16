@@ -388,9 +388,25 @@
 	border-radius: var(--radius-sm);
 	color: var(--fg-muted);
 	font-size: 12px;
+	overflow-wrap: anywhere;
+}
+
+.tr-work-content {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 8px;
+	width: 100%;
+}
+
+.tr-work-reasoning {
 	font-style: italic;
 	white-space: pre-wrap;
-	overflow-wrap: anywhere;
+}
+
+.tr-work-note {
+	color: var(--fg-muted);
+	font-size: 13px;
 }
 
 .tr-chev {
@@ -438,6 +454,37 @@
 .tr-tool-card {
 	width: 100%;
 	min-width: 0;
+}
+
+/* The work disclosure is level one and deliberately grows with its compact
+ * operation headers. Each opened operation is level two; its detail alone is
+ * bounded to roughly five text lines and owns the inner scrollbar. */
+.tr-work-content .tv-body {
+	max-height: 124px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	scrollbar-color: color-mix(in oklch, var(--fg-faint) 55%, transparent) transparent;
+	scrollbar-width: thin;
+}
+
+.tr-work-content .tv-body .tv-pre--scroll {
+	max-height: none;
+	overflow-y: visible;
+}
+
+.tr-work-content .tv-body::-webkit-scrollbar {
+	width: 6px;
+}
+
+.tr-work-content .tv-body::-webkit-scrollbar-thumb {
+	border: 2px solid transparent;
+	border-radius: 999px;
+	background: color-mix(in oklch, var(--fg-faint) 55%, transparent);
+	background-clip: padding-box;
+}
+
+.tr-work-content .tv-body::-webkit-scrollbar-track {
+	background: transparent;
 }
 
 .tr-tool-card > .tv-card {

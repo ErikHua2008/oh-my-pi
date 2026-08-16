@@ -77,6 +77,10 @@ private:
 		std::uint64_t last_use = 0;
 		bool failed = false;
 	};
+	struct ProcessItemHit final {
+		std::string row_id;
+		std::string item_key;
+	};
 
 	static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 	LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
@@ -99,7 +103,10 @@ private:
 	[[nodiscard]] TextLayout* GetTextLayout(const NativeTranscriptRow& row, float width);
 	[[nodiscard]] bool IsCollapsedExpandable(const NativeTranscriptRow& row) const;
 	[[nodiscard]] std::optional<std::string> HitTestExpandableHeader(POINT point) const;
+	[[nodiscard]] std::optional<ProcessItemHit> HitTestProcessItemHeader(POINT point) const;
 	void ToggleExpandable(std::string_view row_id);
+	void ToggleProcessItem(const ProcessItemHit& hit);
+	[[nodiscard]] bool ScrollProcessDetailAtPoint(POINT point, int wheel_delta);
 	[[nodiscard]] std::optional<SelectionPoint> HitTestText(POINT point);
 	[[nodiscard]] std::optional<SelectionSpan> NormalizedSelection() const;
 	[[nodiscard]] bool HasSelection() const;
@@ -152,6 +159,8 @@ private:
 	std::unordered_map<std::string, MediaEntry> media_cache_;
 	std::unordered_set<std::string> requested_media_;
 	std::unordered_set<std::string> expanded_rows_;
+	std::unordered_set<std::string> expanded_process_items_;
+	std::unordered_map<std::string, float> process_detail_scroll_offsets_;
 	std::optional<SelectionPoint> selection_anchor_;
 	std::optional<SelectionPoint> selection_focus_;
 	std::int64_t scroll_offset_ = 0;

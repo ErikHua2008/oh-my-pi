@@ -16,7 +16,7 @@ namespace omp::shell {
 		result.append(std::to_wstring(hours)).append(L"小时");
 	}
 	if (minutes > 0) {
-		result.append(std::to_wstring(minutes)).append(L"分");
+		result.append(std::to_wstring(minutes)).append(L"分钟");
 	}
 	if (seconds > 0 || (hours == 0 && minutes == 0)) {
 		result.append(std::to_wstring(seconds)).append(L"秒");
@@ -30,7 +30,7 @@ namespace omp::shell {
 	bool expanded,
 	bool streaming) {
 	if (streaming) {
-		return L"正在思考…";
+		return L"正在思考并工作…";
 	}
 	std::wstring label = duration_ms >= 0
 		? L"思考并工作了 " + FormatNativeTranscriptWorkDuration(duration_ms)

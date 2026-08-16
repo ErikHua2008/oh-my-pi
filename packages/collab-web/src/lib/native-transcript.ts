@@ -5,16 +5,21 @@ import {
 	type SessionEntry,
 	type TextContent,
 } from "@oh-my-pi/pi-wire";
-import type { DesktopNativeTranscriptKind, DesktopNativeTranscriptRow } from "./desktop-bridge";
+import type {
+	DesktopNativeTranscriptKind,
+	DesktopNativeTranscriptProcessItem,
+	DesktopNativeTranscriptRow,
+} from "./desktop-bridge";
 import {
 	isSystemReminder,
 	operationPresentation,
 	planPresentationText,
 	transcriptToolPresentation,
 } from "./transcript-presentation";
+import { projectTranscriptItems, type TranscriptAssistantTurn } from "./transcript-turns";
 
 const MAX_ROW_TEXT = 256 * 1024;
-const MAX_REASONING_DURATION_MS = 7 * 24 * 60 * 60 * 1_000;
+const MAX_PROCESS_DETAIL = 64 * 1024;
 const STREAM_PREFIX = "__omp_native_stream__:";
 
 const NativeRowFlag = {
@@ -26,6 +31,25 @@ const NativeRowFlag = {
 function boundedText(value: string): string {
 	if (value.length <= MAX_ROW_TEXT) return value;
 	return `${value.slice(0, MAX_ROW_TEXT)}\n\n[内容过长，原生视图已截断；可切换 Web 兼容视图查看完整内容]`;
+}
+
+function boundedProcessDetail(value: string): string {
+	if (value.length <= MAX_PROCESS_DETAIL) return value;
+	return `${value.slice(0, MAX_PROCESS_DETAIL)}\n\n[详细内容过长，已截断]`;
+}
+
+function operationDetail(args: unknown, output: string): string {
+	const parts: string[] = [];
+	if (args !== undefined) {
+		try {
+			const encoded = JSON.stringify(args, null, 2);
+			if (encoded !== undefined && encoded !== "{}") parts.push(`输入\n${encoded}`);
+		} catch {
+			parts.push("输入\n[参数无法显示]");
+		}
+	}
+	if (output.length > 0) parts.push(`输出\n${output}`);
+	return boundedProcessDetail(parts.join("\n\n") || "暂无详细输出");
 }
 
 function contentText(content: string | readonly (TextContent | ImageContent)[]): string {
@@ -61,41 +85,51 @@ function assistantResponseText(message: AssistantMessage): string {
 	return parts.join("\n\n");
 }
 
-function assistantStreamText(message: AssistantMessage, collapseThinking: boolean): string {
+function assistantStreamIsFinal(message: AssistantMessage): boolean {
+	return (
+		message.stopReason !== "toolUse" &&
+		!message.content.some(block => block.type === "toolCall") &&
+		(assistantResponseText(message).length > 0 ||
+			Boolean(message.errorMessage) ||
+			message.stopReason === "error" ||
+			message.stopReason === "aborted")
+	);
+}
+
+function assistantStreamProcessText(message: AssistantMessage): string {
 	const parts: string[] = [];
+	const final = assistantStreamIsFinal(message);
 	for (const block of message.content) {
 		switch (block.type) {
 			case "thinking":
-				if (block.thinking.length > 0) {
-					parts.push(collapseThinking ? "思考过程（已折叠）" : `思考过程\n${block.thinking}`);
-				}
+				if (block.thinking.length > 0) parts.push(block.thinking);
 				break;
 			case "redactedThinking":
 				parts.push("[思考内容已由模型隐藏]");
 				break;
 			case "text":
-				if (block.text.length > 0) parts.push(block.text);
+				if (!final && block.text.length > 0) parts.push(block.text);
 				break;
+			case "toolCall": {
+				const presentation = transcriptToolPresentation(block.name);
+				if (presentation === "plan") parts.push(planPresentationText(undefined, block.arguments));
+				else if (presentation === "operation") {
+					parts.push(operationPresentation(block.name, block.arguments, false));
+				}
+				break;
+			}
 			default:
 				break;
 		}
 	}
-	if (message.errorMessage) parts.push(message.errorMessage);
-	return parts.join("\n\n") || "…";
+	if (!final && message.errorMessage) parts.push(message.errorMessage);
+	return parts.join("\n\n");
 }
 
 function estimatedHeight(text: string, kind: DesktopNativeTranscriptKind): number {
 	const explicitLines = Math.min(80, text.split("\n").length - 1);
 	const wrappedLines = Math.min(80, Math.ceil(text.length / (kind === "user" ? 58 : 82)));
 	return Math.max(52, Math.min(2_000, 45 + Math.max(1, explicitLines + wrappedLines) * 21));
-}
-
-function completedDurationMs(completedAt: string, startedAt: number): number | undefined {
-	const completed = Date.parse(completedAt);
-	if (!Number.isFinite(startedAt) || Number.isNaN(completed)) return undefined;
-	const duration = completed - startedAt;
-	if (duration < 0 || duration > MAX_REASONING_DURATION_MS) return undefined;
-	return Math.round(duration);
 }
 
 function row(
@@ -105,6 +139,7 @@ function row(
 	flags = 0,
 	mediaIds: readonly string[] = [],
 	durationMs?: number,
+	processItems: readonly DesktopNativeTranscriptProcessItem[] = [],
 ): DesktopNativeTranscriptRow {
 	const bounded = boundedText(text);
 	return {
@@ -118,6 +153,7 @@ function row(
 				: estimatedHeight(bounded, kind) + mediaIds.length * 176,
 		mediaIds,
 		durationMs,
+		processItems,
 	};
 }
 
@@ -130,93 +166,141 @@ function customPromptText(entry: Extract<SessionEntry, { type: "custom_message" 
 	return contentText(entry.content);
 }
 
-/** Convert durable wire entries to the compact, renderer-independent native rows. */
-export function projectNativeTranscript(entries: readonly SessionEntry[]): DesktopNativeTranscriptRow[] {
+function nativeTurnRows(turn: TranscriptAssistantTurn): DesktopNativeTranscriptRow[] {
 	const rows: DesktopNativeTranscriptRow[] = [];
-	const toolArgs = new Map<string, unknown>();
-	for (const entry of entries) {
-		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		for (const block of entry.message.content) {
-			if (block.type === "toolCall") toolArgs.set(block.id, block.arguments);
+	const processParts: string[] = [];
+	const processMediaIds = new Set<string>();
+	const processItems: DesktopNativeTranscriptProcessItem[] = [];
+	const calledToolIds = new Set<string>();
+	let processFailed = false;
+
+	const appendTool = (name: string, callId: string, args: unknown): void => {
+		const presentation = transcriptToolPresentation(name);
+		if (presentation === "hidden") return;
+		calledToolIds.add(callId);
+		const result = turn.toolResults.get(callId)?.message;
+		if (result?.isError) processFailed = true;
+		if (presentation === "plan") {
+			const detail = planPresentationText(result?.details, args);
+			processParts.push(detail);
+			processItems.push({ id: callId, summary: detail.split("\n", 1)[0] ?? "计划", detail });
+		} else {
+			const output = result === undefined ? "" : contentText(result.content);
+			const summary = operationPresentation(name, args, result?.isError ?? false);
+			processParts.push(`${summary}${output ? `\n\n${output}` : ""}`);
+			processItems.push({
+				id: callId,
+				summary,
+				detail: operationDetail(args, output),
+				failed: result?.isError === true,
+			});
+		}
+		if (result !== undefined) {
+			for (const mediaId of contentMediaIds(result.content)) {
+				if (processMediaIds.size < 8) processMediaIds.add(mediaId);
+			}
+		}
+	};
+
+	for (const entry of turn.assistantEntries) {
+		for (const [blockIndex, block] of entry.message.content.entries()) {
+			switch (block.type) {
+				case "thinking":
+					if (block.thinking.length > 0) {
+						processParts.push(block.thinking);
+						processItems.push({
+							id: `${entry.id}:thinking:${blockIndex}`,
+							summary: "思考过程",
+							detail: boundedProcessDetail(block.thinking),
+						});
+					}
+					break;
+				case "redactedThinking":
+					processParts.push("思考内容已由模型隐藏");
+					processItems.push({
+						id: `${entry.id}:thinking:${blockIndex}`,
+						summary: "思考过程",
+						detail: "思考内容已由模型隐藏",
+					});
+					break;
+				case "text":
+					if (entry !== turn.finalEntry && block.text.length > 0) {
+						processParts.push(block.text);
+						processItems.push({
+							id: `${entry.id}:note:${blockIndex}`,
+							summary: "工作说明",
+							detail: boundedProcessDetail(block.text),
+						});
+					}
+					break;
+				case "toolCall":
+					appendTool(block.name, block.id, block.arguments);
+					break;
+				default:
+					break;
+			}
+		}
+		if (
+			entry !== turn.finalEntry &&
+			(entry.message.stopReason === "error" || entry.message.stopReason === "aborted")
+		) {
+			processFailed = true;
+			const detail =
+				entry.message.errorMessage ?? (entry.message.stopReason === "error" ? "操作过程出错" : "操作过程已中止");
+			processParts.push(detail);
+			processItems.push({ id: `${entry.id}:error`, summary: "操作过程出错", detail, failed: true });
 		}
 	}
-	for (const entry of entries) {
+	for (const entry of turn.toolResultEntries) {
+		const { message } = entry;
+		if (calledToolIds.has(message.toolCallId) || transcriptToolPresentation(message.toolName) === "hidden") continue;
+		appendTool(message.toolName, message.toolCallId, undefined);
+	}
+	if (turn.hasProcess && processParts.length > 0) {
+		rows.push(
+			row(
+				`${turn.id}:process`,
+				"reasoning",
+				processParts.join("\n\n"),
+				NativeRowFlag.Expandable | (processFailed ? NativeRowFlag.Failed : 0),
+				[...processMediaIds],
+				turn.durationMs,
+				processItems,
+			),
+		);
+	}
+	if (turn.finalEntry !== undefined) {
+		const message = turn.finalEntry.message;
+		const failed = message.stopReason === "error" || message.stopReason === "aborted";
+		rows.push(
+			row(
+				turn.finalEntry.id,
+				failed ? "error" : "assistant",
+				assistantResponseText(message) || "…",
+				failed ? NativeRowFlag.Failed : 0,
+			),
+		);
+	}
+	return rows;
+}
+
+/** Convert durable wire entries to compact native rows grouped by user turn. */
+export function projectNativeTranscript(entries: readonly SessionEntry[]): DesktopNativeTranscriptRow[] {
+	const rows: DesktopNativeTranscriptRow[] = [];
+	for (const item of projectTranscriptItems(entries)) {
+		if (item.kind === "assistant-turn") {
+			rows.push(...nativeTurnRows(item));
+			continue;
+		}
+		const { entry } = item;
 		switch (entry.type) {
-			case "message": {
-				const message = entry.message;
-				switch (message.role) {
-					case "user":
-						rows.push(row(entry.id, "user", contentText(message.content), 0, contentMediaIds(message.content)));
-						break;
-					case "assistant": {
-						const failed = message.stopReason === "error" || message.stopReason === "aborted";
-						const durationMs = completedDurationMs(entry.timestamp, message.timestamp);
-						const reasoningParts: string[] = [];
-						let expandableReasoning = false;
-						message.content.forEach(block => {
-							if (block.type === "thinking" && block.thinking.length > 0) {
-								reasoningParts.push(block.thinking);
-								expandableReasoning = true;
-							} else if (block.type === "redactedThinking") {
-								reasoningParts.push("思考内容已由模型隐藏");
-							}
-						});
-						if (reasoningParts.length > 0) {
-							rows.push(
-								row(
-									`${entry.id}:reasoning`,
-									"reasoning",
-									reasoningParts.join("\n\n"),
-									expandableReasoning ? NativeRowFlag.Expandable : 0,
-									[],
-									durationMs,
-								),
-							);
-						}
-						const response = assistantResponseText(message);
-						const hasToolCall = message.content.some(block => block.type === "toolCall");
-						if (response.length > 0 || (reasoningParts.length === 0 && !hasToolCall)) {
-							rows.push(
-								row(
-									entry.id,
-									failed ? "error" : "assistant",
-									response || "…",
-									failed ? NativeRowFlag.Failed : 0,
-								),
-							);
-						}
-						break;
-					}
-					case "developer":
-						// Provider reminders and injected developer guidance belong to the
-						// model context, not the human-readable conversation.
-						break;
-					case "toolResult": {
-						const presentation = transcriptToolPresentation(message.toolName);
-						if (presentation === "hidden") break;
-						const args = toolArgs.get(message.toolCallId);
-						if (presentation === "plan") {
-							rows.push(row(entry.id, "plan", planPresentationText(message.details, args)));
-							break;
-						}
-						const output = contentText(message.content);
-						const summary = operationPresentation(message.toolName, args, message.isError);
-						rows.push(
-							row(
-								entry.id,
-								"tool",
-								`${summary}${output ? `\n\n${output}` : ""}`,
-								NativeRowFlag.Expandable | (message.isError ? NativeRowFlag.Failed : 0),
-								contentMediaIds(message.content),
-							),
-						);
-						break;
-					}
-					default:
-						break;
+			case "message":
+				if (entry.message.role === "user") {
+					rows.push(
+						row(entry.id, "user", contentText(entry.message.content), 0, contentMediaIds(entry.message.content)),
+					);
 				}
 				break;
-			}
 			case "custom_message":
 				if (entry.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
 					rows.push(row(entry.id, "user", customPromptText(entry), 0, contentMediaIds(entry.content)));
@@ -269,44 +353,26 @@ export function projectNativeStream(
 	const id = nativeStreamRowId(sessionId);
 	if (stream !== null) {
 		const failed = streamDone && (stream.stopReason === "error" || stream.stopReason === "aborted");
-		const hasNarrative = stream.content.some(
-			block => block.type === "text" || block.type === "thinking" || block.type === "redactedThinking",
-		);
-		if (!hasNarrative) {
-			for (let index = stream.content.length - 1; index >= 0; index--) {
-				const block = stream.content[index];
-				if (block?.type !== "toolCall") continue;
-				const presentation = transcriptToolPresentation(block.name);
-				if (presentation === "hidden") continue;
-				if (presentation === "plan") {
-					return row(
-						id,
-						"plan",
-						planPresentationText(undefined, block.arguments),
-						streamDone ? 0 : NativeRowFlag.Streaming,
-					);
-				}
-				return row(
-					id,
-					"tool",
-					operationPresentation(block.name, block.arguments, failed),
-					NativeRowFlag.Expandable |
-						(streamDone ? 0 : NativeRowFlag.Streaming) |
-						(failed ? NativeRowFlag.Failed : 0),
-				);
+		if (assistantStreamIsFinal(stream)) {
+			if (!streamDone) {
+				const process = assistantStreamProcessText(stream);
+				return row(id, "reasoning", process || "正在处理…", NativeRowFlag.Streaming);
 			}
-			return working ? row(id, "assistant", "正在处理…", NativeRowFlag.Streaming) : null;
+			return row(
+				id,
+				failed ? "error" : "assistant",
+				assistantResponseText(stream) || "…",
+				failed ? NativeRowFlag.Failed : 0,
+			);
 		}
-		const reasoningOnly =
-			!streamDone &&
-			stream.content.some(block => block.type === "thinking") &&
-			!stream.content.some(block => block.type === "text");
+		const process = assistantStreamProcessText(stream);
+		if (process.length === 0) return working ? row(id, "reasoning", "正在处理…", NativeRowFlag.Streaming) : null;
 		return row(
 			id,
-			failed ? "error" : reasoningOnly ? "reasoning" : "assistant",
-			assistantStreamText(stream, streamDone),
-			(streamDone ? 0 : NativeRowFlag.Streaming) | (failed ? NativeRowFlag.Failed : 0),
+			"reasoning",
+			process,
+			(streamDone ? NativeRowFlag.Expandable : NativeRowFlag.Streaming) | (failed ? NativeRowFlag.Failed : 0),
 		);
 	}
-	return working ? row(id, "assistant", "正在思考…", NativeRowFlag.Streaming) : null;
+	return working ? row(id, "reasoning", "正在处理…", NativeRowFlag.Streaming) : null;
 }

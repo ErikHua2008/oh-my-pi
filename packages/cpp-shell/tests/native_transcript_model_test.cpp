@@ -54,6 +54,18 @@ OMP_TEST("native transcript upsert appends and updates streaming rows in place")
 	OMP_CHECK(model.RowTop(1) == 24);
 }
 
+OMP_TEST("native transcript preserves structured second-level process items") {
+	auto row = Row("reasoning-1", 42, "fallback process text", omp::shell::NativeTranscriptRowFlags::Expandable);
+	row.kind = omp::shell::NativeTranscriptRowKind::Reasoning;
+	row.process_items.push_back({"command-1", "已执行命令 · bun test", "line 1\nline 2\nline 3", false});
+	omp::shell::NativeTranscriptModel model;
+	model.ReplaceSnapshot({std::move(row)});
+
+	OMP_CHECK(model.RowAt(0).process_items.size() == 1);
+	OMP_CHECK(model.RowAt(0).process_items[0].summary == "已执行命令 · bun test");
+	OMP_CHECK(model.RowAt(0).process_items[0].detail.find("line 3") != std::string::npos);
+}
+
 OMP_TEST("native transcript visible range handles exact boundaries and overscan") {
 	omp::shell::NativeTranscriptModel model;
 	model.ReplaceSnapshot({Row("a", 10), Row("b", 20), Row("c", 30), Row("d", 40)});

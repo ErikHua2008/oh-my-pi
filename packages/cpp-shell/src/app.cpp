@@ -28,7 +28,7 @@ namespace omp::shell {
 namespace {
 
 constexpr wchar_t kWindowClassName[] = L"OmpCppShellWindow";
-constexpr wchar_t kBaseWindowTitle[] = L"OMP";
+constexpr wchar_t kBaseWindowTitle[] = L"Grimoire Router App";
 constexpr UINT kCoreEventMessage = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr UINT kMenuOpenProject = 1001;
@@ -50,7 +50,7 @@ constexpr int kCompactClientWidth = kSidebarWidth + kConversationClientWidth;
 constexpr int kAgentRailWidth = 288;
 constexpr int kWebResizeEdgeWidth = 6;
 
-constexpr NativeMenuItem kShowWindowItem{L"打开 OMP", false, false};
+constexpr NativeMenuItem kShowWindowItem{L"打开 Grimoire Router App", false, false};
 constexpr NativeMenuItem kTrayOpenProjectItem{L"打开项目...", false, false};
 constexpr NativeMenuItem kTrayExitItem{L"退出", false, false};
 constexpr NativeMenuItem kMenuSeparatorItem{nullptr, false, true};
@@ -181,10 +181,10 @@ int ShowThemedMessageBox(HWND owner, const wchar_t* text, const wchar_t* caption
 	return MessageBoxW(owner, text, caption, type);
 }
 
-[[nodiscard]] HICON LoadEmbeddedIcon(HINSTANCE instance, int width, int height) noexcept {
+[[nodiscard]] HICON LoadEmbeddedIcon(HINSTANCE instance, bool dark, int width, int height) noexcept {
 	return reinterpret_cast<HICON>(LoadImageW(
 		instance,
-		MAKEINTRESOURCEW(IDI_OMP_APP),
+		MAKEINTRESOURCEW(dark ? IDI_GRIMOIRE_ON_DARK : IDI_GRIMOIRE_ON_LIGHT),
 		IMAGE_ICON,
 		width,
 		height,
@@ -248,6 +248,28 @@ NativeTranscriptRow ParseNativeRow(const nlohmann::json& value) {
 			throw std::invalid_argument("native transcript duration is out of range");
 		}
 		row.duration_ms = duration_ms;
+	}
+	if (const auto items = value.find("processItems"); items != value.end()) {
+		if (!items->is_array() || items->size() > 512) {
+			throw std::invalid_argument("native transcript process item list is invalid");
+		}
+		std::size_t total_detail_bytes = 0;
+		for (const nlohmann::json& encoded_item : *items) {
+			if (!encoded_item.is_object()) {
+				throw std::invalid_argument("native transcript process item must be an object");
+			}
+			NativeTranscriptProcessItem item;
+			item.id = encoded_item.at("id").get<std::string>();
+			item.summary = encoded_item.at("summary").get<std::string>();
+			item.detail = encoded_item.at("detail").get<std::string>();
+			item.failed = encoded_item.value("failed", false);
+			total_detail_bytes += item.detail.size();
+			if (item.id.empty() || item.id.size() > 512 || item.summary.empty() || item.summary.size() > 4 * 1024 ||
+				item.detail.size() > 128 * 1024 || total_detail_bytes > 1024 * 1024) {
+				throw std::invalid_argument("native transcript process item exceeds its size limit");
+			}
+			row.process_items.push_back(std::move(item));
+		}
 	}
 	if (const auto media = value.find("mediaIds"); media != value.end()) {
 		if (!media->is_array() || media->size() > 8) {
@@ -535,8 +557,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 			return 0;
 		case kMenuAbout:
 			ShowThemedMessageBox(window_,
-				L"OMP C++ Shell\nNative Windows host for omp core",
-				L"About OMP",
+				L"Grimoire Router App\nNative Windows host for omp core",
+				L"About Grimoire Router App",
 				MB_OK | MB_ICONINFORMATION,
 				dark_theme_);
 			return 0;
@@ -590,8 +612,10 @@ bool App::RegisterWindowClass() const {
 	window_class.lpfnWndProc = WindowProcedure;
 	window_class.hInstance = instance_;
 	window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-	window_class.hIcon = LoadEmbeddedIcon(instance_, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
-	window_class.hIconSm = LoadEmbeddedIcon(instance_, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+	window_class.hIcon =
+		LoadEmbeddedIcon(instance_, dark_theme_, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+	window_class.hIconSm =
+		LoadEmbeddedIcon(instance_, dark_theme_, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
 	if (window_class.hIcon == nullptr) {
 		window_class.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
 	}
@@ -659,12 +683,14 @@ void App::InitializeTray() {
 	tray_icon_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
 	tray_icon_.uCallbackMessage = kTrayMessage;
 	const UINT dpi = GetDpiForWindow(window_);
-	tray_icon_.hIcon = LoadEmbeddedIcon(
-		instance_, GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi));
+	tray_icon_.hIcon = LoadEmbeddedIcon(instance_,
+		dark_theme_,
+		GetSystemMetricsForDpi(SM_CXSMICON, dpi),
+		GetSystemMetricsForDpi(SM_CYSMICON, dpi));
 	if (tray_icon_.hIcon == nullptr) {
 		tray_icon_.hIcon = reinterpret_cast<HICON>(GetClassLongPtrW(window_, GCLP_HICONSM));
 	}
-	wcscpy_s(tray_icon_.szTip, L"OMP C++ Shell");
+	wcscpy_s(tray_icon_.szTip, L"Grimoire Router App");
 	tray_added_ = Shell_NotifyIconW(NIM_ADD, &tray_icon_) != FALSE;
 	if (tray_added_) {
 		tray_icon_.uVersion = NOTIFYICON_VERSION_4;
@@ -777,6 +803,24 @@ void App::ApplyTheme(bool dark) {
 	DwmSetWindowAttribute(window_, kDwmBorderColorAttribute, &kDwmColorNone, sizeof(kDwmColorNone));
 	ApplyWindowThemeMode(window_, dark);
 	ApplyWindowThemeMode(native_transcript_.Window(), dark);
+	const UINT dpi = GetDpiForWindow(window_);
+	const HICON large_icon = LoadEmbeddedIcon(instance_,
+		dark,
+		GetSystemMetricsForDpi(SM_CXICON, dpi),
+		GetSystemMetricsForDpi(SM_CYICON, dpi));
+	const HICON small_icon = LoadEmbeddedIcon(instance_,
+		dark,
+		GetSystemMetricsForDpi(SM_CXSMICON, dpi),
+		GetSystemMetricsForDpi(SM_CYSMICON, dpi));
+	if (large_icon != nullptr) SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large_icon));
+	if (small_icon != nullptr) SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
+	if (tray_added_ && small_icon != nullptr) {
+		tray_icon_.hIcon = small_icon;
+		const UINT previous_flags = tray_icon_.uFlags;
+		tray_icon_.uFlags = NIF_ICON;
+		Shell_NotifyIconW(NIM_MODIFY, &tray_icon_);
+		tray_icon_.uFlags = previous_flags;
+	}
 	RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
 }
 
@@ -819,7 +863,7 @@ void App::InitializeWebView() {
 			if (FAILED(result)) {
 				ShowThemedMessageBox(window_,
 					L"无法初始化 Microsoft Edge WebView2 Runtime。请安装或修复 WebView2 Runtime。",
-					L"OMP 启动失败",
+					L"Grimoire Router App 启动失败",
 					MB_OK | MB_ICONERROR,
 					dark_theme_);
 				return;
@@ -832,7 +876,7 @@ void App::InitializeWebView() {
 				pending_core_failure_summary_.clear();
 				pending_core_failure_detail_.clear();
 			} else if (!project_directory_.empty() && core_.running()) {
-				webview_.ShowStatus(L"正在启动 OMP Core", project_directory_, false);
+				webview_.ShowStatus(L"正在启动 Core", project_directory_, false);
 			} else {
 				webview_.ShowWelcome();
 			}
@@ -843,14 +887,15 @@ void App::InitializeWebView() {
 void App::PickProject() {
 	Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
 	if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
-		ShowThemedMessageBox(window_, L"无法打开项目选择器。", L"OMP", MB_OK | MB_ICONERROR, dark_theme_);
+		ShowThemedMessageBox(
+			window_, L"无法打开项目选择器。", L"Grimoire Router App", MB_OK | MB_ICONERROR, dark_theme_);
 		return;
 	}
 	FILEOPENDIALOGOPTIONS options{};
 	if (SUCCEEDED(dialog->GetOptions(&options))) {
 		dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
 	}
-	dialog->SetTitle(L"选择 OMP 项目目录");
+	dialog->SetTitle(L"选择 Grimoire Router App 项目目录");
 	const HRESULT shown = dialog->Show(window_);
 	if (shown != S_OK) {
 		return;
@@ -927,7 +972,7 @@ void App::SwitchProject(std::wstring project_directory) {
 		return;
 	}
 
-	webview_.ShowStatus(L"正在启动 OMP Core", canonical, false);
+	webview_.ShowStatus(L"正在启动 Core", canonical, false);
 	native_transcript_.SetVisible(false);
 	native_transcript_.Clear();
 	has_native_transcript_bounds_ = false;
@@ -958,7 +1003,7 @@ void App::SwitchProject(std::wstring project_directory) {
 				}
 			},
 			start_error)) {
-		ShowCoreFailure(L"无法启动 OMP Core", start_error);
+		ShowCoreFailure(L"无法启动 Core", start_error);
 	}
 }
 
@@ -977,13 +1022,13 @@ void App::HandleCoreEvent(std::unique_ptr<CoreEvent> event) {
 		break;
 	}
 	case CoreEventKind::StartupSlow:
-		webview_.ShowStatus(L"OMP Core 启动时间较长", Utf8ToWide(event->detail), false);
+		webview_.ShowStatus(L"Core 启动时间较长", Utf8ToWide(event->detail), false);
 		break;
 	case CoreEventKind::StartupFailed:
-		ShowCoreFailure(L"OMP Core 启动失败", event->detail);
+		ShowCoreFailure(L"Core 启动失败", event->detail);
 		break;
 	case CoreEventKind::Exited: {
-		std::wstring summary = L"OMP Core 已意外退出（code ";
+		std::wstring summary = L"Core 已意外退出（code ";
 		summary.append(std::to_wstring(event->exit_code));
 		summary.push_back(L'）');
 		ShowCoreFailure(summary, event->detail);
@@ -1431,7 +1476,7 @@ void App::UpdateWindowTitle() const {
 		return;
 	}
 	std::wstring title = config_.ProjectName(project_directory_).value_or(DirectoryName(project_directory_));
-	title.append(L" — OMP");
+	title.append(L" — Grimoire Router App");
 	SetWindowTextW(window_, title.c_str());
 }
 

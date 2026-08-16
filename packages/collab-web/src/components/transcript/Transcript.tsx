@@ -27,6 +27,12 @@ import {
 } from "../../lib/stream-presentation";
 import { useSystemTheme } from "../../lib/theme";
 import { isSystemReminder, transcriptToolPresentation } from "../../lib/transcript-presentation";
+import {
+	type AssistantEntry,
+	isTranscriptUserPrompt,
+	projectTranscriptItems,
+	type TranscriptAssistantTurn,
+} from "../../lib/transcript-turns";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
@@ -72,49 +78,36 @@ function Row({
 	);
 }
 
-const MAX_REASONING_DURATION_MS = 7 * 24 * 60 * 60 * 1_000;
-
-function completedDurationMs(startedAt: number, completedAt?: string): number | undefined {
-	if (completedAt === undefined || !Number.isFinite(startedAt)) return undefined;
-	const completed = Date.parse(completedAt);
-	if (Number.isNaN(completed)) return undefined;
-	const duration = completed - startedAt;
-	if (duration < 0 || duration > MAX_REASONING_DURATION_MS) return undefined;
-	return Math.round(duration);
-}
-
 function formatWorkDuration(durationMs: number): string {
 	const roundedSeconds = Math.max(1, Math.round(durationMs / 1_000));
 	const hours = Math.floor(roundedSeconds / 3_600);
 	const minutes = Math.floor((roundedSeconds % 3_600) / 60);
 	const seconds = roundedSeconds % 60;
 	const parts: string[] = [];
-	if (hours > 0) parts.push(`${hours}h`);
-	if (minutes > 0) parts.push(`${minutes}m`);
-	if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
-	return parts.join(" ");
+	if (hours > 0) parts.push(`${hours}小时`);
+	if (minutes > 0) parts.push(`${minutes}分钟`);
+	if (seconds > 0 || parts.length === 0) parts.push(`${seconds}秒`);
+	return parts.join("");
 }
 
-function ThinkingBlock({
-	text,
-	redacted,
+function WorkDisclosure({
 	pending,
 	durationMs,
+	children,
 }: {
-	text: string;
-	redacted?: boolean;
 	pending: boolean;
 	durationMs?: number;
+	children: ReactNode;
 }): ReactNode {
-	const [open, setOpen] = useState(pending && !redacted);
+	const [open, setOpen] = useState(pending);
 	const contentId = useId();
 	const label = pending
-		? "thinking…"
+		? "正在思考并工作…"
 		: durationMs === undefined
-			? "thinking"
-			: `Worked for ${formatWorkDuration(durationMs)}`;
+			? "思考并工作"
+			: `思考并工作了 ${formatWorkDuration(durationMs)}`;
 	useEffect(() => {
-		if (!pending) setOpen(false);
+		setOpen(pending);
 	}, [pending]);
 	return (
 		<div className="tr-think">
@@ -126,12 +119,11 @@ function ThinkingBlock({
 				onClick={() => setOpen(v => !v)}
 			>
 				{label}
-				{redacted ? " · redacted" : ""}
 				<ChevronRight aria-hidden size={12} className={`tr-chev${open ? " tr-chev--open" : ""}`} />
 			</button>
 			{open && (
 				<div id={contentId} className="tr-think-body">
-					{redacted ? "(redacted by provider)" : text}
+					{children}
 				</div>
 			)}
 		</div>
@@ -396,13 +388,6 @@ function copyablePromptText(text: string, localFiles: readonly LocalFileReferenc
 	return text.length > 0 ? `${text}\n\n${paths}` : paths;
 }
 
-function isUserPromptEntry(entry: SessionEntry): boolean {
-	return (
-		(entry.type === "message" && entry.message.role === "user") ||
-		(entry.type === "custom_message" && entry.customType === COLLAB_PROMPT_MESSAGE_TYPE)
-	);
-}
-
 function messageTime(timestamp: string): string {
 	const parsed = Date.parse(timestamp);
 	if (Number.isNaN(parsed)) return timestamp;
@@ -503,60 +488,57 @@ function UserMessage({
 	);
 }
 
-function AssistantBody({
-	message,
+function ProcessAssistantBlocks({
+	entry,
+	includeText,
 	results,
 	active,
 	pending,
-	completedAt,
 	host,
 }: {
-	message: AssistantMessage;
+	entry: AssistantEntry;
+	includeText: boolean;
 	results: ReadonlyMap<string, ToolResultMessage>;
 	active: ReadonlyMap<string, ActiveTool>;
-	/** Still streaming — suppress stop-reason chips on the partial message. */
 	pending: boolean;
-	completedAt?: string;
 	host?: ToolRenderHost;
 }): ReactNode {
-	const durationMs = completedDurationMs(message.timestamp, completedAt);
+	const { message } = entry;
 	const blocks: ReactNode[] = [];
 	for (let index = 0; index < message.content.length; index++) {
 		const block = message.content[index];
 		if (block.type === "thinking" || block.type === "redactedThinking") {
 			const reasoning: string[] = [];
-			let redactedOnly = true;
 			let next = index;
 			for (; next < message.content.length; next++) {
 				const reasoningBlock = message.content[next];
 				if (reasoningBlock.type === "thinking") {
 					if (reasoningBlock.thinking.length > 0) reasoning.push(reasoningBlock.thinking);
-					redactedOnly = false;
 				} else if (reasoningBlock.type === "redactedThinking") {
-					reasoning.push("[redacted by provider]");
+					reasoning.push("[思考内容已由模型隐藏]");
 				} else {
 					break;
 				}
 			}
-			blocks.push(
-				<ThinkingBlock
-					key={`thinking-${index}`}
-					text={reasoning.join("\n\n")}
-					redacted={redactedOnly}
-					pending={pending}
-					durationMs={durationMs}
-				/>,
-			);
+			if (reasoning.length > 0) {
+				blocks.push(
+					<div key={`thinking-${index}`} className="tr-work-reasoning">
+						{reasoning.join("\n\n")}
+					</div>,
+				);
+			}
 			index = next - 1;
 			continue;
 		}
 		switch (block.type) {
 			case "text":
-				blocks.push(
-					<div key={index} className="tr-assistant-bubble">
-						<Markdown text={block.text} />
-					</div>,
-				);
+				if (includeText && block.text.length > 0) {
+					blocks.push(
+						<div key={index} className="tr-work-note">
+							<Markdown text={block.text} />
+						</div>,
+					);
+				}
 				break;
 			case "toolCall": {
 				if (transcriptToolPresentation(block.name) === "hidden") break;
@@ -582,14 +564,38 @@ function AssistantBody({
 				break;
 		}
 	}
-	const stop = message.stopReason;
-	const failed = !pending && (stop === "error" || stop === "aborted");
+	const failed = message.stopReason === "error" || message.stopReason === "aborted";
+	if (includeText && failed) {
+		blocks.push(
+			<div key="process-error" className="tr-stop">
+				<span className={`tr-chip ${message.stopReason === "error" ? "tr-chip--err" : "tr-chip--warn"}`}>
+					{message.stopReason}
+				</span>
+				{message.errorMessage !== undefined && message.errorMessage.length > 0 && (
+					<span className="tr-stop-msg">{message.errorMessage}</span>
+				)}
+			</div>,
+		);
+	}
+	return blocks;
+}
+
+function FinalAssistantBody({ message }: { message: AssistantMessage }): ReactNode {
+	const failed = message.stopReason === "error" || message.stopReason === "aborted";
 	return (
 		<>
-			{blocks}
+			{message.content.map((block, index) =>
+				block.type === "text" && block.text.length > 0 ? (
+					<div key={index} className="tr-assistant-bubble">
+						<Markdown text={block.text} />
+					</div>
+				) : null,
+			)}
 			{failed && (
 				<div className="tr-stop">
-					<span className={`tr-chip ${stop === "error" ? "tr-chip--err" : "tr-chip--warn"}`}>{stop}</span>
+					<span className={`tr-chip ${message.stopReason === "error" ? "tr-chip--err" : "tr-chip--warn"}`}>
+						{message.stopReason}
+					</span>
 					{message.errorMessage !== undefined && message.errorMessage.length > 0 && (
 						<span className="tr-stop-msg">{message.errorMessage}</span>
 					)}
@@ -599,28 +605,146 @@ function AssistantBody({
 	);
 }
 
-function hasPresentableAssistantContent(message: AssistantMessage): boolean {
-	if (message.errorMessage) return true;
+function streamIsFinal(message: AssistantMessage): boolean {
+	return (
+		message.stopReason !== "toolUse" &&
+		!message.content.some(block => block.type === "toolCall") &&
+		(message.content.some(block => block.type === "text" && block.text.length > 0) ||
+			Boolean(message.errorMessage) ||
+			message.stopReason === "error" ||
+			message.stopReason === "aborted")
+	);
+}
+
+function streamHasProcess(message: AssistantMessage): boolean {
+	const final = streamIsFinal(message);
 	return message.content.some(block => {
 		switch (block.type) {
-			case "text":
-				return block.text.length > 0;
 			case "thinking":
 				return block.thinking.length > 0;
 			case "redactedThinking":
 				return true;
 			case "toolCall":
 				return transcriptToolPresentation(block.name) !== "hidden";
+			case "text":
+				return !final && block.text.length > 0;
 			default:
 				return false;
 		}
 	});
 }
 
-interface EntryRowProps {
-	entry: SessionEntry;
+function AssistantTurnBody({
+	turn,
+	results,
+	active,
+	pending,
+	stream,
+	streamDone,
+	host,
+}: {
+	turn?: TranscriptAssistantTurn;
 	results: ReadonlyMap<string, ToolResultMessage>;
 	active: ReadonlyMap<string, ActiveTool>;
+	pending: boolean;
+	stream: AssistantMessage | null;
+	streamDone: boolean;
+	host?: ToolRenderHost;
+}): ReactNode {
+	const committedToolIds = new Set<string>();
+	for (const entry of turn?.assistantEntries ?? []) {
+		for (const block of entry.message.content) {
+			if (block.type === "toolCall") committedToolIds.add(block.id);
+		}
+	}
+	const streamedToolIds = new Set<string>();
+	if (stream !== null) {
+		for (const block of stream.content) {
+			if (block.type === "toolCall") streamedToolIds.add(block.id);
+		}
+	}
+	const tailTools = [...active.values()].filter(
+		tool =>
+			!committedToolIds.has(tool.toolCallId) &&
+			!streamedToolIds.has(tool.toolCallId) &&
+			transcriptToolPresentation(tool.toolName) !== "hidden",
+	);
+	const liveProcess = stream !== null && streamHasProcess(stream);
+	const hasProcess = Boolean(turn?.hasProcess) || liveProcess || tailTools.length > 0 || pending;
+	const showStreamFinal = stream !== null && streamDone && streamIsFinal(stream) && turn?.finalEntry === undefined;
+	const standaloneResults = (turn?.toolResultEntries ?? []).filter(
+		entry =>
+			!committedToolIds.has(entry.message.toolCallId) &&
+			transcriptToolPresentation(entry.message.toolName) !== "hidden",
+	);
+	return (
+		<>
+			{hasProcess && (
+				<WorkDisclosure pending={pending} durationMs={turn?.durationMs}>
+					<div className="tr-work-content">
+						{turn?.assistantEntries.map(entry => (
+							<ProcessAssistantBlocks
+								key={entry.id}
+								entry={entry}
+								includeText={entry !== turn.finalEntry}
+								results={results}
+								active={active}
+								pending={false}
+								host={host}
+							/>
+						))}
+						{standaloneResults.map(entry => (
+							<ToolCard
+								key={entry.id}
+								toolCallId={entry.message.toolCallId}
+								name={entry.message.toolName}
+								args={{}}
+								result={entry.message}
+								host={host}
+							/>
+						))}
+						{liveProcess && stream !== null && (
+							<ProcessAssistantBlocks
+								entry={{
+									type: "message",
+									id: "stream",
+									parentId: null,
+									timestamp: "",
+									message: stream,
+								}}
+								includeText={!streamIsFinal(stream)}
+								results={results}
+								active={active}
+								pending={!streamDone}
+								host={host}
+							/>
+						)}
+						{tailTools.map(tool => (
+							<ToolCard
+								key={tool.toolCallId}
+								toolCallId={tool.toolCallId}
+								name={tool.toolName}
+								intent={tool.intent}
+								args={tool.args}
+								running
+								partialResult={tool.partialResult}
+								host={host}
+							/>
+						))}
+						{pending && !turn?.hasProcess && !liveProcess && tailTools.length === 0 && (
+							<StreamStatus label="正在处理…" />
+						)}
+					</div>
+				</WorkDisclosure>
+			)}
+			{turn?.finalEntry !== undefined && <FinalAssistantBody message={turn.finalEntry.message} />}
+			{showStreamFinal && stream !== null && <FinalAssistantBody message={stream} />}
+		</>
+	);
+}
+
+interface EntryRowProps {
+	entry: SessionEntry;
 	lastUserEntryId: string | undefined;
 	working: boolean;
 	localFileAvailability: ReadonlyMap<string, boolean>;
@@ -639,20 +763,11 @@ function entryRowEqual(prev: EntryRowProps, next: EntryRowProps): boolean {
 		prev.onEditLastUserMessage !== next.onEditLastUserMessage
 	)
 		return false;
-	const e = next.entry;
-	if (e.type !== "message" || e.message.role !== "assistant") return true;
-	for (const block of e.message.content) {
-		if (block.type !== "toolCall") continue;
-		if (prev.results.get(block.id) !== next.results.get(block.id)) return false;
-		if (prev.active.get(block.id) !== next.active.get(block.id)) return false;
-	}
 	return true;
 }
 
 const EntryRow = memo(function EntryRow({
 	entry,
-	results,
-	active,
 	lastUserEntryId,
 	working,
 	localFileAvailability,
@@ -677,19 +792,7 @@ const EntryRow = memo(function EntryRow({
 						</Row>
 					);
 				case "assistant":
-					if (!hasPresentableAssistantContent(msg)) return null;
-					return (
-						<Row kind="assistant" speaker="agent" title={entry.timestamp}>
-							<AssistantBody
-								message={msg}
-								results={results}
-								active={active}
-								pending={false}
-								completedAt={entry.timestamp}
-								host={host}
-							/>
-						</Row>
-					);
+					return null;
 				default:
 					// toolResult entries are consumed via pairing; developer & unknown roles skipped
 					return null;
@@ -863,6 +966,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 
 	const visibleStart = Math.max(0, entries.length - visibleLimit);
 	const visibleEntries = useMemo(() => entries.slice(visibleStart), [entries, visibleStart]);
+	const transcriptItems = useMemo(() => projectTranscriptItems(visibleEntries), [visibleEntries]);
 	const firstVisibleEntryId = visibleEntries[0]?.id ?? "";
 	const visibleLocalFiles = useMemo(() => {
 		const files = new Map<string, LocalFileReference>();
@@ -889,7 +993,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		};
 	}, [desktop, visibleLocalFiles]);
 
-	const lastUserEntryId = useMemo(() => [...entries].reverse().find(isUserPromptEntry)?.id, [entries]);
+	const lastUserEntryId = useMemo(() => [...entries].reverse().find(isTranscriptUserPrompt)?.id, [entries]);
 
 	const results = useMemo(() => {
 		const map = new Map<string, ToolResultMessage>();
@@ -966,25 +1070,9 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		if (el !== null && lockRef.current) el.scrollTop = el.scrollHeight;
 	}, [entries, presentedStream, activeTools, working]);
 
-	// Active tools not already represented as toolCall blocks in committed rows or the stream ghost.
-	const renderedToolIds = new Set<string>();
-	for (const entry of visibleEntries) {
-		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		for (const block of entry.message.content) {
-			if (block.type === "toolCall") renderedToolIds.add(block.id);
-		}
-	}
-	if (presentedStream !== null) {
-		for (const block of presentedStream.content) {
-			if (block.type === "toolCall") renderedToolIds.add(block.id);
-		}
-	}
-	const tailTools: ActiveTool[] = [];
-	for (const tool of activeTools.values()) {
-		if (!renderedToolIds.has(tool.toolCallId) && transcriptToolPresentation(tool.toolName) !== "hidden") {
-			tailTools.push(tool);
-		}
-	}
+	const tailItem = transcriptItems[transcriptItems.length - 1];
+	const tailTurn = tailItem?.kind === "assistant-turn" ? tailItem : undefined;
+	const hasLiveTurn = working || presentedStream !== null || activeTools.size > 0;
 
 	return (
 		<div
@@ -1026,50 +1114,41 @@ export function Transcript(props: TranscriptProps): ReactNode {
 							</button>
 						</div>
 					)}
-					{visibleEntries.map(entry => (
-						<EntryRow
-							key={entry.id}
-							entry={entry}
-							results={results}
-							active={activeTools}
-							lastUserEntryId={lastUserEntryId}
-							working={working}
-							localFileAvailability={localFileAvailability}
-							onEditLastUserMessage={onEditLastUserMessage}
-							host={host}
-						/>
-					))}
-					{presentedStream !== null && (
-						<Row kind="assistant" speaker="agent">
-							<AssistantBody
-								message={presentedStream}
-								results={results}
-								active={activeTools}
-								pending={!streamDone}
+					{transcriptItems.map(item =>
+						item.kind === "entry" ? (
+							<EntryRow
+								key={item.entry.id}
+								entry={item.entry}
+								lastUserEntryId={lastUserEntryId}
+								working={working}
+								localFileAvailability={localFileAvailability}
+								onEditLastUserMessage={onEditLastUserMessage}
 								host={host}
 							/>
-							{!streamDone && <StreamStatus label="responding…" />}
-						</Row>
-					)}
-					{tailTools.length > 0 && (
-						<Row kind="assistant" speaker="agent">
-							{tailTools.map(tool => (
-								<ToolCard
-									key={tool.toolCallId}
-									toolCallId={tool.toolCallId}
-									name={tool.toolName}
-									intent={tool.intent}
-									args={tool.args}
-									running
-									partialResult={tool.partialResult}
+						) : (
+							<Row key={item.id} kind="assistant" speaker="agent" title={item.finalEntry?.timestamp}>
+								<AssistantTurnBody
+									turn={item}
+									results={results}
+									active={activeTools}
+									pending={item === tailTurn && hasLiveTurn && (!streamDone || working)}
+									stream={item === tailTurn && hasLiveTurn ? presentedStream : null}
+									streamDone={streamDone}
 									host={host}
 								/>
-							))}
-						</Row>
+							</Row>
+						),
 					)}
-					{working && presentedStream === null && activeTools.size === 0 && (
+					{hasLiveTurn && tailTurn === undefined && (
 						<Row kind="assistant" speaker="agent">
-							<StreamStatus label="thinking…" />
+							<AssistantTurnBody
+								results={results}
+								active={activeTools}
+								pending={!streamDone || working}
+								stream={presentedStream}
+								streamDone={streamDone}
+								host={host}
+							/>
 						</Row>
 					)}
 				</>

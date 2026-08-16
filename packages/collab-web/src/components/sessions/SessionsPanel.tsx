@@ -3,6 +3,7 @@ import {
 	Check,
 	ChevronRight,
 	Copy,
+	Download,
 	FolderOpen,
 	LogOut,
 	MailCheck,
@@ -473,9 +474,12 @@ export function SessionsPanel({
 	return (
 		<nav className="sh-sessions" aria-label="Projects and sessions">
 			<div className="sh-sessions-brand">
-				<img className="sh-sessions-mark" src="./public/favicon.svg" alt="" aria-hidden="true" />
+				<span className="sh-sessions-mark" aria-hidden="true">
+					<img className="sh-sessions-mark-on-light" src="./public/grimoire-brain-on-light.svg" alt="" />
+					<img className="sh-sessions-mark-on-dark" src="./public/grimoire-brain-on-dark.svg" alt="" />
+				</span>
 				<div className="sh-sessions-brand-copy">
-					<span className="sh-sessions-brand-name">OMP</span>
+					<span className="sh-sessions-brand-name">Grimoire Router App</span>
 					<span className="sh-sessions-brand-status">
 						<span className={`sh-sessions-dot sh-sessions-dot-${phase}`} aria-hidden="true" />
 						{phase}
@@ -483,31 +487,41 @@ export function SessionsPanel({
 				</div>
 			</div>
 
-			{!readOnly && (
-				<button type="button" className="sh-sessions-action" onClick={onNewSession} disabled={pending}>
-					<Plus size={16} aria-hidden="true" />
-					<span>{pending ? "Starting session…" : "New session"}</span>
-				</button>
+			{(desktopAvailable || !readOnly) && (
+				<div className="sh-sessions-primary-actions">
+					{desktopAvailable && (
+						<button
+							type="button"
+							className="sh-sessions-action"
+							disabled={desktopAction !== null}
+							onClick={() => void runDesktopAction("open", () => desktopBridge.openProject())}
+						>
+							<FolderOpen size={16} aria-hidden="true" />
+							<span>{desktopAction === "open" ? "Opening project…" : "Open project"}</span>
+						</button>
+					)}
+					{!readOnly && (
+						<>
+							<button type="button" className="sh-sessions-action" onClick={onNewSession} disabled={pending}>
+								<Plus size={16} aria-hidden="true" />
+								<span>{pending ? "Starting session…" : "New session"}</span>
+							</button>
+							<button type="button" className="sh-sessions-action" disabled title="Coming soon">
+								<Download size={16} aria-hidden="true" />
+								<span>Import Chat from Codex</span>
+							</button>
+						</>
+					)}
+				</div>
+			)}
+			{desktopError && (
+				<p className="sh-sessions-project-error" role="status">
+					{desktopError}
+				</p>
 			)}
 
 			<div className="sh-sessions-projects">
 				<div className="sh-sessions-section-title">Projects</div>
-				{desktopAvailable && (
-					<button
-						type="button"
-						className="sh-sessions-open-project"
-						disabled={desktopAction !== null}
-						onClick={() => void runDesktopAction("open", () => desktopBridge.openProject())}
-					>
-						<FolderOpen size={15} aria-hidden="true" />
-						<span>{desktopAction === "open" ? "Opening project…" : "Open project"}</span>
-					</button>
-				)}
-				{desktopError && (
-					<p className="sh-sessions-project-error" role="status">
-						{desktopError}
-					</p>
-				)}
 
 				{groups.map(group => {
 					const key = comparableProjectPath(group.path);

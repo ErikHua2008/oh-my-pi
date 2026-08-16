@@ -43,10 +43,10 @@ describe("native transcript projection", () => {
 		];
 
 		const projected = projectNativeTranscript(entries);
-		expect(projected.map(row => row.id)).toEqual(["user-1", "assistant-1"]);
+		expect(projected.map(row => row.id)).toEqual(["user-1", "turn:user-1:process"]);
 		expect(projected[0]?.mediaIds).toEqual(["sha256-image"]);
 		expect(projected[0]?.text).not.toContain("VERY-LARGE-BASE64");
-		expect(projected[1]?.text).toBe("我来检查。");
+		expect(projected[1]?.text).toBe("我来检查。\n\n已查看图片");
 		expect(projected[1]?.text).not.toContain("inspect_image");
 	});
 
@@ -75,8 +75,14 @@ describe("native transcript projection", () => {
 		expect(projectNativeTranscript(entries)[0]).toMatchObject({ id: "compact-1", kind: "compaction", flags: 2 });
 		expect(projectNativeStream(stream, false, true, "session-1")).toMatchObject({
 			id: nativeStreamRowId("session-1"),
-			kind: "assistant",
+			kind: "reasoning",
 			flags: 1,
+			text: "正在处理…",
+		});
+		expect(projectNativeStream(stream, true, false, "session-1")).toMatchObject({
+			id: nativeStreamRowId("session-1"),
+			kind: "assistant",
+			flags: 0,
 			text: "正在回复",
 		});
 		expect(projectNativeStream(null, false, false, "session-1")).toBeNull();
@@ -109,7 +115,7 @@ describe("native transcript projection", () => {
 		const projected = projectNativeTranscript(entries);
 		expect(projected).toHaveLength(2);
 		expect(projected[0]).toMatchObject({
-			id: "assistant-with-reasoning:reasoning",
+			id: "turn:assistant-with-reasoning:process",
 			kind: "reasoning",
 			flags: 2,
 			estimatedHeight: 42,
@@ -124,9 +130,92 @@ describe("native transcript projection", () => {
 		});
 
 		const completedTail = projectNativeStream(message, true, false, "session-1");
-		expect(completedTail?.text).toContain("思考过程（已折叠）");
+		expect(completedTail?.kind).toBe("assistant");
 		expect(completedTail?.text).not.toContain("需要保留但默认隐藏的详细思考");
-		expect(completedTail?.text).toContain("这是最终回答。");
+		expect(completedTail?.text).toBe("这是最终回答。");
+	});
+
+	it("merges multi-step reasoning, narration, and operations before the final answer", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "merge-user",
+				parentId: null,
+				timestamp: "2026-08-16T00:00:00Z",
+				message: { role: "user", content: "修复问题", timestamp: Date.parse("2026-08-16T00:00:00Z") },
+			},
+			{
+				type: "message",
+				id: "merge-work",
+				parentId: "merge-user",
+				timestamp: "2026-08-16T00:00:01Z",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "分析问题" },
+						{ type: "text", text: "先读取文件。" },
+						{ type: "toolCall", id: "merge-read", name: "read", arguments: { path: "src/app.cpp" } },
+					],
+					model: "test/model",
+					usage: usage(),
+					stopReason: "toolUse",
+					timestamp: Date.parse("2026-08-16T00:00:01Z"),
+				},
+			},
+			{
+				type: "message",
+				id: "merge-read-result",
+				parentId: "merge-work",
+				timestamp: "2026-08-16T00:00:02Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "merge-read",
+					toolName: "read",
+					content: [{ type: "text", text: "file contents" }],
+					isError: false,
+					timestamp: Date.parse("2026-08-16T00:00:02Z"),
+				},
+			},
+			{
+				type: "custom_message",
+				id: "merge-reminder",
+				parentId: "merge-read-result",
+				timestamp: "2026-08-16T00:00:03Z",
+				customType: "todo-reminder",
+				content: "<system-reminder>Continue the same turn.</system-reminder>",
+				display: true,
+			},
+			{
+				type: "message",
+				id: "merge-final",
+				parentId: "merge-reminder",
+				timestamp: "2026-08-16T00:00:04Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "问题已经修复。" }],
+					model: "test/model",
+					usage: usage(),
+					stopReason: "stop",
+					timestamp: Date.parse("2026-08-16T00:00:03Z"),
+				},
+			},
+		];
+
+		const projected = projectNativeTranscript(entries);
+
+		expect(projected.map(item => item.id)).toEqual(["merge-user", "turn:merge-user:process", "merge-final"]);
+		expect(projected[1]).toMatchObject({ kind: "reasoning", flags: 2, durationMs: 3_000 });
+		expect(projected[1]?.text).toContain("分析问题");
+		expect(projected[1]?.text).toContain("先读取文件。");
+		expect(projected[1]?.text).toContain("已读取文件 · src/app.cpp\n\nfile contents");
+		expect(projected[1]?.processItems).toHaveLength(3);
+		expect(projected[1]?.processItems?.find(item => item.id === "merge-read")).toEqual({
+			id: "merge-read",
+			summary: "已读取文件 · src/app.cpp",
+			detail: '输入\n{\n  "path": "src/app.cpp"\n}\n\n输出\nfile contents',
+			failed: false,
+		});
+		expect(projected[2]).toMatchObject({ kind: "assistant", text: "问题已经修复。" });
 	});
 
 	it("hides system reminders, summarizes plans, and collapses real operations", () => {
@@ -224,11 +313,11 @@ describe("native transcript projection", () => {
 		];
 
 		const projected = projectNativeTranscript(entries);
-		expect(projected.map(item => item.id)).toEqual(["todo-result", "bash-result"]);
-		expect(projected[0]).toMatchObject({ kind: "plan", text: "计划 · 1/3\n→ 折叠命令操作\n○ 下一步：运行回归测试" });
+		expect(projected.map(item => item.id)).toEqual(["turn:tool-calls:process"]);
+		expect(projected[0]).toMatchObject({ kind: "reasoning", flags: 2, estimatedHeight: 42 });
+		expect(projected[0]?.text).toContain("计划 · 1/3\n→ 折叠命令操作\n○ 下一步：运行回归测试");
 		expect(projected[0]?.text).not.toContain("Remaining items");
-		expect(projected[1]).toMatchObject({ kind: "tool", flags: 2, estimatedHeight: 42 });
-		expect(projected[1]?.text).toBe("已执行命令 · bun test\n\n18 pass\n0 fail");
+		expect(projected[0]?.text).toContain("已执行命令 · bun test\n\n18 pass\n0 fail");
 	});
 
 	it("uses compact plan and operation rows while tools are running", () => {
@@ -253,15 +342,14 @@ describe("native transcript projection", () => {
 		};
 
 		expect(projectNativeStream(planStream, false, true)).toMatchObject({
-			kind: "plan",
+			kind: "reasoning",
 			text: "计划 · 0/2\n→ First\n○ 下一步：Second",
 			flags: 1,
 		});
 		expect(projectNativeStream(commandStream, false, true)).toMatchObject({
-			kind: "tool",
+			kind: "reasoning",
 			text: "已执行命令 · bun test",
-			flags: 3,
-			estimatedHeight: 42,
+			flags: 1,
 		});
 	});
 });

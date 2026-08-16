@@ -136,6 +136,22 @@ describe("system prompt model identifier", () => {
 
 		expect(systemPrompt.join("\n\n")).not.toContain("Model:");
 	});
+
+	it("requires visible reasoning and progress to follow the conversation language", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+
+		const rendered = systemPrompt.join("\n\n");
+		expect(rendered).toContain("User-visible reasoning summaries");
+		expect(rendered).toContain("dominant recent user turns");
+		expect(rendered).toContain("short or ambiguous turns preserve the established conversation language");
+	});
 });
 
 describe("AgentSession model-change prompt refresh", () => {

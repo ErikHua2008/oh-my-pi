@@ -85,7 +85,7 @@ function useHighlight(code: string, lang: string | null | undefined): string | n
 
 export interface OutputProps {
 	text: string;
-	/** Lines shown before collapsing behind a "more" affordance. */
+	/** Approximate visible lines before the detail becomes internally scrollable. */
 	maxLines?: number;
 	/** highlight.js language (only applied when the host exposes hljs). */
 	lang?: string | null;
@@ -100,32 +100,29 @@ export interface OutputProps {
 }
 
 /**
- * Expandable text block — the workhorse for command output, file previews,
- * search results. Tabs are widened, ANSI escapes stripped.
+ * Bounded text block — the workhorse for command output, file previews, and
+ * search results. Long details stay fully available inside a 3–5 line
+ * scrolling viewport so a tool card never introduces a third disclosure
+ * level beneath the work and operation disclosures.
  */
-export function Output({ text, maxLines = 10, lang, error, variant = "plain", title, bare }: OutputProps): ReactNode {
-	const [expanded, setExpanded] = useState(false);
+export function Output({ text, maxLines = 5, lang, error, variant = "plain", title, bare }: OutputProps): ReactNode {
 	const clean = useMemo(() => replaceTabs(stripAnsi(text)).replace(/\n+$/, ""), [text]);
 	const lines = useMemo(() => clean.split("\n"), [clean]);
-	const collapsible = lines.length > maxLines + 1;
-	const shown = collapsible && !expanded ? lines.slice(0, maxLines).join("\n") : clean;
-	const html = useHighlight(shown, error ? null : lang);
+	const visibleLines = Math.max(3, Math.min(5, maxLines));
+	const scrollable = lines.length > visibleLines || clean.length > visibleLines * 120;
+	const html = useHighlight(clean, error ? null : lang);
 	const classes = ["tv-pre"];
 	if (variant === "plain") classes.push("tv-pre--wrap");
 	if (error) classes.push("tv-pre--error");
 	if (bare) classes.push("tv-pre--bare");
+	if (scrollable) classes.push("tv-pre--scroll", `tv-pre--lines-${visibleLines}`);
 	return (
 		<div className="tv-out">
 			{title && <div className="tv-out-title">{title}</div>}
 			{html !== null ? (
 				<pre className={classes.join(" ")} dangerouslySetInnerHTML={{ __html: html }} />
 			) : (
-				<pre className={classes.join(" ")}>{shown}</pre>
-			)}
-			{collapsible && (
-				<button type="button" className="tv-expand" onClick={() => setExpanded(v => !v)}>
-					{expanded ? "collapse" : `⋯ ${lines.length - maxLines} more lines`}
-				</button>
+				<pre className={classes.join(" ")}>{clean}</pre>
 			)}
 		</div>
 	);

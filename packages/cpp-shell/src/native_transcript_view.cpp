@@ -21,6 +21,11 @@ constexpr float kRowVerticalPadding = 12.0F;
 constexpr float kLabelHeight = 17.0F;
 constexpr float kTextGap = 5.0F;
 constexpr std::int32_t kCollapsedExpandableHeight = 42;
+constexpr float kProcessItemHeaderHeight = 30.0F;
+constexpr float kProcessItemGap = 6.0F;
+constexpr float kProcessDetailGap = 4.0F;
+constexpr float kProcessDetailHeight = 112.0F;
+constexpr float kProcessDetailPadding = 8.0F;
 constexpr std::int64_t kEstimatedLineScroll = 54;
 constexpr std::int64_t kOverscan = 360;
 constexpr std::size_t kMaximumCachedLayouts = 256;
@@ -54,7 +59,7 @@ constexpr NativeMenuItem kContextSelectAllItem{L"全选\tCtrl+A", false, false};
 	case NativeTranscriptRowKind::User:
 		return L"你";
 	case NativeTranscriptRowKind::Assistant:
-		return L"OMP";
+		return L"Grimoire Router App";
 	case NativeTranscriptRowKind::Reasoning:
 		return L"思考";
 	case NativeTranscriptRowKind::Plan:
@@ -73,6 +78,14 @@ constexpr NativeMenuItem kContextSelectAllItem{L"全选\tCtrl+A", false, false};
 
 [[nodiscard]] D2D1_RECT_F ToD2DRect(const NativeTranscriptRectF& rect) noexcept {
 	return D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom);
+}
+
+[[nodiscard]] std::string ProcessItemKey(
+	const NativeTranscriptRow& row, const NativeTranscriptProcessItem& item) {
+	std::string key = row.id;
+	key.push_back('\x1f');
+	key.append(item.id);
+	return key;
 }
 
 } // namespace
@@ -265,6 +278,8 @@ void NativeTranscriptView::Clear() {
 	media_cache_.clear();
 	requested_media_.clear();
 	expanded_rows_.clear();
+	expanded_process_items_.clear();
+	process_detail_scroll_offsets_.clear();
 	ClearSelection();
 	scroll_offset_ = 0;
 	history_remaining_ = 0;
@@ -294,6 +309,21 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 			++it;
 		} else {
 			it = expanded_rows_.erase(it);
+		}
+	}
+	std::unordered_set<std::string> valid_process_items;
+	for (std::size_t row_index = 0; row_index < model_.Size(); ++row_index) {
+		const NativeTranscriptRow& row = model_.RowAt(row_index);
+		for (const NativeTranscriptProcessItem& item : row.process_items) {
+			valid_process_items.insert(ProcessItemKey(row, item));
+		}
+	}
+	for (auto it = expanded_process_items_.begin(); it != expanded_process_items_.end();) {
+		if (valid_process_items.contains(*it)) {
+			++it;
+		} else {
+			process_detail_scroll_offsets_.erase(*it);
+			it = expanded_process_items_.erase(it);
 		}
 	}
 	if ((selection_anchor_ && !model_.IndexOf(selection_anchor_->row_id)) ||
@@ -338,6 +368,17 @@ void NativeTranscriptView::Remove(std::string_view id) {
 		ClearSelection();
 	}
 	layout_cache_.erase(std::string(id));
+	std::string process_prefix(id);
+	process_prefix.push_back('\x1f');
+	for (auto it = expanded_process_items_.begin(); it != expanded_process_items_.end();) {
+		if (it->starts_with(process_prefix)) {
+			process_detail_scroll_offsets_.erase(*it);
+			layout_cache_.erase(*it);
+			it = expanded_process_items_.erase(it);
+		} else {
+			++it;
+		}
+	}
 	if (keep_tail) {
 		ScrollToBottom();
 	} else {
@@ -453,6 +494,10 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		}
 		break;
 	case WM_MOUSEWHEEL: {
+		POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+		if (ScreenToClient(window_, &point) && ScrollProcessDetailAtPoint(point, GET_WHEEL_DELTA_WPARAM(wparam))) {
+			return 0;
+		}
 		RevealOverlayScrollbar();
 		wheel_remainder_ += GET_WHEEL_DELTA_WPARAM(wparam);
 		UINT lines = 3;
@@ -568,6 +613,10 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			scrollbar_drag_anchor_offset_ = scroll_offset_;
 			return 0;
 		}
+		if (const auto process_item = HitTestProcessItemHeader(point)) {
+			ToggleProcessItem(*process_item);
+			return 0;
+		}
 		if (const auto row_id = HitTestExpandableHeader(point)) {
 			ToggleExpandable(*row_id);
 			return 0;
@@ -681,7 +730,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 					SetCursor(LoadCursorW(nullptr, IDC_ARROW));
 					return TRUE;
 				}
-				if (HitTestExpandableHeader(point)) {
+				if (HitTestProcessItemHeader(point) || HitTestExpandableHeader(point)) {
 					SetCursor(LoadCursorW(nullptr, IDC_HAND));
 					return TRUE;
 				}
@@ -692,7 +741,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		break;
 	case WM_LBUTTONDBLCLK: {
 		const POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
-		if (HitTestExpandableHeader(point)) {
+		if (HitTestProcessItemHeader(point) || HitTestExpandableHeader(point)) {
 			return 0;
 		}
 		if (const auto hit = HitTestText(point)) {
@@ -873,8 +922,10 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 	const float horizontal_padding = NativeTranscriptOuterHorizontalPadding(viewport_width) + kRowContentInset;
 	const float available_width = std::max(80.0F, viewport_width - 2.0F * horizontal_padding);
 	const float layout_width = message ? NativeTranscriptBubbleMaxContentWidth(viewport_width, user) : available_width;
-	TextLayout* cached = collapsed_expandable ? nullptr : GetTextLayout(row, layout_width);
-	if (!collapsed_expandable && cached == nullptr) {
+	const bool structured_process =
+		row.kind == NativeTranscriptRowKind::Reasoning && !row.process_items.empty() && !collapsed_expandable;
+	TextLayout* cached = collapsed_expandable || structured_process ? nullptr : GetTextLayout(row, layout_width);
+	if (!collapsed_expandable && !structured_process && cached == nullptr) {
 		return;
 	}
 
@@ -886,9 +937,20 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 			cached->measured_height,
 			row.media_ids.size());
 	}
+	float structured_height = 2.0F * kRowVerticalPadding + kLabelHeight + kTextGap;
+	if (structured_process) {
+		for (const NativeTranscriptProcessItem& item : row.process_items) {
+			structured_height += kProcessItemHeaderHeight + kProcessItemGap;
+			if (expanded_process_items_.contains(ProcessItemKey(row, item))) {
+				structured_height += kProcessDetailGap + kProcessDetailHeight;
+			}
+		}
+	}
 	const std::int32_t measured_height = static_cast<std::int32_t>(
 		collapsed_expandable
 			? kCollapsedExpandableHeight
+			: structured_process
+				? std::ceil(structured_height)
 			: message
 				? bubble_layout.row_height
 				: std::ceil(
@@ -962,6 +1024,86 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 			user ? user_foreground_brush_.Get() : primary_brush_.Get(),
 			D2D1_DRAW_TEXT_OPTIONS_CLIP);
 		DrawMedia(row, content_left, origin.y + cached->measured_height + kMediaGap, content_width);
+	}
+	if (structured_process) {
+		float item_top = row_top + kRowVerticalPadding + kLabelHeight + kTextGap;
+		for (const NativeTranscriptProcessItem& item : row.process_items) {
+			const std::string item_key = ProcessItemKey(row, item);
+			const bool item_expanded = expanded_process_items_.contains(item_key);
+			const D2D1_ROUNDED_RECT header_box = D2D1::RoundedRect(
+				D2D1::RectF(content_left, item_top, content_left + content_width, item_top + kProcessItemHeaderHeight),
+				6.0F,
+				6.0F);
+			render_target_->FillRoundedRectangle(header_box, assistant_brush_.Get());
+			std::wstring summary = Utf8ToWide(item.summary);
+			summary.append(item_expanded ? L"  ▾" : L"  ▸");
+			render_target_->DrawTextW(
+				summary.data(),
+				static_cast<UINT32>(summary.size()),
+				label_format_.Get(),
+				D2D1::RectF(
+					content_left + 9.0F,
+					item_top + 6.0F,
+					content_left + content_width - 9.0F,
+					item_top + kProcessItemHeaderHeight - 5.0F),
+				item.failed ? primary_brush_.Get() : muted_brush_.Get(),
+				D2D1_DRAW_TEXT_OPTIONS_CLIP);
+			item_top += kProcessItemHeaderHeight;
+			if (item_expanded) {
+				item_top += kProcessDetailGap;
+				const D2D1_RECT_F detail_box = D2D1::RectF(
+					content_left + 8.0F,
+					item_top,
+					content_left + content_width - 8.0F,
+					item_top + kProcessDetailHeight);
+				render_target_->FillRoundedRectangle(D2D1::RoundedRect(detail_box, 7.0F, 7.0F), assistant_brush_.Get());
+				render_target_->DrawRoundedRectangle(
+					D2D1::RoundedRect(detail_box, 7.0F, 7.0F), line_brush_.Get(), 1.0F);
+				NativeTranscriptRow detail_row;
+				detail_row.id = item_key;
+				detail_row.text = item.detail;
+				const float detail_text_width = std::max(
+					40.0F, detail_box.right - detail_box.left - 2.0F * kProcessDetailPadding - 6.0F);
+				if (TextLayout* detail_layout = GetTextLayout(detail_row, detail_text_width)) {
+					const float detail_view_height = kProcessDetailHeight - 2.0F * kProcessDetailPadding;
+					const float maximum_detail_scroll =
+						std::max(0.0F, detail_layout->measured_height - detail_view_height);
+					float& detail_scroll = process_detail_scroll_offsets_[item_key];
+					detail_scroll = std::clamp(detail_scroll, 0.0F, maximum_detail_scroll);
+					const D2D1_RECT_F detail_clip = D2D1::RectF(
+						detail_box.left + kProcessDetailPadding,
+						detail_box.top + kProcessDetailPadding,
+						detail_box.right - kProcessDetailPadding - 6.0F,
+						detail_box.bottom - kProcessDetailPadding);
+					render_target_->PushAxisAlignedClip(detail_clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+					render_target_->DrawTextLayout(
+						D2D1::Point2F(detail_clip.left, detail_clip.top - detail_scroll),
+						detail_layout->layout.Get(),
+						item.failed ? primary_brush_.Get() : muted_brush_.Get(),
+						D2D1_DRAW_TEXT_OPTIONS_CLIP);
+					render_target_->PopAxisAlignedClip();
+					if (maximum_detail_scroll > 0.0F) {
+						const float track_height = detail_clip.bottom - detail_clip.top;
+						const float thumb_height = std::max(
+							18.0F, track_height * detail_view_height / detail_layout->measured_height);
+						const float thumb_top = detail_clip.top +
+							(track_height - thumb_height) * detail_scroll / maximum_detail_scroll;
+						render_target_->FillRoundedRectangle(
+							D2D1::RoundedRect(
+								D2D1::RectF(
+									detail_box.right - 6.0F,
+									thumb_top,
+									detail_box.right - 3.0F,
+									thumb_top + thumb_height),
+								1.5F,
+								1.5F),
+							scrollbar_brush_.Get());
+					}
+				}
+				item_top += kProcessDetailHeight;
+			}
+			item_top += kProcessItemGap;
+		}
 	}
 	if (!message) {
 		render_target_->DrawLine(
@@ -1233,6 +1375,49 @@ std::optional<std::string> NativeTranscriptView::HitTestExpandableHeader(POINT p
 	return row.id;
 }
 
+std::optional<NativeTranscriptView::ProcessItemHit> NativeTranscriptView::HitTestProcessItemHeader(
+	POINT point) const {
+	if (model_.Empty() || window_ == nullptr) {
+		return std::nullopt;
+	}
+	RECT client{};
+	GetClientRect(window_, &client);
+	if (client.right <= client.left || client.bottom <= client.top) {
+		return std::nullopt;
+	}
+	const float scale = std::max(0.01F, DpiScale());
+	const float x = static_cast<float>(point.x) / scale;
+	const float y = static_cast<float>(point.y) / scale;
+	const float viewport_width = static_cast<float>(client.right - client.left) / scale;
+	const float horizontal_padding = NativeTranscriptOuterHorizontalPadding(viewport_width) + kRowContentInset;
+	if (x < horizontal_padding || x > viewport_width - horizontal_padding) {
+		return std::nullopt;
+	}
+	const std::int64_t content_y = scroll_offset_ + static_cast<std::int64_t>(std::floor(y));
+	const NativeTranscriptVisibleRange range = model_.VisibleRange(content_y, 1);
+	if (range.Empty() || range.first >= model_.Size()) {
+		return std::nullopt;
+	}
+	const NativeTranscriptRow& row = model_.RowAt(range.first);
+	if (row.kind != NativeTranscriptRowKind::Reasoning || row.process_items.empty() || IsCollapsedExpandable(row)) {
+		return std::nullopt;
+	}
+	float item_top = static_cast<float>(model_.RowTop(range.first) - scroll_offset_) +
+		kRowVerticalPadding + kLabelHeight + kTextGap;
+	for (const NativeTranscriptProcessItem& item : row.process_items) {
+		const std::string item_key = ProcessItemKey(row, item);
+		if (y >= item_top && y <= item_top + kProcessItemHeaderHeight) {
+			return ProcessItemHit{row.id, item_key};
+		}
+		item_top += kProcessItemHeaderHeight;
+		if (expanded_process_items_.contains(item_key)) {
+			item_top += kProcessDetailGap + kProcessDetailHeight;
+		}
+		item_top += kProcessItemGap;
+	}
+	return std::nullopt;
+}
+
 void NativeTranscriptView::ToggleExpandable(std::string_view row_id) {
 	const auto index = model_.IndexOf(row_id);
 	if (!index) {
@@ -1264,6 +1449,101 @@ void NativeTranscriptView::ToggleExpandable(std::string_view row_id) {
 	}
 }
 
+void NativeTranscriptView::ToggleProcessItem(const ProcessItemHit& hit) {
+	const auto index = model_.IndexOf(hit.row_id);
+	if (!index) {
+		return;
+	}
+	const NativeTranscriptRow& row = model_.RowAt(*index);
+	if (row.kind != NativeTranscriptRowKind::Reasoning || row.process_items.empty() || IsCollapsedExpandable(row)) {
+		return;
+	}
+	const bool opening = !expanded_process_items_.contains(hit.item_key);
+	if (opening) {
+		expanded_process_items_.insert(hit.item_key);
+	} else {
+		expanded_process_items_.erase(hit.item_key);
+		process_detail_scroll_offsets_.erase(hit.item_key);
+	}
+	const auto detail_delta = static_cast<std::int32_t>(kProcessDetailGap + kProcessDetailHeight);
+	const std::int32_t next_height =
+		std::max(kCollapsedExpandableHeight, row.height + (opening ? detail_delta : -detail_delta));
+	static_cast<void>(model_.UpdateHeight(row.id, next_height));
+	if (stick_to_bottom_) {
+		ScrollToBottom();
+	} else {
+		ScrollTo(scroll_offset_, false);
+	}
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+bool NativeTranscriptView::ScrollProcessDetailAtPoint(POINT point, int wheel_delta) {
+	if (model_.Empty() || window_ == nullptr || wheel_delta == 0) {
+		return false;
+	}
+	RECT client{};
+	GetClientRect(window_, &client);
+	if (client.right <= client.left || client.bottom <= client.top) {
+		return false;
+	}
+	const float scale = std::max(0.01F, DpiScale());
+	const float x = static_cast<float>(point.x) / scale;
+	const float y = static_cast<float>(point.y) / scale;
+	const float viewport_width = static_cast<float>(client.right - client.left) / scale;
+	const float horizontal_padding = NativeTranscriptOuterHorizontalPadding(viewport_width) + kRowContentInset;
+	const float available_width = std::max(80.0F, viewport_width - 2.0F * horizontal_padding);
+	const std::int64_t content_y = scroll_offset_ + static_cast<std::int64_t>(std::floor(y));
+	const NativeTranscriptVisibleRange range = model_.VisibleRange(content_y, 1);
+	if (range.Empty() || range.first >= model_.Size()) {
+		return false;
+	}
+	const NativeTranscriptRow& row = model_.RowAt(range.first);
+	if (row.kind != NativeTranscriptRowKind::Reasoning || row.process_items.empty() || IsCollapsedExpandable(row)) {
+		return false;
+	}
+	float item_top = static_cast<float>(model_.RowTop(range.first) - scroll_offset_) +
+		kRowVerticalPadding + kLabelHeight + kTextGap;
+	for (const NativeTranscriptProcessItem& item : row.process_items) {
+		const std::string item_key = ProcessItemKey(row, item);
+		item_top += kProcessItemHeaderHeight;
+		if (expanded_process_items_.contains(item_key)) {
+			item_top += kProcessDetailGap;
+			const float detail_left = horizontal_padding + 8.0F;
+			const float detail_right = horizontal_padding + available_width - 8.0F;
+			if (x >= detail_left && x <= detail_right && y >= item_top && y <= item_top + kProcessDetailHeight) {
+				NativeTranscriptRow detail_row;
+				detail_row.id = item_key;
+				detail_row.text = item.detail;
+				const float detail_width = std::max(
+					40.0F, detail_right - detail_left - 2.0F * kProcessDetailPadding - 6.0F);
+				TextLayout* layout = GetTextLayout(detail_row, detail_width);
+				if (layout == nullptr) {
+					return false;
+				}
+				const float viewport_height = kProcessDetailHeight - 2.0F * kProcessDetailPadding;
+				const float maximum = std::max(0.0F, layout->measured_height - viewport_height);
+				if (maximum <= 0.0F) {
+					return false;
+				}
+				float& offset = process_detail_scroll_offsets_[item_key];
+				const float delta = -static_cast<float>(wheel_delta) / static_cast<float>(WHEEL_DELTA) * 66.0F;
+				const float next = std::clamp(offset + delta, 0.0F, maximum);
+				if (std::abs(next - offset) < 0.5F) {
+					return false;
+				}
+				offset = next;
+				InvalidateRect(window_, nullptr, FALSE);
+				return true;
+			}
+			item_top += kProcessDetailHeight;
+		}
+		item_top += kProcessItemGap;
+	}
+	return false;
+}
+
 std::optional<NativeTranscriptView::SelectionPoint> NativeTranscriptView::HitTestText(POINT point) {
 	if (model_.Empty() || window_ == nullptr) {
 		return std::nullopt;
@@ -1288,6 +1568,9 @@ std::optional<NativeTranscriptView::SelectionPoint> NativeTranscriptView::HitTes
 	const std::size_t index = range.first;
 	const NativeTranscriptRow& row = model_.RowAt(index);
 	if (IsCollapsedExpandable(row)) {
+		return std::nullopt;
+	}
+	if (row.kind == NativeTranscriptRowKind::Reasoning && !row.process_items.empty()) {
 		return std::nullopt;
 	}
 	const bool user = row.kind == NativeTranscriptRowKind::User;

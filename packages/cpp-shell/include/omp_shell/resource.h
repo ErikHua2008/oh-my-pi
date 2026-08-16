@@ -1,3 +1,4 @@
 #pragma once
 
-#define IDI_OMP_APP 101
+#define IDI_GRIMOIRE_ON_LIGHT 101
+#define IDI_GRIMOIRE_ON_DARK 102

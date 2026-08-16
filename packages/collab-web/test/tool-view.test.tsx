@@ -3,6 +3,23 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ToolView } from "../src/tool-render/ToolView";
 
 describe("ToolView xd:// dispatches", () => {
+	it("keeps long command details in a five-line scrolling box without a third disclosure", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="bash"
+				defaultOpen
+				args={{ command: "bun test" }}
+				result={{ content: [{ type: "text", text: Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n") }] }}
+			/>,
+		);
+
+		expect(html).toContain("tv-pre--scroll");
+		expect(html).toContain("tv-pre--lines-5");
+		expect(html).toContain("line 12");
+		expect(html).not.toContain("more lines");
+		expect(html).not.toContain('class="tv-expand"');
+	});
+
 	it("renders successful execute-mode xdev writes as the inner generate_image tool", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
