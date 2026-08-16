@@ -18,6 +18,7 @@ export type DesktopNativeTranscriptKind =
 	| "user"
 	| "assistant"
 	| "reasoning"
+	| "plan"
 	| "tool"
 	| "system"
 	| "compaction"
@@ -72,6 +73,14 @@ export type DesktopNativeTranscriptEvent =
 
 export type DesktopWindowAction =
 	| "drag"
+	| "resize_left"
+	| "resize_right"
+	| "resize_top"
+	| "resize_bottom"
+	| "resize_top_left"
+	| "resize_top_right"
+	| "resize_bottom_left"
+	| "resize_bottom_right"
 	| "minimize"
 	| "toggle_maximize"
 	| "close"
@@ -103,6 +112,7 @@ export interface DesktopBridge {
 	openProject(): Promise<void>;
 	switchProject(path: string): Promise<void>;
 	renameProject(path: string, name: string): Promise<void>;
+	removeProject(path: string): Promise<void>;
 	revealPath(path: string): Promise<void>;
 	pickAttachments(): Promise<readonly string[]>;
 	checkAttachments(paths: readonly string[]): Promise<readonly DesktopAttachmentStatus[]>;
@@ -196,6 +206,7 @@ function browserBridge(): DesktopBridge {
 		async openProject() {},
 		async switchProject(_path: string) {},
 		async renameProject(_path: string, _name: string) {},
+		async removeProject(_path: string) {},
 		async revealPath(_path: string) {},
 		async pickAttachments() {
 			return [];
@@ -341,6 +352,15 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 			if (authorization !== "authorized") return;
 			try {
 				await invoke<void>("project_rename", { path, name });
+			} catch (error) {
+				authorization = "denied";
+				throw error;
+			}
+		},
+		async removeProject(path: string) {
+			if (authorization !== "authorized") return;
+			try {
+				await invoke<void>("project_remove", { path });
 			} catch (error) {
 				authorization = "denied";
 				throw error;

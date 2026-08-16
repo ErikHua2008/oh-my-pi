@@ -121,6 +121,83 @@ describe("Transcript live tool rendering", () => {
 
 		expect(html).toContain("thinking…");
 	});
+
+	it("renders todo results as a concise plan card instead of a raw tool dump", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "todo-call-entry",
+				parentId: null,
+				timestamp: "2026-08-16T00:00:00Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "todo-call", name: "todo", arguments: { op: "view" } }],
+					model: "test/model",
+					usage: assistantUsage(),
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+			},
+			{
+				type: "message",
+				id: "todo-result-entry",
+				parentId: "todo-call-entry",
+				timestamp: "2026-08-16T00:00:01Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "todo-call",
+					toolName: "todo",
+					content: [{ type: "text", text: "verbose todo wire output that should stay hidden" }],
+					details: {
+						phases: [
+							{
+								name: "Work",
+								tasks: [
+									{ content: "Current task", status: "in_progress" },
+									{ content: "Next task", status: "pending" },
+								],
+							},
+						],
+					},
+					isError: false,
+					timestamp: 2,
+				},
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false });
+		expect(countElements(html, ".tr-plan-card")).toBe(1);
+		expect(countElements(html, ".tv-card")).toBe(0);
+		expect(html).toContain("Current task");
+		expect(html).toContain("下一步：Next task");
+		expect(html).not.toContain("verbose todo wire output");
+	});
+
+	it("keeps system reminders and model-setting markers out of the conversation", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "custom_message",
+				id: "reminder",
+				parentId: null,
+				timestamp: "2026-08-16T00:00:00Z",
+				customType: "todo-reminder",
+				content: "<system-reminder>continue all tasks</system-reminder>",
+				display: true,
+			},
+			{
+				type: "model_change",
+				id: "model-change",
+				parentId: "reminder",
+				timestamp: "2026-08-16T00:00:01Z",
+				model: "test/other-model",
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false });
+		expect(html).not.toContain("continue all tasks");
+		expect(html).not.toContain("other-model");
+		expect(countElements(html, ".tr-row--custom")).toBe(0);
+	});
 });
 
 describe("Transcript thinking disclosure", () => {

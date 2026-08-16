@@ -16,11 +16,11 @@ namespace omp::shell {
 namespace {
 
 constexpr wchar_t kTranscriptWindowClass[] = L"OmpNativeTranscriptWindow";
-constexpr float kHorizontalPadding = 16.0F;
+constexpr float kRowContentInset = 16.0F;
 constexpr float kRowVerticalPadding = 12.0F;
 constexpr float kLabelHeight = 17.0F;
 constexpr float kTextGap = 5.0F;
-constexpr std::int32_t kCollapsedReasoningHeight = 42;
+constexpr std::int32_t kCollapsedExpandableHeight = 42;
 constexpr std::int64_t kEstimatedLineScroll = 54;
 constexpr std::int64_t kOverscan = 360;
 constexpr std::size_t kMaximumCachedLayouts = 256;
@@ -57,8 +57,10 @@ constexpr NativeMenuItem kContextSelectAllItem{L"全选\tCtrl+A", false, false};
 		return L"OMP";
 	case NativeTranscriptRowKind::Reasoning:
 		return L"思考";
+	case NativeTranscriptRowKind::Plan:
+		return L"计划";
 	case NativeTranscriptRowKind::Tool:
-		return L"工具";
+		return L"操作";
 	case NativeTranscriptRowKind::System:
 		return L"系统";
 	case NativeTranscriptRowKind::Compaction:
@@ -262,7 +264,7 @@ void NativeTranscriptView::Clear() {
 	layout_cache_.clear();
 	media_cache_.clear();
 	requested_media_.clear();
-	expanded_reasoning_.clear();
+	expanded_rows_.clear();
 	ClearSelection();
 	scroll_offset_ = 0;
 	history_remaining_ = 0;
@@ -287,11 +289,11 @@ void NativeTranscriptView::Clear() {
 void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows) {
 	const bool keep_tail = stick_to_bottom_ || scroll_offset_ >= MaximumScroll() - 2;
 	model_.ReplaceSnapshot(std::move(rows));
-	for (auto it = expanded_reasoning_.begin(); it != expanded_reasoning_.end();) {
+	for (auto it = expanded_rows_.begin(); it != expanded_rows_.end();) {
 		if (model_.IndexOf(*it)) {
 			++it;
 		} else {
-			it = expanded_reasoning_.erase(it);
+			it = expanded_rows_.erase(it);
 		}
 	}
 	if ((selection_anchor_ && !model_.IndexOf(selection_anchor_->row_id)) ||
@@ -566,8 +568,8 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			scrollbar_drag_anchor_offset_ = scroll_offset_;
 			return 0;
 		}
-		if (const auto reasoning_id = HitTestReasoningHeader(point)) {
-			ToggleReasoning(*reasoning_id);
+		if (const auto row_id = HitTestExpandableHeader(point)) {
+			ToggleExpandable(*row_id);
 			return 0;
 		}
 		SetCapture(window_);
@@ -679,7 +681,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 					SetCursor(LoadCursorW(nullptr, IDC_ARROW));
 					return TRUE;
 				}
-				if (HitTestReasoningHeader(point)) {
+				if (HitTestExpandableHeader(point)) {
 					SetCursor(LoadCursorW(nullptr, IDC_HAND));
 					return TRUE;
 				}
@@ -690,7 +692,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		break;
 	case WM_LBUTTONDBLCLK: {
 		const POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
-		if (HitTestReasoningHeader(point)) {
+		if (HitTestExpandableHeader(point)) {
 			return 0;
 		}
 		if (const auto hit = HitTestText(point)) {
@@ -865,13 +867,14 @@ void NativeTranscriptView::Paint() {
 void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 	const NativeTranscriptRow& row = model_.RowAt(index);
 	const bool user = row.kind == NativeTranscriptRowKind::User;
-	const bool assistant = row.kind == NativeTranscriptRowKind::Assistant;
-	const bool message = user || assistant;
-	const bool collapsed_reasoning = IsCollapsedReasoning(row);
-	const float available_width = std::max(80.0F, viewport_width - 2.0F * kHorizontalPadding);
+	const bool message = user || row.kind == NativeTranscriptRowKind::Assistant ||
+		row.kind == NativeTranscriptRowKind::Plan;
+	const bool collapsed_expandable = IsCollapsedExpandable(row);
+	const float horizontal_padding = NativeTranscriptOuterHorizontalPadding(viewport_width) + kRowContentInset;
+	const float available_width = std::max(80.0F, viewport_width - 2.0F * horizontal_padding);
 	const float layout_width = message ? NativeTranscriptBubbleMaxContentWidth(viewport_width, user) : available_width;
-	TextLayout* cached = collapsed_reasoning ? nullptr : GetTextLayout(row, layout_width);
-	if (!collapsed_reasoning && cached == nullptr) {
+	TextLayout* cached = collapsed_expandable ? nullptr : GetTextLayout(row, layout_width);
+	if (!collapsed_expandable && cached == nullptr) {
 		return;
 	}
 
@@ -884,8 +887,8 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 			row.media_ids.size());
 	}
 	const std::int32_t measured_height = static_cast<std::int32_t>(
-		collapsed_reasoning
-			? kCollapsedReasoningHeight
+		collapsed_expandable
+			? kCollapsedExpandableHeight
 			: message
 				? bubble_layout.row_height
 				: std::ceil(
@@ -897,7 +900,7 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 	}
 	const float row_top = static_cast<float>(model_.RowTop(index) - scroll_offset_);
 	const float row_height = static_cast<float>(model_.RowAt(index).height);
-	const float content_left = message ? bubble_layout.content_left : kHorizontalPadding;
+	const float content_left = message ? bubble_layout.content_left : horizontal_padding;
 	const float content_width = message ? bubble_layout.content_width : available_width;
 
 	if (message) {
@@ -914,16 +917,25 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 
 	if (!message) {
 		const std::wstring_view row_label = RowLabel(row.kind);
-		std::wstring reasoning_label;
+		std::wstring dynamic_label;
 		std::wstring_view label = row_label;
 		if (row.kind == NativeTranscriptRowKind::Reasoning) {
 			const bool expandable = HasFlag(row.flags, NativeTranscriptRowFlags::Expandable);
-			reasoning_label = NativeTranscriptReasoningLabel(
+			dynamic_label = NativeTranscriptReasoningLabel(
 				row.duration_ms,
 				expandable,
-				expandable && !collapsed_reasoning,
+				expandable && !collapsed_expandable,
 				HasFlag(row.flags, NativeTranscriptRowFlags::Streaming));
-			label = reasoning_label;
+			label = dynamic_label;
+		} else if (row.kind == NativeTranscriptRowKind::Tool && collapsed_expandable) {
+			const std::size_t line_end = row.text.find('\n');
+			dynamic_label = Utf8ToWide(row.text.substr(0, line_end));
+			dynamic_label.append(HasFlag(row.flags, NativeTranscriptRowFlags::Streaming) ? L"  …" : L"  ▸");
+			label = dynamic_label;
+		} else if (row.kind == NativeTranscriptRowKind::Tool &&
+			HasFlag(row.flags, NativeTranscriptRowFlags::Expandable)) {
+			dynamic_label = L"操作  ▾";
+			label = dynamic_label;
 		}
 		const D2D1_RECT_F label_rect = D2D1::RectF(
 			content_left,
@@ -953,8 +965,8 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 	}
 	if (!message) {
 		render_target_->DrawLine(
-			D2D1::Point2F(kHorizontalPadding, row_top + row_height - 1.0F),
-			D2D1::Point2F(viewport_width - kHorizontalPadding, row_top + row_height - 1.0F),
+			D2D1::Point2F(horizontal_padding, row_top + row_height - 1.0F),
+			D2D1::Point2F(viewport_width - horizontal_padding, row_top + row_height - 1.0F),
 			line_brush_.Get(),
 			1.0F);
 	}
@@ -1179,13 +1191,14 @@ void NativeTranscriptView::DrawSelection(
 	}
 }
 
-bool NativeTranscriptView::IsCollapsedReasoning(const NativeTranscriptRow& row) const {
-	return row.kind == NativeTranscriptRowKind::Reasoning &&
-		HasFlag(row.flags, NativeTranscriptRowFlags::Expandable) &&
-		!HasFlag(row.flags, NativeTranscriptRowFlags::Expanded) && !expanded_reasoning_.contains(row.id);
+bool NativeTranscriptView::IsCollapsedExpandable(const NativeTranscriptRow& row) const {
+	const bool supported = row.kind == NativeTranscriptRowKind::Reasoning ||
+		row.kind == NativeTranscriptRowKind::Tool;
+	return supported && HasFlag(row.flags, NativeTranscriptRowFlags::Expandable) &&
+		!HasFlag(row.flags, NativeTranscriptRowFlags::Expanded) && !expanded_rows_.contains(row.id);
 }
 
-std::optional<std::string> NativeTranscriptView::HitTestReasoningHeader(POINT point) const {
+std::optional<std::string> NativeTranscriptView::HitTestExpandableHeader(POINT point) const {
 	if (model_.Empty() || window_ == nullptr) {
 		return std::nullopt;
 	}
@@ -1198,7 +1211,8 @@ std::optional<std::string> NativeTranscriptView::HitTestReasoningHeader(POINT po
 	const float x = static_cast<float>(point.x) / scale;
 	const float y = static_cast<float>(point.y) / scale;
 	const float viewport_width = static_cast<float>(client.right - client.left) / scale;
-	if (x < kHorizontalPadding || x > viewport_width - kHorizontalPadding) {
+	const float horizontal_padding = NativeTranscriptOuterHorizontalPadding(viewport_width) + kRowContentInset;
+	if (x < horizontal_padding || x > viewport_width - horizontal_padding) {
 		return std::nullopt;
 	}
 	const std::int64_t content_y = scroll_offset_ + static_cast<std::int64_t>(std::floor(y));
@@ -1207,7 +1221,7 @@ std::optional<std::string> NativeTranscriptView::HitTestReasoningHeader(POINT po
 		return std::nullopt;
 	}
 	const NativeTranscriptRow& row = model_.RowAt(range.first);
-	if (row.kind != NativeTranscriptRowKind::Reasoning ||
+	if ((row.kind != NativeTranscriptRowKind::Reasoning && row.kind != NativeTranscriptRowKind::Tool) ||
 		!HasFlag(row.flags, NativeTranscriptRowFlags::Expandable)) {
 		return std::nullopt;
 	}
@@ -1219,27 +1233,27 @@ std::optional<std::string> NativeTranscriptView::HitTestReasoningHeader(POINT po
 	return row.id;
 }
 
-void NativeTranscriptView::ToggleReasoning(std::string_view row_id) {
+void NativeTranscriptView::ToggleExpandable(std::string_view row_id) {
 	const auto index = model_.IndexOf(row_id);
 	if (!index) {
 		return;
 	}
 	const NativeTranscriptRow& row = model_.RowAt(*index);
-	if (row.kind != NativeTranscriptRowKind::Reasoning ||
+	if ((row.kind != NativeTranscriptRowKind::Reasoning && row.kind != NativeTranscriptRowKind::Tool) ||
 		!HasFlag(row.flags, NativeTranscriptRowFlags::Expandable)) {
 		return;
 	}
 	const std::string id(row_id);
-	if (expanded_reasoning_.contains(id)) {
-		expanded_reasoning_.erase(id);
+	if (expanded_rows_.contains(id)) {
+		expanded_rows_.erase(id);
 	} else {
-		expanded_reasoning_.insert(id);
+		expanded_rows_.insert(id);
 	}
 	if ((selection_anchor_ && selection_anchor_->row_id == id) ||
 		(selection_focus_ && selection_focus_->row_id == id)) {
 		ClearSelection();
 	}
-	static_cast<void>(model_.UpdateHeight(id, kCollapsedReasoningHeight));
+	static_cast<void>(model_.UpdateHeight(id, kCollapsedExpandableHeight));
 	if (stick_to_bottom_) {
 		ScrollToBottom();
 	} else {
@@ -1273,12 +1287,14 @@ std::optional<NativeTranscriptView::SelectionPoint> NativeTranscriptView::HitTes
 
 	const std::size_t index = range.first;
 	const NativeTranscriptRow& row = model_.RowAt(index);
-	if (IsCollapsedReasoning(row)) {
+	if (IsCollapsedExpandable(row)) {
 		return std::nullopt;
 	}
 	const bool user = row.kind == NativeTranscriptRowKind::User;
-	const bool message = user || row.kind == NativeTranscriptRowKind::Assistant;
-	const float available_width = std::max(80.0F, viewport_width - 2.0F * kHorizontalPadding);
+	const bool message = user || row.kind == NativeTranscriptRowKind::Assistant ||
+		row.kind == NativeTranscriptRowKind::Plan;
+	const float horizontal_padding = NativeTranscriptOuterHorizontalPadding(viewport_width) + kRowContentInset;
+	const float available_width = std::max(80.0F, viewport_width - 2.0F * horizontal_padding);
 	const float layout_width = message ? NativeTranscriptBubbleMaxContentWidth(viewport_width, user) : available_width;
 	TextLayout* layout = GetTextLayout(row, layout_width);
 	if (layout == nullptr) {
@@ -1292,7 +1308,7 @@ std::optional<NativeTranscriptView::SelectionPoint> NativeTranscriptView::HitTes
 			layout->measured_height,
 			row.media_ids.size());
 	}
-	const float content_left = message ? bubble_layout.content_left : kHorizontalPadding;
+	const float content_left = message ? bubble_layout.content_left : horizontal_padding;
 	const float text_top = static_cast<float>(model_.RowTop(index) - scroll_offset_) +
 		(message ? bubble_layout.text_top : kRowVerticalPadding + kLabelHeight + kTextGap);
 	if (y <= text_top) {

@@ -85,6 +85,18 @@ body { margin: 0; min-height: 100vh; padding-top: 36px; display: grid; place-ite
   background: transparent; font-size: 16px; font-weight: 400; }
 .shellbar-controls button:hover { color: var(--fg); background: var(--hover); }
 .shellbar-controls .shellbar-close:hover { background: #c42b1c; }
+.resize-edge { position: fixed; z-index: 1000; touch-action: none; }
+.resize-top, .resize-bottom { left: 10px; right: 10px; height: 6px; }
+.resize-left, .resize-right { top: 10px; bottom: 10px; width: 6px; }
+.resize-top { top: 0; cursor: n-resize; }
+.resize-right { right: 0; cursor: e-resize; }
+.resize-bottom { bottom: 0; cursor: s-resize; }
+.resize-left { left: 0; cursor: w-resize; }
+.resize-top-left, .resize-top-right, .resize-bottom-right, .resize-bottom-left { width: 10px; height: 10px; }
+.resize-top-left { top: 0; left: 0; cursor: nw-resize; }
+.resize-top-right { top: 0; right: 0; cursor: ne-resize; }
+.resize-bottom-right { right: 0; bottom: 0; cursor: se-resize; }
+.resize-bottom-left { bottom: 0; left: 0; cursor: sw-resize; }
 .card { width: min(620px, calc(100vw - 48px)); padding: 44px; border: 1px solid var(--border); border-radius: 18px;
   background: var(--raised); box-shadow: var(--shadow); }
 .error-mark { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; margin-bottom: 24px;
@@ -101,6 +113,22 @@ button:hover { background: var(--accent-hover); }
 )css";
 
 constexpr std::wstring_view kFallbackTitlebar = LR"html(
+<div class="resize-edge resize-top" aria-hidden="true"
+  onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'resize_top'})"></div>
+<div class="resize-edge resize-right" aria-hidden="true"
+  onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'resize_right'})"></div>
+<div class="resize-edge resize-bottom" aria-hidden="true"
+  onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'resize_bottom'})"></div>
+<div class="resize-edge resize-left" aria-hidden="true"
+  onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'resize_left'})"></div>
+<div class="resize-edge resize-top-left" aria-hidden="true"
+  onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'resize_top_left'})"></div>
+<div class="resize-edge resize-top-right" aria-hidden="true"
+  onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'resize_top_right'})"></div>
+<div class="resize-edge resize-bottom-right" aria-hidden="true"
+  onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'resize_bottom_right'})"></div>
+<div class="resize-edge resize-bottom-left" aria-hidden="true"
+  onpointerdown="if(event.button===0)window.__TAURI_INTERNALS__?.invoke('window_action',{action:'resize_bottom_left'})"></div>
 <header class="shellbar">
   <span class="shellbar-title">OMP</span>
   <div class="shellbar-drag"

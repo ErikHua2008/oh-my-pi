@@ -25,6 +25,7 @@ struct ShellConfig {
 	bool close_to_tray = true;
 
 	void RecordProject(std::wstring project_directory);
+	[[nodiscard]] bool RemoveProject(std::wstring_view project_directory);
 	[[nodiscard]] std::optional<std::wstring> ProjectName(std::wstring_view project_directory) const;
 	[[nodiscard]] bool SetProjectName(std::wstring project_directory, std::wstring name);
 };

@@ -16,6 +16,81 @@
 	background: var(--bg);
 }
 
+/* WebView2 occupies the whole frameless client area, so Win32 never receives
+ * edge hit tests directly. These invisible handles forward the gesture to the
+ * native system sizing loop while preserving a visually borderless window. */
+.sh-desktop-resize {
+	position: fixed;
+	z-index: 1000;
+	touch-action: none;
+}
+
+.sh-desktop-resize-top,
+.sh-desktop-resize-bottom {
+	left: 10px;
+	right: 10px;
+	height: 6px;
+}
+
+.sh-desktop-resize-left,
+.sh-desktop-resize-right {
+	top: 10px;
+	bottom: 10px;
+	width: 6px;
+}
+
+.sh-desktop-resize-top {
+	top: 0;
+	cursor: n-resize;
+}
+
+.sh-desktop-resize-right {
+	right: 0;
+	cursor: e-resize;
+}
+
+.sh-desktop-resize-bottom {
+	bottom: 0;
+	cursor: s-resize;
+}
+
+.sh-desktop-resize-left {
+	left: 0;
+	cursor: w-resize;
+}
+
+.sh-desktop-resize-top-left,
+.sh-desktop-resize-top-right,
+.sh-desktop-resize-bottom-right,
+.sh-desktop-resize-bottom-left {
+	width: 10px;
+	height: 10px;
+}
+
+.sh-desktop-resize-top-left {
+	top: 0;
+	left: 0;
+	cursor: nw-resize;
+}
+
+.sh-desktop-resize-top-right {
+	top: 0;
+	right: 0;
+	cursor: ne-resize;
+}
+
+.sh-desktop-resize-bottom-right {
+	right: 0;
+	bottom: 0;
+	cursor: se-resize;
+}
+
+.sh-desktop-resize-bottom-left {
+	bottom: 0;
+	left: 0;
+	cursor: sw-resize;
+}
+
 .sh-desktop-titlebar {
 	position: relative;
 	z-index: 100;
@@ -184,8 +259,8 @@
 }
 
 .sh-transcript {
-	width: calc(100% - 48px);
-	max-width: 760px;
+	width: 100%;
+	max-width: 808px;
 	min-height: 0;
 	display: flex;
 	flex-direction: column;
@@ -221,12 +296,6 @@
 .sh-rail > :last-child {
 	flex: 1;
 	min-height: 0;
-}
-
-@media (max-width: 720px) {
-	.sh-transcript {
-		width: calc(100% - 24px);
-	}
 }
 
 .sh-rail-header {

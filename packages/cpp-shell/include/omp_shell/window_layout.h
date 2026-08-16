@@ -2,9 +2,28 @@
 
 #include <windows.h>
 
+#include <optional>
+#include <string_view>
+
 namespace omp::shell {
 
 [[nodiscard]] RECT ExpandWindowBoundsForRail(const RECT& compact_bounds, const RECT& work_area, int rail_width) noexcept;
+
+// Keep the CSS/Win32 rail decision identical. The Web layout docks the rail
+// only above 1024 CSS pixels; narrower windows use an overlay instead.
+[[nodiscard]] bool ShouldDockAgentRail(int window_width, int dpi) noexcept;
+
+// Minimum user-resizable shell size in physical pixels for the active DPI.
+[[nodiscard]] SIZE MinimumWindowTrackSizeForDpi(int dpi) noexcept;
+
+// A native child surface can otherwise cover the WebView's invisible resize
+// handles. Inset only the sides that actually touch the host client edge.
+[[nodiscard]] RECT InsetBoundsAtWindowEdges(
+	const RECT& bounds, const RECT& client_bounds, int edge_inset) noexcept;
+
+// Convert the Web resize action to the exact SC_SIZE command understood by
+// the Win32 system sizing loop.
+[[nodiscard]] std::optional<WPARAM> WindowSizingCommandForAction(std::string_view action) noexcept;
 
 // Frameless windows have no visible sizing frame, so keep a comfortable
 // DPI-scaled grab target even when the system metric is unusually narrow.

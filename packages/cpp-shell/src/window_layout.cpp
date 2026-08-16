@@ -15,6 +15,52 @@ RECT ExpandWindowBoundsForRail(const RECT& compact_bounds, const RECT& work_area
 	return RECT{left, compact_bounds.top, left + expanded_width, compact_bounds.bottom};
 }
 
+bool ShouldDockAgentRail(int window_width, int dpi) noexcept {
+	constexpr int kFirstDockedWidthDip = 1025;
+	const int safe_dpi = dpi > 0 ? dpi : USER_DEFAULT_SCREEN_DPI;
+	return window_width >= MulDiv(kFirstDockedWidthDip, safe_dpi, USER_DEFAULT_SCREEN_DPI);
+}
+
+SIZE MinimumWindowTrackSizeForDpi(int dpi) noexcept {
+	constexpr int kMinimumWidthDip = 720;
+	constexpr int kMinimumHeightDip = 560;
+	const int safe_dpi = dpi > 0 ? dpi : USER_DEFAULT_SCREEN_DPI;
+	return SIZE{
+		MulDiv(kMinimumWidthDip, safe_dpi, USER_DEFAULT_SCREEN_DPI),
+		MulDiv(kMinimumHeightDip, safe_dpi, USER_DEFAULT_SCREEN_DPI),
+	};
+}
+
+RECT InsetBoundsAtWindowEdges(const RECT& bounds, const RECT& client_bounds, int edge_inset) noexcept {
+	RECT inset = bounds;
+	const LONG amount = std::max(0, edge_inset);
+	if (inset.left <= client_bounds.left) {
+		inset.left = std::min(inset.right, client_bounds.left + amount);
+	}
+	if (inset.top <= client_bounds.top) {
+		inset.top = std::min(inset.bottom, client_bounds.top + amount);
+	}
+	if (inset.right >= client_bounds.right) {
+		inset.right = std::max(inset.left, client_bounds.right - amount);
+	}
+	if (inset.bottom >= client_bounds.bottom) {
+		inset.bottom = std::max(inset.top, client_bounds.bottom - amount);
+	}
+	return inset;
+}
+
+std::optional<WPARAM> WindowSizingCommandForAction(std::string_view action) noexcept {
+	if (action == "resize_left") return SC_SIZE | WMSZ_LEFT;
+	if (action == "resize_right") return SC_SIZE | WMSZ_RIGHT;
+	if (action == "resize_top") return SC_SIZE | WMSZ_TOP;
+	if (action == "resize_bottom") return SC_SIZE | WMSZ_BOTTOM;
+	if (action == "resize_top_left") return SC_SIZE | WMSZ_TOPLEFT;
+	if (action == "resize_top_right") return SC_SIZE | WMSZ_TOPRIGHT;
+	if (action == "resize_bottom_left") return SC_SIZE | WMSZ_BOTTOMLEFT;
+	if (action == "resize_bottom_right") return SC_SIZE | WMSZ_BOTTOMRIGHT;
+	return std::nullopt;
+}
+
 int ResizeBorderThicknessForDpi(int system_border, int dpi) noexcept {
 	constexpr int kMinimumResizeBorderDip = 12;
 	const int scaled_minimum =

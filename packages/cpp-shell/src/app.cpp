@@ -48,6 +48,7 @@ constexpr int kSidebarWidth = 288;
 constexpr int kConversationClientWidth = 808;
 constexpr int kCompactClientWidth = kSidebarWidth + kConversationClientWidth;
 constexpr int kAgentRailWidth = 288;
+constexpr int kWebResizeEdgeWidth = 6;
 
 constexpr NativeMenuItem kShowWindowItem{L"打开 OMP", false, false};
 constexpr NativeMenuItem kTrayOpenProjectItem{L"打开项目...", false, false};
@@ -211,6 +212,7 @@ std::optional<NativeTranscriptRowKind> ParseNativeRowKind(std::string_view kind)
 	if (kind == "user") return NativeTranscriptRowKind::User;
 	if (kind == "assistant") return NativeTranscriptRowKind::Assistant;
 	if (kind == "reasoning") return NativeTranscriptRowKind::Reasoning;
+	if (kind == "plan") return NativeTranscriptRowKind::Plan;
 	if (kind == "tool") return NativeTranscriptRowKind::Tool;
 	if (kind == "system") return NativeTranscriptRowKind::System;
 	if (kind == "compaction") return NativeTranscriptRowKind::Compaction;
@@ -427,20 +429,26 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 		if (agent_rail_open_ && has_compact_window_bounds_ && !IsZoomed(window_) && !IsIconic(window_)) {
 			RECT resized{};
 			if (GetWindowRect(window_, &resized)) {
-				const LONG rail_width =
-					MulDiv(kAgentRailWidth, static_cast<int>(GetDpiForWindow(window_)), USER_DEFAULT_SCREEN_DPI);
+				const int dpi = static_cast<int>(GetDpiForWindow(window_));
+				agent_rail_docked_ = ShouldDockAgentRail(resized.right - resized.left, dpi);
 				compact_window_bounds_ = resized;
-				compact_window_bounds_.right = std::max(resized.left + 1, resized.right - rail_width);
+				if (agent_rail_docked_) {
+					const LONG rail_width = MulDiv(kAgentRailWidth, dpi, USER_DEFAULT_SCREEN_DPI);
+					compact_window_bounds_.right = std::max(resized.left + 1, resized.right - rail_width);
+				}
 			}
 		}
 		SaveWindowState();
 		return 0;
 	case WM_GETMINMAXINFO: {
+		auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
+		const SIZE minimum = MinimumWindowTrackSizeForDpi(static_cast<int>(GetDpiForWindow(window_)));
+		limits->ptMinTrackSize.x = minimum.cx;
+		limits->ptMinTrackSize.y = minimum.cy;
 		MONITORINFO monitor_info{};
 		monitor_info.cbSize = sizeof(monitor_info);
 		const HMONITOR monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
 		if (monitor != nullptr && GetMonitorInfoW(monitor, &monitor_info)) {
-			auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
 			limits->ptMaxPosition.x = monitor_info.rcWork.left - monitor_info.rcMonitor.left;
 			limits->ptMaxPosition.y = monitor_info.rcWork.top - monitor_info.rcMonitor.top;
 			limits->ptMaxSize.x = monitor_info.rcWork.right - monitor_info.rcWork.left;
@@ -450,6 +458,15 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 	}
 	case WM_DPICHANGED: {
 		const auto* suggested = reinterpret_cast<RECT*>(lparam);
+		if (agent_rail_open_ && has_compact_window_bounds_ && !IsZoomed(window_) && !IsIconic(window_)) {
+			const int dpi = HIWORD(wparam);
+			agent_rail_docked_ = ShouldDockAgentRail(suggested->right - suggested->left, dpi);
+			compact_window_bounds_ = *suggested;
+			if (agent_rail_docked_) {
+				const LONG rail_width = MulDiv(kAgentRailWidth, dpi, USER_DEFAULT_SCREEN_DPI);
+				compact_window_bounds_.right = std::max(suggested->left + 1, suggested->right - rail_width);
+			}
+		}
 		SetWindowPos(window_,
 			nullptr,
 			suggested->left,
@@ -589,10 +606,15 @@ bool App::RegisterWindowClass() const {
 bool App::CreateMainWindow(int show_command) {
 	int x = CW_USEDEFAULT;
 	int y = CW_USEDEFAULT;
-	int width = config_.window_width.value_or(DefaultCompactWindowWidth(GetDpiForSystem()));
-	int height = config_.window_height.value_or(820);
-	width = std::max(width, 800);
-	height = std::max(height, 600);
+	const UINT system_dpi = GetDpiForSystem();
+	const SIZE minimum = MinimumWindowTrackSizeForDpi(static_cast<int>(system_dpi));
+	int width = config_.window_width.value_or(DefaultCompactWindowWidth(system_dpi));
+	int height = config_.window_height.value_or(MulDiv(820, static_cast<int>(system_dpi), USER_DEFAULT_SCREEN_DPI));
+	// Use the same DPI-aware limits during restore and interactive sizing. This
+	// keeps a user-selected 720-DIP compact width stable across restarts instead
+	// of silently growing it back to the former hard-coded 800 pixels.
+	width = std::max(width, static_cast<int>(minimum.cx));
+	height = std::max(height, static_cast<int>(minimum.cy));
 	if (config_.window_x && config_.window_y) {
 		RECT restored{*config_.window_x, *config_.window_y, *config_.window_x + width, *config_.window_y + height};
 		if (MonitorFromRect(&restored, MONITOR_DEFAULTTONULL) != nullptr) {
@@ -668,7 +690,12 @@ void App::SetAgentRailOpen(bool open) {
 	}
 	agent_rail_open_ = open;
 	if (open) {
+		has_compact_window_bounds_ = false;
+		agent_rail_docked_ = false;
 		if (IsZoomed(window_) || IsIconic(window_)) {
+			RECT client{};
+			agent_rail_docked_ = GetClientRect(window_, &client) &&
+				ShouldDockAgentRail(client.right - client.left, static_cast<int>(GetDpiForWindow(window_)));
 			return;
 		}
 		if (!GetWindowRect(window_, &compact_window_bounds_)) {
@@ -680,24 +707,36 @@ void App::SetAgentRailOpen(bool open) {
 		if (monitor == nullptr || !GetMonitorInfoW(monitor, &monitor_info)) {
 			return;
 		}
-		has_compact_window_bounds_ = true;
-		const int rail_width = MulDiv(kAgentRailWidth, static_cast<int>(GetDpiForWindow(window_)), USER_DEFAULT_SCREEN_DPI);
+		const int dpi = static_cast<int>(GetDpiForWindow(window_));
+		const int rail_width = MulDiv(kAgentRailWidth, dpi, USER_DEFAULT_SCREEN_DPI);
 		const RECT expanded = ExpandWindowBoundsForRail(compact_window_bounds_, monitor_info.rcWork, rail_width);
-		SetWindowPos(window_,
+		agent_rail_docked_ = ShouldDockAgentRail(expanded.right - expanded.left, dpi);
+		if (!agent_rail_docked_) {
+			has_compact_window_bounds_ = false;
+			return;
+		}
+		if (!SetWindowPos(window_,
 			nullptr,
 			expanded.left,
 			expanded.top,
 			expanded.right - expanded.left,
 			expanded.bottom - expanded.top,
-			SWP_NOACTIVATE | SWP_NOZORDER);
+			SWP_NOACTIVATE | SWP_NOZORDER)) {
+			agent_rail_docked_ = false;
+			return;
+		}
+		has_compact_window_bounds_ = true;
 		return;
 	}
 
-	if (!has_compact_window_bounds_) {
+	if (!has_compact_window_bounds_ || !agent_rail_docked_) {
+		has_compact_window_bounds_ = false;
+		agent_rail_docked_ = false;
 		return;
 	}
 	const RECT compact = compact_window_bounds_;
 	has_compact_window_bounds_ = false;
+	agent_rail_docked_ = false;
 	if (IsZoomed(window_) || IsIconic(window_)) {
 		WINDOWPLACEMENT placement{};
 		placement.length = sizeof(placement);
@@ -1010,6 +1049,14 @@ void App::HandleDesktopRequest(std::string_view payload) {
 				PostMessageW(window_, WM_NCLBUTTONDOWN, HTCAPTION, 0);
 				return;
 			}
+			if (const auto resize_command = WindowSizingCommandForAction(action)) {
+				reply(true, nullptr);
+				if (!IsZoomed(window_) && !IsIconic(window_)) {
+					ReleaseCapture();
+					PostMessageW(window_, WM_SYSCOMMAND, *resize_command, 0);
+				}
+				return;
+			}
 			if (action == "minimize") {
 				reply(true, nullptr);
 				ShowWindow(window_, SW_MINIMIZE);
@@ -1188,11 +1235,15 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			const std::int64_t top = std::clamp<std::int64_t>(y, client.top, client.bottom);
 			const std::int64_t right = std::clamp<std::int64_t>(x + width, left, client.right);
 			const std::int64_t bottom = std::clamp<std::int64_t>(y + height, top, client.bottom);
-			native_transcript_bounds_ = {static_cast<LONG>(left),
+			const RECT requested_bounds{static_cast<LONG>(left),
 				static_cast<LONG>(top),
 				static_cast<LONG>(right),
 				static_cast<LONG>(bottom)};
-			has_native_transcript_bounds_ = right > left && bottom > top;
+			const int resize_inset =
+				MulDiv(kWebResizeEdgeWidth, static_cast<int>(GetDpiForWindow(window_)), USER_DEFAULT_SCREEN_DPI);
+			native_transcript_bounds_ = InsetBoundsAtWindowEdges(requested_bounds, client, resize_inset);
+			has_native_transcript_bounds_ = native_transcript_bounds_.right > native_transcript_bounds_.left &&
+				native_transcript_bounds_.bottom > native_transcript_bounds_.top;
 			if (has_native_transcript_bounds_) {
 				native_transcript_.SetBounds(native_transcript_bounds_);
 			}
@@ -1275,6 +1326,22 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			if (ComparableProjectPath(path) == ComparableProjectPath(project_directory_)) {
 				UpdateWindowTitle();
 			}
+			reply(true, nullptr);
+			return;
+		}
+		if (command == "project_remove") {
+			const std::wstring path = Utf8ToWide(args.at("path").get_ref<const std::string&>());
+			if (path.empty()) {
+				reply(false, nullptr, "project path is empty");
+				return;
+			}
+			if (!project_directory_.empty() &&
+				ComparableProjectPath(path) == ComparableProjectPath(project_directory_)) {
+				reply(false, nullptr, "the active project cannot be removed");
+				return;
+			}
+			static_cast<void>(config_.RemoveProject(path));
+			SaveConfigFile();
 			reply(true, nullptr);
 			return;
 		}

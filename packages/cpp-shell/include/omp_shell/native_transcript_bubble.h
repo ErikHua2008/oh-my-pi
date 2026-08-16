@@ -16,14 +16,19 @@ struct NativeTranscriptBubbleLayout final {
 	float row_height = 0.0F;
 };
 
+/** Match the Web message rail: 24px normally and 12px in compact windows. */
+[[nodiscard]] inline float NativeTranscriptOuterHorizontalPadding(float viewport_width) noexcept {
+	return viewport_width <= 720.0F ? 12.0F : 24.0F;
+}
+
 [[nodiscard]] inline float NativeTranscriptBubbleMaxContentWidth(float viewport_width, bool user) noexcept {
-	constexpr float kOuterHorizontalPadding = 0.0F;
 	constexpr float kBubbleHorizontalPadding = 14.0F;
 	constexpr float kMinimumContentWidth = 40.0F;
 	constexpr float kUserWidthRatio = 0.78F;
 	constexpr float kAssistantWidthRatio = 0.92F;
+	const float outer_horizontal_padding = NativeTranscriptOuterHorizontalPadding(viewport_width);
 	const float available = std::max(kMinimumContentWidth,
-		viewport_width - 2.0F * kOuterHorizontalPadding - 2.0F * kBubbleHorizontalPadding);
+		viewport_width - 2.0F * outer_horizontal_padding - 2.0F * kBubbleHorizontalPadding);
 	return available * (user ? kUserWidthRatio : kAssistantWidthRatio);
 }
 
@@ -33,7 +38,6 @@ struct NativeTranscriptBubbleLayout final {
 	float measured_text_width,
 	float measured_text_height,
 	std::size_t media_count) noexcept {
-	constexpr float kOuterHorizontalPadding = 0.0F;
 	constexpr float kOuterVerticalPadding = 5.0F;
 	constexpr float kBubbleHorizontalPadding = 14.0F;
 	constexpr float kBubbleVerticalPadding = 10.0F;
@@ -41,14 +45,15 @@ struct NativeTranscriptBubbleLayout final {
 	constexpr float kThumbnailHeight = 160.0F;
 	constexpr float kMediaGap = 8.0F;
 
+	const float outer_horizontal_padding = NativeTranscriptOuterHorizontalPadding(viewport_width);
 	const float maximum_content_width = NativeTranscriptBubbleMaxContentWidth(viewport_width, user);
 	const float natural_content_width = media_count == 0
 		? std::clamp(measured_text_width, kMinimumTextWidth, maximum_content_width)
 		: maximum_content_width;
 	const float bubble_width = natural_content_width + 2.0F * kBubbleHorizontalPadding;
 	const float bubble_left = user
-		? viewport_width - kOuterHorizontalPadding - bubble_width
-		: kOuterHorizontalPadding;
+		? viewport_width - outer_horizontal_padding - bubble_width
+		: outer_horizontal_padding;
 	const float content_height = std::max(18.0F, measured_text_height) +
 		static_cast<float>(media_count) * (kThumbnailHeight + kMediaGap);
 	const float bubble_height = content_height + 2.0F * kBubbleVerticalPadding;

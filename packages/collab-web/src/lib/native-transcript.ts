@@ -6,6 +6,12 @@ import {
 	type TextContent,
 } from "@oh-my-pi/pi-wire";
 import type { DesktopNativeTranscriptKind, DesktopNativeTranscriptRow } from "./desktop-bridge";
+import {
+	isSystemReminder,
+	operationPresentation,
+	planPresentationText,
+	transcriptToolPresentation,
+} from "./transcript-presentation";
 
 const MAX_ROW_TEXT = 256 * 1024;
 const MAX_REASONING_DURATION_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -47,9 +53,6 @@ function assistantResponseText(message: AssistantMessage): string {
 			case "text":
 				if (block.text.length > 0) parts.push(block.text);
 				break;
-			case "toolCall":
-				parts.push(`工具 · ${block.name}${block.intent ? `\n${block.intent}` : ""}`);
-				break;
 			default:
 				break;
 		}
@@ -72,9 +75,6 @@ function assistantStreamText(message: AssistantMessage, collapseThinking: boolea
 				break;
 			case "text":
 				if (block.text.length > 0) parts.push(block.text);
-				break;
-			case "toolCall":
-				parts.push(`工具 · ${block.name}${block.intent ? `\n${block.intent}` : ""}`);
 				break;
 			default:
 				break;
@@ -113,7 +113,7 @@ function row(
 		text: bounded,
 		flags,
 		estimatedHeight:
-			kind === "reasoning" && (flags & NativeRowFlag.Expandable) !== 0
+			(kind === "reasoning" || kind === "tool") && (flags & NativeRowFlag.Expandable) !== 0
 				? 42
 				: estimatedHeight(bounded, kind) + mediaIds.length * 176,
 		mediaIds,
@@ -133,6 +133,13 @@ function customPromptText(entry: Extract<SessionEntry, { type: "custom_message" 
 /** Convert durable wire entries to the compact, renderer-independent native rows. */
 export function projectNativeTranscript(entries: readonly SessionEntry[]): DesktopNativeTranscriptRow[] {
 	const rows: DesktopNativeTranscriptRow[] = [];
+	const toolArgs = new Map<string, unknown>();
+	for (const entry of entries) {
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		for (const block of entry.message.content) {
+			if (block.type === "toolCall") toolArgs.set(block.id, block.arguments);
+		}
+	}
 	for (const entry of entries) {
 		switch (entry.type) {
 			case "message": {
@@ -167,7 +174,8 @@ export function projectNativeTranscript(entries: readonly SessionEntry[]): Deskt
 							);
 						}
 						const response = assistantResponseText(message);
-						if (response.length > 0 || reasoningParts.length === 0) {
+						const hasToolCall = message.content.some(block => block.type === "toolCall");
+						if (response.length > 0 || (reasoningParts.length === 0 && !hasToolCall)) {
 							rows.push(
 								row(
 									entry.id,
@@ -180,15 +188,24 @@ export function projectNativeTranscript(entries: readonly SessionEntry[]): Deskt
 						break;
 					}
 					case "developer":
-						rows.push(row(entry.id, "system", contentText(message.content), 0, contentMediaIds(message.content)));
+						// Provider reminders and injected developer guidance belong to the
+						// model context, not the human-readable conversation.
 						break;
 					case "toolResult": {
+						const presentation = transcriptToolPresentation(message.toolName);
+						if (presentation === "hidden") break;
+						const args = toolArgs.get(message.toolCallId);
+						if (presentation === "plan") {
+							rows.push(row(entry.id, "plan", planPresentationText(message.details, args)));
+							break;
+						}
 						const output = contentText(message.content);
+						const summary = operationPresentation(message.toolName, args, message.isError);
 						rows.push(
 							row(
 								entry.id,
-								message.isError ? "error" : "tool",
-								`${message.toolName}${output ? `\n${output}` : ""}`,
+								"tool",
+								`${summary}${output ? `\n\n${output}` : ""}`,
 								NativeRowFlag.Expandable | (message.isError ? NativeRowFlag.Failed : 0),
 								contentMediaIds(message.content),
 							),
@@ -203,7 +220,7 @@ export function projectNativeTranscript(entries: readonly SessionEntry[]): Deskt
 			case "custom_message":
 				if (entry.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
 					rows.push(row(entry.id, "user", customPromptText(entry), 0, contentMediaIds(entry.content)));
-				} else if (entry.display) {
+				} else if (entry.display && !isSystemReminder(entry.customType, contentText(entry.content))) {
 					rows.push(
 						row(
 							entry.id,
@@ -229,10 +246,7 @@ export function projectNativeTranscript(entries: readonly SessionEntry[]): Deskt
 				rows.push(row(entry.id, "compaction", `分支摘要\n${entry.summary}`, NativeRowFlag.Expandable));
 				break;
 			case "model_change":
-				rows.push(row(entry.id, "system", `模型 → ${entry.model}`));
-				break;
 			case "thinking_level_change":
-				rows.push(row(entry.id, "system", `思考强度 → ${entry.thinkingLevel ?? "关闭"}`));
 				break;
 			default:
 				break;
@@ -255,10 +269,38 @@ export function projectNativeStream(
 	const id = nativeStreamRowId(sessionId);
 	if (stream !== null) {
 		const failed = streamDone && (stream.stopReason === "error" || stream.stopReason === "aborted");
+		const hasNarrative = stream.content.some(
+			block => block.type === "text" || block.type === "thinking" || block.type === "redactedThinking",
+		);
+		if (!hasNarrative) {
+			for (let index = stream.content.length - 1; index >= 0; index--) {
+				const block = stream.content[index];
+				if (block?.type !== "toolCall") continue;
+				const presentation = transcriptToolPresentation(block.name);
+				if (presentation === "hidden") continue;
+				if (presentation === "plan") {
+					return row(
+						id,
+						"plan",
+						planPresentationText(undefined, block.arguments),
+						streamDone ? 0 : NativeRowFlag.Streaming,
+					);
+				}
+				return row(
+					id,
+					"tool",
+					operationPresentation(block.name, block.arguments, failed),
+					NativeRowFlag.Expandable |
+						(streamDone ? 0 : NativeRowFlag.Streaming) |
+						(failed ? NativeRowFlag.Failed : 0),
+				);
+			}
+			return working ? row(id, "assistant", "正在处理…", NativeRowFlag.Streaming) : null;
+		}
 		const reasoningOnly =
 			!streamDone &&
 			stream.content.some(block => block.type === "thinking") &&
-			!stream.content.some(block => block.type === "text" || block.type === "toolCall");
+			!stream.content.some(block => block.type === "text");
 		return row(
 			id,
 			failed ? "error" : reasoningOnly ? "reasoning" : "assistant",

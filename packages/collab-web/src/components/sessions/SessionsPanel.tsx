@@ -14,11 +14,12 @@ import {
 	Trash2,
 	X,
 } from "lucide-react";
-import { type FormEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { type FormEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ControlSnapshot } from "../../lib/control-client";
 import { copyText, type DesktopProject, desktopBridge } from "../../lib/desktop-bridge";
 import { relTime } from "../../lib/format";
+import { useNativeTranscriptOcclusion } from "../shell/useNativeTranscriptOcclusion";
 
 export interface SessionsPanelProps {
 	snapshot: ControlSnapshot;
@@ -48,6 +49,30 @@ interface SessionContextMenu {
 	unread: boolean;
 	x: number;
 	y: number;
+}
+
+interface ProjectContextMenu {
+	key: string;
+	path: string;
+	name: string;
+	current: boolean;
+	x: number;
+	y: number;
+}
+
+export function placeContextMenu(
+	clientX: number,
+	clientY: number,
+	menuWidth: number,
+	menuHeight: number,
+	viewportWidth: number,
+	viewportHeight: number,
+): { x: number; y: number } {
+	const margin = 8;
+	return {
+		x: Math.max(margin, Math.min(clientX, viewportWidth - menuWidth - margin)),
+		y: Math.max(margin, Math.min(clientY, viewportHeight - menuHeight - margin)),
+	};
 }
 
 const PINNED_SESSIONS_KEY = "omp.shell.pinned-sessions";
@@ -264,11 +289,16 @@ export function SessionsPanel({
 	const [renamingProject, setRenamingProject] = useState<string | null>(null);
 	const [renamingSession, setRenamingSession] = useState<string | null>(null);
 	const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenu | null>(null);
+	const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenu | null>(null);
+	const projectContextMenuRef = useRef<HTMLDivElement | null>(null);
+	const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
 	const [pinnedSessions, setPinnedSessions] = useState<ReadonlySet<string>>(() => loadStringSet(PINNED_SESSIONS_KEY));
 	const [readThrough, setReadThrough] = useState<Readonly<Record<string, string>>>(() =>
 		loadStringRecord(SESSION_READ_THROUGH_KEY),
 	);
 	const [desktopPreferencesReady, setDesktopPreferencesReady] = useState(false);
+	useNativeTranscriptOcclusion(projectContextMenu !== null, projectContextMenuRef);
+	useNativeTranscriptOcclusion(sessionContextMenu !== null, sessionContextMenuRef);
 
 	useEffect(() => {
 		let active = true;
@@ -325,8 +355,11 @@ export function SessionsPanel({
 	}, [activeSessionId, sessions]);
 
 	useEffect(() => {
-		if (sessionContextMenu === null) return;
-		const dismiss = (): void => setSessionContextMenu(null);
+		if (sessionContextMenu === null && projectContextMenu === null) return;
+		const dismiss = (): void => {
+			setSessionContextMenu(null);
+			setProjectContextMenu(null);
+		};
 		const dismissOnEscape = (event: globalThis.KeyboardEvent): void => {
 			if (event.key === "Escape") dismiss();
 		};
@@ -340,7 +373,7 @@ export function SessionsPanel({
 			window.removeEventListener("resize", dismiss);
 			document.removeEventListener("keydown", dismissOnEscape);
 		};
-	}, [sessionContextMenu]);
+	}, [projectContextMenu, sessionContextMenu]);
 
 	const groups = useMemo(
 		() => groupSessionsByProject(sessions, desktopAvailable ? desktopProjects : [], pinnedSessions),
@@ -384,6 +417,19 @@ export function SessionsPanel({
 			setDesktopAction(null);
 		}
 	};
+	const removeProject = async (path: string): Promise<void> => {
+		setDesktopAction(`remove:${path}`);
+		setDesktopError(null);
+		try {
+			await desktopBridge.removeProject(path);
+			setDesktopProjects(await desktopBridge.listProjects());
+		} catch {
+			setDesktopAvailable(desktopBridge.available);
+			setDesktopError("The project could not be removed from the list.");
+		} finally {
+			setDesktopAction(null);
+		}
+	};
 	const markSessionRead = (session: SessionSummary): void => {
 		setReadThrough(current =>
 			current[session.id] === session.modifiedAt ? current : { ...current, [session.id]: session.modifiedAt },
@@ -400,16 +446,27 @@ export function SessionsPanel({
 	const openSessionContextMenu = (event: MouseEvent, session: SessionSummary): void => {
 		if (readOnly) return;
 		event.preventDefault();
-		const menuWidth = 220;
-		const menuHeight = 180;
+		const position = placeContextMenu(event.clientX, event.clientY, 220, 180, window.innerWidth, window.innerHeight);
+		setProjectContextMenu(null);
 		setSessionContextMenu({
 			id: session.id,
 			title: sessionTitle(session),
 			cwd: session.cwd,
 			pinned: pinnedSessions.has(session.id),
 			unread: isSessionUnread(session, readThrough, activeSessionId),
-			x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-			y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+			...position,
+		});
+	};
+	const openProjectContextMenu = (event: MouseEvent, group: ProjectGroup): void => {
+		event.preventDefault();
+		const position = placeContextMenu(event.clientX, event.clientY, 220, 214, window.innerWidth, window.innerHeight);
+		setSessionContextMenu(null);
+		setProjectContextMenu({
+			key: comparableProjectPath(group.path),
+			path: group.path,
+			name: group.name,
+			current: group.desktopProject?.current ?? groups.length === 1,
+			...position,
 		});
 	};
 
@@ -418,7 +475,7 @@ export function SessionsPanel({
 			<div className="sh-sessions-brand">
 				<img className="sh-sessions-mark" src="./public/favicon.svg" alt="" aria-hidden="true" />
 				<div className="sh-sessions-brand-copy">
-					<span className="sh-sessions-brand-name">Oh My Pi</span>
+					<span className="sh-sessions-brand-name">OMP</span>
 					<span className="sh-sessions-brand-status">
 						<span className={`sh-sessions-dot sh-sessions-dot-${phase}`} aria-hidden="true" />
 						{phase}
@@ -459,7 +516,11 @@ export function SessionsPanel({
 					const switchPath = group.desktopProject?.current === false ? group.desktopProject.path : null;
 					return (
 						<section className="sh-project" key={key}>
-							<div className="sh-project-row" data-current={group.desktopProject?.current ? "true" : undefined}>
+							<div
+								className="sh-project-row"
+								data-current={group.desktopProject?.current ? "true" : undefined}
+								onContextMenu={event => openProjectContextMenu(event, group)}
+							>
 								<button
 									type="button"
 									className="sh-project-disclosure"
@@ -620,10 +681,105 @@ export function SessionsPanel({
 					</button>
 				</div>
 			</div>
+			{projectContextMenu !== null &&
+				createPortal(
+					<div
+						ref={projectContextMenuRef}
+						className="sh-context-menu"
+						role="menu"
+						aria-label={`Project actions for ${projectContextMenu.name}`}
+						style={{ left: projectContextMenu.x, top: projectContextMenu.y }}
+						onPointerDown={event => event.stopPropagation()}
+					>
+						{projectContextMenu.current ? (
+							<button
+								autoFocus
+								type="button"
+								role="menuitem"
+								disabled={readOnly || pending}
+								onClick={() => {
+									setProjectContextMenu(null);
+									onNewSession();
+								}}
+							>
+								<Plus size={14} aria-hidden="true" />
+								<span>新建对话</span>
+							</button>
+						) : (
+							<button
+								autoFocus
+								type="button"
+								role="menuitem"
+								disabled={!desktopAvailable || desktopAction !== null}
+								onClick={() => {
+									const { path } = projectContextMenu;
+									setProjectContextMenu(null);
+									void runDesktopAction(`switch:${path}`, () => desktopBridge.switchProject(path));
+								}}
+							>
+								<FolderOpen size={14} aria-hidden="true" />
+								<span>切换到此项目</span>
+							</button>
+						)}
+						<button
+							type="button"
+							role="menuitem"
+							disabled={!desktopAvailable || readOnly || desktopAction !== null}
+							onClick={() => {
+								setRenamingProject(projectContextMenu.key);
+								setProjectContextMenu(null);
+							}}
+						>
+							<Pencil size={14} aria-hidden="true" />
+							<span>重命名项目</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							disabled={!desktopAvailable || desktopAction !== null}
+							onClick={() => {
+								const { path } = projectContextMenu;
+								setProjectContextMenu(null);
+								void runDesktopAction(`reveal-project:${path}`, () => desktopBridge.revealPath(path));
+							}}
+						>
+							<FolderOpen size={14} aria-hidden="true" />
+							<span>在资源管理器中打开</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							onClick={() => {
+								const { path } = projectContextMenu;
+								setProjectContextMenu(null);
+								void copyText(path).catch(() => setDesktopError("无法复制项目路径。"));
+							}}
+						>
+							<Copy size={14} aria-hidden="true" />
+							<span>复制项目路径</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							className="sh-context-menu-danger sh-context-menu-separated"
+							disabled={!desktopAvailable || projectContextMenu.current || readOnly || desktopAction !== null}
+							onClick={() => {
+								const { path } = projectContextMenu;
+								setProjectContextMenu(null);
+								void removeProject(path);
+							}}
+						>
+							<Trash2 size={14} aria-hidden="true" />
+							<span>从项目列表移除</span>
+						</button>
+					</div>,
+					document.body,
+				)}
 			{sessionContextMenu !== null &&
 				createPortal(
 					<div
-						className="sh-session-context-menu"
+						ref={sessionContextMenuRef}
+						className="sh-context-menu"
 						role="menu"
 						aria-label={`Chat actions for ${sessionContextMenu.title}`}
 						style={{ left: sessionContextMenu.x, top: sessionContextMenu.y }}

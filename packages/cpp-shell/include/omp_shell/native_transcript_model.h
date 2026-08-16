@@ -14,6 +14,7 @@ enum class NativeTranscriptRowKind : std::uint8_t {
 	User,
 	Assistant,
 	Reasoning,
+	Plan,
 	Tool,
 	System,
 	Compaction,

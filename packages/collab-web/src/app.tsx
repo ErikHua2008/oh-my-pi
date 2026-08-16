@@ -357,7 +357,11 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 	const autoOpenedRef = useRef(false);
 	const agentsButtonRef = useRef<HTMLButtonElement | null>(null);
 	const railRef = useRef<HTMLElement | null>(null);
-	const railOverlay = narrowViewport && !nativeWindowLayout;
+	// Match the CSS breakpoint exactly. The native host may grow the window
+	// when Agents opens, which naturally flips this media query from overlay to
+	// docked; if the monitor is too narrow it remains an overlay without a
+	// second source of truth fighting the layout.
+	const railOverlay = narrowViewport;
 	const closeRail = useCallback((): void => {
 		setRailOpen(false);
 		requestAnimationFrame(() => agentsButtonRef.current?.focus());
@@ -392,8 +396,8 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 
 	useEffect(() => {
 		if (!nativeWindowLayout) return;
-		void desktopBridge.setAgentRailOpen(railOpen && !railOverlay);
-	}, [nativeWindowLayout, railOpen, railOverlay]);
+		void desktopBridge.setAgentRailOpen(railOpen);
+	}, [nativeWindowLayout, railOpen]);
 
 	// Task-card agent chips drill into the same drawer the rail uses.
 	const agentIds = useMemo(() => new Set(snap.agents.map(a => a.id)), [snap.agents]);

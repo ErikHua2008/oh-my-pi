@@ -93,6 +93,18 @@ OMP_TEST("recording projects deduplicates equivalent Windows paths and caps rece
 	OMP_CHECK(config.last_project == std::optional<std::wstring>(L"C:\\project-11"));
 }
 
+OMP_TEST("removing a recent project clears its alias and advances the last project") {
+	omp::shell::ShellConfig config;
+	config.RecordProject(LR"(C:\Work\first)");
+	config.RecordProject(LR"(D:\Work\second)");
+	OMP_CHECK(config.SetProjectName(LR"(D:\Work\second)", L"Second"));
+	OMP_CHECK(config.RemoveProject(L"d:/work/second/"));
+	OMP_CHECK(config.recent_projects == std::vector<std::wstring>{LR"(C:\Work\first)"});
+	OMP_CHECK(config.last_project == std::optional<std::wstring>(LR"(C:\Work\first)"));
+	OMP_CHECK(!config.ProjectName(LR"(D:\Work\second)").has_value());
+	OMP_CHECK(!config.RemoveProject(LR"(D:\Work\missing)"));
+}
+
 OMP_TEST("corrupt shell config is backed up and replaced with safe defaults in memory") {
 	TemporaryDirectory directory;
 	const auto path = directory.path() / L"config.json";

@@ -38,6 +38,50 @@ OMP_TEST("window layout caps expansion to the monitor work area") {
 		760);
 }
 
+OMP_TEST("agent rail docking follows the Web responsive breakpoint at every DPI") {
+	OMP_CHECK(!ShouldDockAgentRail(1024, 96));
+	OMP_CHECK(ShouldDockAgentRail(1025, 96));
+	OMP_CHECK(!ShouldDockAgentRail(1536, 144));
+	OMP_CHECK(ShouldDockAgentRail(1538, 144));
+	OMP_CHECK(!ShouldDockAgentRail(2049, 192));
+	OMP_CHECK(ShouldDockAgentRail(2050, 192));
+	OMP_CHECK(ShouldDockAgentRail(1025, 0));
+}
+
+OMP_TEST("minimum window track size preserves a usable Codex-style shell") {
+	const SIZE standard = MinimumWindowTrackSizeForDpi(96);
+	OMP_CHECK(standard.cx == 720);
+	OMP_CHECK(standard.cy == 560);
+	const SIZE scaled = MinimumWindowTrackSizeForDpi(144);
+	OMP_CHECK(scaled.cx == 1080);
+	OMP_CHECK(scaled.cy == 840);
+	const SIZE doubled = MinimumWindowTrackSizeForDpi(192);
+	OMP_CHECK(doubled.cx == 1440);
+	OMP_CHECK(doubled.cy == 1120);
+	const SIZE fallback = MinimumWindowTrackSizeForDpi(0);
+	OMP_CHECK(fallback.cx == 720);
+	OMP_CHECK(fallback.cy == 560);
+}
+
+OMP_TEST("native child surfaces leave resize handles only at host window edges") {
+	constexpr RECT client{0, 0, 1096, 820};
+	RequireBounds(InsetBoundsAtWindowEdges(RECT{288, 80, 1096, 650}, client, 6), 288, 80, 1090, 650);
+	RequireBounds(InsetBoundsAtWindowEdges(RECT{144, 80, 952, 650}, client, 6), 144, 80, 952, 650);
+	RequireBounds(InsetBoundsAtWindowEdges(client, client, 6), 6, 6, 1090, 814);
+}
+
+OMP_TEST("every Web resize action maps to a directed Win32 system sizing command") {
+	OMP_CHECK(WindowSizingCommandForAction("resize_left") == (SC_SIZE | WMSZ_LEFT));
+	OMP_CHECK(WindowSizingCommandForAction("resize_right") == (SC_SIZE | WMSZ_RIGHT));
+	OMP_CHECK(WindowSizingCommandForAction("resize_top") == (SC_SIZE | WMSZ_TOP));
+	OMP_CHECK(WindowSizingCommandForAction("resize_bottom") == (SC_SIZE | WMSZ_BOTTOM));
+	OMP_CHECK(WindowSizingCommandForAction("resize_top_left") == (SC_SIZE | WMSZ_TOPLEFT));
+	OMP_CHECK(WindowSizingCommandForAction("resize_top_right") == (SC_SIZE | WMSZ_TOPRIGHT));
+	OMP_CHECK(WindowSizingCommandForAction("resize_bottom_left") == (SC_SIZE | WMSZ_BOTTOMLEFT));
+	OMP_CHECK(WindowSizingCommandForAction("resize_bottom_right") == (SC_SIZE | WMSZ_BOTTOMRIGHT));
+	OMP_CHECK(!WindowSizingCommandForAction("resize_unknown"));
+}
+
 OMP_TEST("frameless resize border remains easy to grab at every DPI") {
 	OMP_CHECK(ResizeBorderThicknessForDpi(8, 96) == 12);
 	OMP_CHECK(ResizeBorderThicknessForDpi(12, 144) == 18);

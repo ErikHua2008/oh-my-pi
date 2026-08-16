@@ -26,6 +26,7 @@ import {
 	shouldFlushAssistantStreamBatch,
 } from "../../lib/stream-presentation";
 import { useSystemTheme } from "../../lib/theme";
+import { isSystemReminder, transcriptToolPresentation } from "../../lib/transcript-presentation";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
@@ -558,6 +559,7 @@ function AssistantBody({
 				);
 				break;
 			case "toolCall": {
+				if (transcriptToolPresentation(block.name) === "hidden") break;
 				const act = active.get(block.id);
 				const result = results.get(block.id);
 				const args = act?.args ?? block.arguments;
@@ -595,6 +597,24 @@ function AssistantBody({
 			)}
 		</>
 	);
+}
+
+function hasPresentableAssistantContent(message: AssistantMessage): boolean {
+	if (message.errorMessage) return true;
+	return message.content.some(block => {
+		switch (block.type) {
+			case "text":
+				return block.text.length > 0;
+			case "thinking":
+				return block.thinking.length > 0;
+			case "redactedThinking":
+				return true;
+			case "toolCall":
+				return transcriptToolPresentation(block.name) !== "hidden";
+			default:
+				return false;
+		}
+	});
 }
 
 interface EntryRowProps {
@@ -657,6 +677,7 @@ const EntryRow = memo(function EntryRow({
 						</Row>
 					);
 				case "assistant":
+					if (!hasPresentableAssistantContent(msg)) return null;
 					return (
 						<Row kind="assistant" speaker="agent" title={entry.timestamp}>
 							<AssistantBody
@@ -692,7 +713,7 @@ const EntryRow = memo(function EntryRow({
 					</Row>
 				);
 			}
-			if (!entry.display) return null;
+			if (!entry.display || isSystemReminder(entry.customType, messageText(entry.content))) return null;
 			return (
 				<Row kind="custom" speaker="system" title={entry.timestamp}>
 					<div className="tr-custom">
@@ -717,17 +738,8 @@ const EntryRow = memo(function EntryRow({
 				</div>
 			);
 		case "model_change":
-			return (
-				<Row kind="marker" speaker="system" title={entry.timestamp}>
-					<span className="tr-marker">model → {entry.model}</span>
-				</Row>
-			);
 		case "thinking_level_change":
-			return (
-				<Row kind="marker" speaker="system" title={entry.timestamp}>
-					<span className="tr-marker">thinking → {entry.thinkingLevel ?? "off"}</span>
-				</Row>
-			);
+			return null;
 		default:
 			// unknown entry types from newer hosts — skip tolerantly
 			return null;
@@ -969,7 +981,9 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	}
 	const tailTools: ActiveTool[] = [];
 	for (const tool of activeTools.values()) {
-		if (!renderedToolIds.has(tool.toolCallId)) tailTools.push(tool);
+		if (!renderedToolIds.has(tool.toolCallId) && transcriptToolPresentation(tool.toolName) !== "hidden") {
+			tailTools.push(tool);
+		}
 	}
 
 	return (

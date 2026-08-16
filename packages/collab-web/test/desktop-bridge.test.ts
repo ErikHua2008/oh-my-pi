@@ -26,6 +26,7 @@ describe("DesktopBridge browser fallback", () => {
 		await expect(desktopBridge.openProject()).resolves.toBeUndefined();
 		await expect(desktopBridge.switchProject("/work/project")).resolves.toBeUndefined();
 		await expect(desktopBridge.renameProject("/work/project", "Project")).resolves.toBeUndefined();
+		await expect(desktopBridge.removeProject("/work/project")).resolves.toBeUndefined();
 		await expect(desktopBridge.revealPath("/work/project")).resolves.toBeUndefined();
 		expect(await desktopBridge.pickAttachments()).toEqual([]);
 		expect(await desktopBridge.checkAttachments(["/work/file.txt"])).toEqual([]);
@@ -45,11 +46,13 @@ describe("DesktopBridge native transcript capability", () => {
 		expect(await bridge.setAgentRailOpen(false)).toBe(true);
 		expect(await bridge.setWindowTheme("light")).toBe(true);
 		expect(await bridge.runWindowAction("toggle_maximize")).toBe(true);
+		expect(await bridge.runWindowAction("resize_bottom_right")).toBe(true);
 		expect(calls).toEqual([
 			{ command: "window_agent_rail", args: { open: true } },
 			{ command: "window_agent_rail", args: { open: false } },
 			{ command: "window_theme", args: { theme: "light" } },
 			{ command: "window_action", args: { action: "toggle_maximize" } },
+			{ command: "window_action", args: { action: "resize_bottom_right" } },
 		]);
 		expect(bridge.available).toBe(false);
 	});
@@ -200,6 +203,7 @@ describe("DesktopBridge Tauri capability probe", () => {
 		await bridge.openProject();
 		await bridge.switchProject("/srv/other");
 		await bridge.renameProject("/srv/other", "Other repo");
+		await bridge.removeProject("/srv/other");
 		await bridge.revealPath("/srv/other");
 		expect(await bridge.loadSessionPreferences()).toEqual({ pinnedSessions: [], sessionReadThrough: {} });
 		await bridge.saveSessionPreferences({
@@ -211,6 +215,7 @@ describe("DesktopBridge Tauri capability probe", () => {
 			{ command: "project_open", args: undefined },
 			{ command: "project_switch", args: { path: "/srv/other" } },
 			{ command: "project_rename", args: { path: "/srv/other", name: "Other repo" } },
+			{ command: "project_remove", args: { path: "/srv/other" } },
 			{ command: "project_reveal", args: { path: "/srv/other" } },
 			{ command: "session_preferences", args: undefined },
 			{
@@ -254,6 +259,7 @@ describe("DesktopBridge Tauri capability probe", () => {
 		expect(bridge.available).toBe(false);
 		await expect(bridge.openProject()).resolves.toBeUndefined();
 		await expect(bridge.switchProject("/work/project")).resolves.toBeUndefined();
+		await expect(bridge.removeProject("/work/project")).resolves.toBeUndefined();
 		expect(await bridge.listProjects()).toEqual([]);
 		expect(calls).toEqual([{ command: "project_list", args: undefined }]);
 	});

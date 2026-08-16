@@ -38,6 +38,17 @@ const MENUS: Readonly<Record<MenuName, readonly MenuItem[]>> = {
 	help: [{ label: "About OMP", action: "about" }],
 };
 
+const RESIZE_HANDLES: readonly { edge: string; action: DesktopWindowAction }[] = [
+	{ edge: "top", action: "resize_top" },
+	{ edge: "right", action: "resize_right" },
+	{ edge: "bottom", action: "resize_bottom" },
+	{ edge: "left", action: "resize_left" },
+	{ edge: "top-left", action: "resize_top_left" },
+	{ edge: "top-right", action: "resize_top_right" },
+	{ edge: "bottom-right", action: "resize_bottom_right" },
+	{ edge: "bottom-left", action: "resize_bottom_left" },
+];
+
 function menuLabel(menu: MenuName): string {
 	return menu[0].toUpperCase() + menu.slice(1);
 }
@@ -76,6 +87,19 @@ export function DesktopFrame({ children, canGoBack = false, onBack }: DesktopFra
 
 	return (
 		<div className="sh-desktop-frame">
+			{RESIZE_HANDLES.map(handle => (
+				<div
+					key={handle.edge}
+					className={`sh-desktop-resize sh-desktop-resize-${handle.edge}`}
+					aria-hidden="true"
+					onPointerDown={event => {
+						if (event.button !== 0) return;
+						event.preventDefault();
+						event.stopPropagation();
+						run(handle.action);
+					}}
+				/>
+			))}
 			<header className="sh-desktop-titlebar">
 				<div className="sh-desktop-nav">
 					<button

@@ -589,42 +589,75 @@
 	text-align: left;
 }
 
-.sh-session-context-menu {
+.sh-context-menu {
 	position: fixed;
 	z-index: 1000;
-	min-width: 176px;
+	width: 220px;
 	padding: 4px;
 	background: var(--bg-raised);
 	border: 1px solid var(--border-strong);
-	border-radius: var(--radius);
+	border-radius: 8px;
 	box-shadow: var(--shadow-pop);
+	color: var(--fg);
 }
 
-.sh-session-context-menu button {
+.sh-context-menu button {
 	display: flex;
 	align-items: center;
 	gap: 8px;
 	width: 100%;
-	min-height: 34px;
-	padding: 6px 10px;
+	height: 34px;
+	padding: 0 9px;
 	color: var(--fg);
 	background: transparent;
 	border: 0;
-	border-radius: var(--radius-sm);
+	border-radius: 5px;
 	font: inherit;
+	font-size: 13px;
 	text-align: left;
+	white-space: nowrap;
 }
 
-.sh-session-context-menu button:hover,
-.sh-session-context-menu button:focus-visible {
-	color: var(--accent);
+.sh-context-menu button:hover,
+.sh-context-menu button:focus-visible {
 	background: var(--bg-hover);
+	outline: none;
 }
 
-.sh-session-context-menu button:disabled {
+.sh-context-menu button:disabled {
 	color: var(--fg-faint);
 	cursor: default;
 	opacity: 0.55;
+}
+
+.sh-context-menu button:disabled:hover,
+.sh-context-menu button:disabled:focus-visible {
+	background: transparent;
+}
+
+.sh-context-menu-separated {
+	position: relative;
+	margin-top: 5px;
+}
+
+.sh-context-menu-separated::before {
+	position: absolute;
+	top: -3px;
+	left: 5px;
+	right: 5px;
+	height: 1px;
+	background: var(--border);
+	content: "";
+	pointer-events: none;
+}
+
+.sh-context-menu button.sh-context-menu-danger:not(:disabled) {
+	color: var(--err);
+}
+
+.sh-context-menu button.sh-context-menu-danger:not(:disabled):hover,
+.sh-context-menu button.sh-context-menu-danger:not(:disabled):focus-visible {
+	background: color-mix(in srgb, var(--err) 10%, transparent);
 }
 
 .sh-sessions-foot {

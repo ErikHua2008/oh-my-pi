@@ -1,7 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { SessionSummary } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SessionsPanel, groupSessionsByProject, isSessionUnread } from "../src/components/sessions/SessionsPanel";
+import {
+	SessionsPanel,
+	groupSessionsByProject,
+	isSessionUnread,
+	placeContextMenu,
+} from "../src/components/sessions/SessionsPanel";
 import type { ControlSnapshot } from "../src/lib/control-client";
 
 function session(id: string, cwd: string, modifiedAt: string, title = id): SessionSummary {
@@ -84,6 +89,11 @@ describe("SessionsPanel project grouping", () => {
 });
 
 describe("SessionsPanel session actions", () => {
+	it("keeps context menus inside every viewport edge", () => {
+		expect(placeContextMenu(900, 700, 220, 214, 960, 720)).toEqual({ x: 732, y: 498 });
+		expect(placeContextMenu(-20, -10, 220, 214, 960, 720)).toEqual({ x: 8, y: 8 });
+	});
+
 	it("reports unread only after a known session advances beyond its read watermark", () => {
 		const item = { ...session("chat", "/work/project", "2026-08-05T09:00:00.000Z"), messageCount: 2 };
 		expect(isSessionUnread(item, {})).toBe(false);

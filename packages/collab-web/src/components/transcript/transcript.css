@@ -10,7 +10,7 @@
 	height: 100%;
 	overflow-x: hidden;
 	overflow-y: auto;
-	padding: 24px 0 176px;
+	padding: 24px 24px 176px;
 	color: var(--fg);
 	font-family: var(--font-ui);
 	font-size: 14px;
@@ -461,6 +461,67 @@
 	background: var(--bg-inset);
 }
 
+.tr-plan-card {
+	width: min(100%, 520px);
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--bg-subtle);
+	font-family: var(--font-ui);
+}
+
+.tr-plan-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 6px;
+	color: var(--fg-muted);
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.tr-plan-head > :last-child {
+	color: var(--fg-faint);
+	font-variant-numeric: tabular-nums;
+	font-weight: 500;
+}
+
+.tr-plan-item,
+.tr-plan-complete {
+	display: flex;
+	gap: 7px;
+	min-width: 0;
+	color: var(--fg-muted);
+	font-size: 12px;
+	line-height: 1.45;
+}
+
+.tr-plan-item > :first-child {
+	flex: none;
+	width: 12px;
+	color: var(--fg-faint);
+	text-align: center;
+}
+
+.tr-plan-item > :last-child {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.tr-plan-item--current {
+	color: var(--fg);
+}
+
+.tr-plan-item--current > :first-child {
+	color: var(--accent);
+}
+
+.tr-plan-complete {
+	color: var(--ok);
+}
+
 /* ---- markdown ---- */
 
 /* Keep Korean/CJK words intact where possible while still breaking long URLs
@@ -692,7 +753,7 @@
 
 @media (max-width: 720px) {
 	.tr-root:not(.tr-root--compact) {
-		padding: 20px 0 160px;
+		padding: 20px 12px 160px;
 	}
 
 	.tr-row {

@@ -58,6 +58,30 @@ void ShellConfig::RecordProject(std::wstring project_directory) {
 	last_project = recent_projects.front();
 }
 
+bool ShellConfig::RemoveProject(std::wstring_view project_directory) {
+	const std::wstring comparable = ComparableProjectPath(project_directory);
+	const auto original_size = recent_projects.size();
+	recent_projects.erase(std::remove_if(recent_projects.begin(),
+			recent_projects.end(),
+			[&comparable](const std::wstring& existing) {
+				return ComparableProjectPath(existing) == comparable;
+			}),
+		recent_projects.end());
+	for (auto iterator = project_names.begin(); iterator != project_names.end();) {
+		if (ComparableProjectPath(iterator->first) == comparable) {
+			iterator = project_names.erase(iterator);
+		} else {
+			++iterator;
+		}
+	}
+	if (last_project && ComparableProjectPath(*last_project) == comparable) {
+		last_project = recent_projects.empty()
+			? std::nullopt
+			: std::optional<std::wstring>(recent_projects.front());
+	}
+	return recent_projects.size() != original_size;
+}
+
 std::optional<std::wstring> ShellConfig::ProjectName(std::wstring_view project_directory) const {
 	const std::wstring comparable = ComparableProjectPath(project_directory);
 	for (const auto& [path, name] : project_names) {
