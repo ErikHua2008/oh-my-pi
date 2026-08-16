@@ -13,6 +13,7 @@ import {
 	Sun,
 } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { blockNativeSurfaces } from "../../lib/native-surface-visibility";
 import { type ThemePreference, useThemePreference } from "../../lib/theme";
 
 export interface SettingsModalProps {
@@ -65,6 +66,7 @@ export function SettingsModal({
 	const choose = (pref: ThemePreference): void => setPreference(pref);
 
 	useEffect(() => {
+		const releaseNativeSurfaces = blockNativeSurfaces();
 		const previousOverflow = document.body.style.overflow;
 		document.body.style.overflow = "hidden";
 		surfaceRef.current?.focus();
@@ -77,6 +79,7 @@ export function SettingsModal({
 		document.addEventListener("keydown", closeOnEscape);
 
 		return () => {
+			releaseNativeSurfaces();
 			document.removeEventListener("keydown", closeOnEscape);
 			document.body.style.overflow = previousOverflow;
 			returnFocusRef.current?.focus();
