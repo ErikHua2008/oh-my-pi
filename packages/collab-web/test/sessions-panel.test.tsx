@@ -109,6 +109,22 @@ describe("SessionsPanel project grouping", () => {
 
 		expect(groups[0]?.sessions.map(item => item.id)).toEqual(["pinned", "newest"]);
 	});
+
+	it("keeps cross-project sessions under their recorded project while another project is current", () => {
+		const groups = groupSessionsByProject(
+			[
+				session("current-chat", "C:\\work\\current", "2026-08-04T09:00:00.000Z"),
+				session("imported-chat", "C:\\work\\test", "2026-08-05T09:00:00.000Z", "Screen"),
+			],
+			[
+				{ path: "C:\\work\\current", name: "current", current: true },
+				{ path: "C:\\work\\test", name: "test", current: false },
+			],
+		);
+
+		expect(groups.find(group => group.name === "current")?.sessions.map(item => item.id)).toEqual(["current-chat"]);
+		expect(groups.find(group => group.name === "test")?.sessions.map(item => item.id)).toEqual(["imported-chat"]);
+	});
 });
 
 describe("Codex import conversation matching", () => {
@@ -179,6 +195,16 @@ describe("SessionsPanel session actions", () => {
 		expect(html).toContain('aria-current="page" title="Open Active session"');
 		expect(html).not.toContain('aria-current="page" title="Open Other session"');
 		expect(html).toContain('title="Rename session Active session"');
+	});
+
+	it("uses the project label to expand or collapse instead of switching and restarting the core", () => {
+		const html = renderPanel(
+			snapshot([session("chat", "/work/test", "2026-08-05T09:00:00.000Z", "Screen")]),
+		);
+
+		expect(html).toContain('class="sh-project-label sh-project-toggle"');
+		expect(html).toContain('title="Collapse test"');
+		expect(html).not.toContain("Switching to test");
 	});
 
 	it("renders read-only session rows without resume, create, or drop controls", () => {

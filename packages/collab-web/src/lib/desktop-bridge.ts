@@ -14,6 +14,8 @@ export interface DesktopAttachmentStatus {
 	available: boolean;
 }
 
+export type DesktopAttachmentKind = "image" | "document";
+
 export type DesktopNativeTranscriptKind =
 	| "user"
 	| "assistant"
@@ -132,7 +134,11 @@ export interface DesktopBridge {
 	renameProject(path: string, name: string): Promise<void>;
 	removeProject(path: string): Promise<void>;
 	revealPath(path: string): Promise<void>;
-	pickAttachments(): Promise<readonly string[]>;
+	pickAttachments(kind?: DesktopAttachmentKind): Promise<readonly string[]>;
+	/** Launch the Windows screen snip overlay; the result remains in the clipboard. */
+	startScreenshot(): Promise<boolean>;
+	/** Receive absolute host paths from native shell drag-and-drop. */
+	subscribeDroppedFiles(handler: (paths: readonly string[]) => void): () => void;
 	checkAttachments(paths: readonly string[]): Promise<readonly DesktopAttachmentStatus[]>;
 	loadSessionPreferences(): Promise<DesktopSessionPreferences | null>;
 	saveSessionPreferences(preferences: DesktopSessionPreferences): Promise<void>;
@@ -247,8 +253,14 @@ function browserBridge(): DesktopBridge {
 		async renameProject(_path: string, _name: string) {},
 		async removeProject(_path: string) {},
 		async revealPath(_path: string) {},
-		async pickAttachments() {
+		async pickAttachments(_kind?: DesktopAttachmentKind) {
 			return [];
+		},
+		async startScreenshot() {
+			return false;
+		},
+		subscribeDroppedFiles(_handler: (paths: readonly string[]) => void) {
+			return () => {};
 		},
 		async checkAttachments(_paths: readonly string[]) {
 			return [];
@@ -429,16 +441,45 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 				throw error;
 			}
 		},
-		async pickAttachments() {
+		async pickAttachments(kind: DesktopAttachmentKind = "document") {
 			if (localFileAuthorization === "denied") return [];
 			try {
-				const paths = await invoke<string[]>("attachment_pick");
+				const paths = await invoke<string[]>("attachment_pick", { kind });
 				localFileAuthorization = "authorized";
 				return paths;
 			} catch (error) {
 				localFileAuthorization = "denied";
 				throw error;
 			}
+		},
+		async startScreenshot() {
+			if (localFileAuthorization === "denied") return false;
+			try {
+				await invoke<unknown>("screenshot_start");
+				localFileAuthorization = "authorized";
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		subscribeDroppedFiles(handler: (paths: readonly string[]) => void) {
+			if (typeof window === "undefined") return () => {};
+			const parse = (value: unknown): void => {
+				if (value === null || typeof value !== "object") return;
+				const record = value as Record<string, unknown>;
+				if (record.channel !== "omp-files-dropped" || !Array.isArray(record.paths)) return;
+				const paths = record.paths.filter((entry): entry is string => typeof entry === "string");
+				if (paths.length > 0) handler(paths);
+			};
+			const webview = (window as TauriWindow).chrome?.webview;
+			if (webview !== undefined) {
+				const listener = (event: MessageEvent<unknown>): void => parse(event.data);
+				webview.addEventListener("message", listener);
+				return () => webview.removeEventListener("message", listener);
+			}
+			const listener = (event: Event): void => parse((event as CustomEvent<unknown>).detail);
+			window.addEventListener("omp-files-dropped", listener);
+			return () => window.removeEventListener("omp-files-dropped", listener);
 		},
 		async checkAttachments(paths: readonly string[]) {
 			if (localFileAuthorization === "denied" || paths.length === 0) return [];

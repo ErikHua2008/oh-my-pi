@@ -5,8 +5,12 @@
  * `queuedMessageCount` from the agent-core queue for host and guest UI state.
  */
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
+import { ManagedMediaStore } from "@oh-my-pi/pi-coding-agent/collab/managed-media-store";
 import {
 	COLLAB_PROTO,
 	type CollabFrame,
@@ -243,5 +247,59 @@ describe("collab mid-turn guest prompts", () => {
 		expect(prompt.content).toContain(JSON.stringify(filePath));
 		expect(prompt.content).toContain("not embedded");
 		expect(prompt.options).toEqual({ streamingBehavior: "steer", queueChipText: "Summarize the report" });
+	});
+
+	it("persists clipboard pixels through Core and replies with only a managed path plus thumbnail", async () => {
+		const relay = startTestRelay();
+		cleanups.push(relay.stop);
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-collab-media-"));
+		cleanups.push(() => fs.rm(root, { recursive: true, force: true }));
+		const harness = makeStreamingHostContext();
+		const host = new CollabHost(harness.ctx, {
+			managedMediaStore: new ManagedMediaStore({
+				mediaDir: path.join(root, "media", "objects"),
+				now: () => new Date(2026, 7, 17, 12, 0, 0),
+			}),
+		});
+		await host.start(relay.url);
+		cleanups.push(() => host.stop("test done"));
+
+		const guest = await joinAsGuest(host.link, "desktop");
+		cleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+		const split = Math.ceil(data.length / 2);
+		guest.socket.send({
+			t: "media-import",
+			reqId: 41,
+			data: data.slice(split),
+			mimeType: "image/png",
+			name: "clipboard.png",
+			chunkIndex: 1,
+			chunkCount: 2,
+		});
+		guest.socket.send({
+			t: "media-import",
+			reqId: 41,
+			data: data.slice(0, split),
+			mimeType: "image/png",
+			name: "clipboard.png",
+			chunkIndex: 0,
+			chunkCount: 2,
+		});
+		let imported: Extract<CollabFrame, { t: "media-imported" }> | undefined;
+		for (let index = 0; index < 10 && !imported; ++index) {
+			const frame = await guest.nextFrame();
+			if (frame.t === "media-imported") imported = frame;
+		}
+		if (!imported?.media) throw new Error(imported?.error ?? "expected imported media");
+
+		expect(imported.reqId).toBe(41);
+		expect(imported.media.file.path).toContain(path.join("media", "objects", "2026", "2026-08"));
+		expect(await fs.readFile(imported.media.file.path)).toEqual(Buffer.from(data, "base64"));
+		expect(imported.media.thumbnail?.data.length).toBeGreaterThan(0);
+		expect(imported).not.toHaveProperty("data");
 	});
 });

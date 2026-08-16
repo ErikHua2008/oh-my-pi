@@ -31,6 +31,8 @@ describe("DesktopBridge browser fallback", () => {
 		await expect(desktopBridge.removeProject("/work/project")).resolves.toBeUndefined();
 		await expect(desktopBridge.revealPath("/work/project")).resolves.toBeUndefined();
 		expect(await desktopBridge.pickAttachments()).toEqual([]);
+		expect(await desktopBridge.startScreenshot()).toBe(false);
+		expect(desktopBridge.subscribeDroppedFiles(() => {})).toBeFunction();
 		expect(await desktopBridge.checkAttachments(["/work/file.txt"])).toEqual([]);
 		expect(await desktopBridge.loadSessionPreferences()).toBeNull();
 		await expect(
@@ -152,6 +154,7 @@ describe("DesktopBridge Tauri capability probe", () => {
 		const invoke: TauriInvoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
 			calls.push({ command, args });
 			if (command === "attachment_pick") return ["C:\\work\\a.txt", "C:\\work\\b.png"] as T;
+			if (command === "screenshot_start") return null as T;
 			if (command === "attachment_status") {
 				const paths = args?.paths as readonly string[];
 				return paths.map(path => ({ path, available: !path.endsWith("64.txt") })) as T;
@@ -161,15 +164,22 @@ describe("DesktopBridge Tauri capability probe", () => {
 		const bridge = createDesktopBridge(invoke);
 
 		expect(bridge.localFilesAvailable).toBe(true);
-		expect(await bridge.pickAttachments()).toEqual(["C:\\work\\a.txt", "C:\\work\\b.png"]);
+		expect(await bridge.pickAttachments("image")).toEqual(["C:\\work\\a.txt", "C:\\work\\b.png"]);
+		expect(await bridge.startScreenshot()).toBe(true);
 		const paths = Array.from({ length: 65 }, (_, index) => `C:\\work\\${index}.txt`);
 		const statuses = await bridge.checkAttachments(paths);
 
 		expect(statuses).toHaveLength(65);
 		expect(statuses.at(-1)).toEqual({ path: "C:\\work\\64.txt", available: false });
-		expect(calls.map(call => call.command)).toEqual(["attachment_pick", "attachment_status", "attachment_status"]);
-		expect(calls[1]?.args?.paths).toHaveLength(64);
-		expect(calls[2]?.args?.paths).toHaveLength(1);
+		expect(calls.map(call => call.command)).toEqual([
+			"attachment_pick",
+			"screenshot_start",
+			"attachment_status",
+			"attachment_status",
+		]);
+		expect(calls[0]?.args).toEqual({ kind: "image" });
+		expect(calls[2]?.args?.paths).toHaveLength(64);
+		expect(calls[3]?.args?.paths).toHaveLength(1);
 	});
 
 	it("disables only local-file commands when an older native host rejects them", async () => {

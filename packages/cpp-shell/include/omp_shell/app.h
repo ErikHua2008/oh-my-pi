@@ -37,7 +37,7 @@ private:
 	void ShowTrayMenu();
 	void InitializeWebView();
 	void PickProject();
-	[[nodiscard]] std::vector<std::wstring> PickAttachments() const;
+	[[nodiscard]] std::vector<std::wstring> PickAttachments(std::string_view kind) const;
 	void SwitchProject(std::wstring project_directory);
 	void HandleCoreEvent(std::unique_ptr<CoreEvent> event);
 	void HandleWebMessage(std::wstring message);

@@ -789,6 +789,11 @@ export function getBlobsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "blobs", "data");
 }
 
+/** Get the durable managed-media root (~/.omp/agent/media/objects). */
+export function getManagedMediaDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, path.join("media", "objects"), "data");
+}
+
 /** Get the custom themes directory (~/.omp/agent/themes). */
 export function getCustomThemesDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "themes");

@@ -171,13 +171,6 @@ export function groupSessionsByProject(
 		else groups.set(key, { path, sessions: [session] });
 	}
 
-	const currentProject = desktopProjects.find(project => project.current);
-	if (currentProject && groups.size > 0) {
-		const currentKey = comparableProjectPath(currentProject.path);
-		const sessionsInCurrentCore = Array.from(groups.values()).flatMap(group => group.sessions);
-		groups.clear();
-		groups.set(currentKey, { path: currentProject.path, sessions: sessionsInCurrentCore });
-	}
 	for (const project of desktopProjects) {
 		const path = normalizeProjectPath(project.path);
 		const key = comparableProjectPath(path);
@@ -453,7 +446,7 @@ export function SessionsPanel({
 	const openSessionContextMenu = (event: MouseEvent, session: SessionSummary): void => {
 		if (readOnly) return;
 		event.preventDefault();
-		const position = placeContextMenu(event.clientX, event.clientY, 220, 180, window.innerWidth, window.innerHeight);
+		const position = placeContextMenu(event.clientX, event.clientY, 220, 214, window.innerWidth, window.innerHeight);
 		setProjectContextMenu(null);
 		setSessionContextMenu({
 			id: session.id,
@@ -538,7 +531,6 @@ export function SessionsPanel({
 					const key = comparableProjectPath(group.path);
 					const collapsed = collapsedProjects.has(key);
 					const sessionsId = `sh-project-${encodeURIComponent(key).replaceAll("%", "-")}`;
-					const switchPath = group.desktopProject?.current === false ? group.desktopProject.path : null;
 					return (
 						<section className="sh-project" key={key}>
 							<div
@@ -563,26 +555,18 @@ export function SessionsPanel({
 										onSave={name => renameProject(group.path, name)}
 										onCancel={() => setRenamingProject(null)}
 									/>
-								) : desktopAvailable && switchPath !== null ? (
+								) : (
 									<button
 										type="button"
-										className="sh-project-label sh-project-switch"
-										title={`Switch to ${group.path}`}
-										disabled={desktopAction !== null}
-										onClick={() =>
-											void runDesktopAction(switchPath, () => desktopBridge.switchProject(switchPath))
-										}
+										className="sh-project-label sh-project-toggle"
+										aria-expanded={!collapsed}
+										aria-controls={sessionsId}
+										title={collapsed ? `Expand ${group.name}` : `Collapse ${group.name}`}
+										onClick={() => toggleProject(group.path)}
 									>
-										<span className="sh-project-name">
-											{desktopAction === switchPath ? `Switching to ${group.name}…` : group.name}
-										</span>
-										<span className="sh-project-path">{group.path}</span>
-									</button>
-								) : (
-									<div className="sh-project-label" title={group.path}>
 										<span className="sh-project-name">{group.name}</span>
 										<span className="sh-project-path">{group.path}</span>
-									</div>
+									</button>
 								)}
 								{desktopAvailable && !readOnly && renamingProject !== key && (
 									<button
@@ -870,6 +854,18 @@ export function SessionsPanel({
 						>
 							<Copy size={14} aria-hidden="true" />
 							<span>复制工作目录</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							onClick={() => {
+								const { id } = sessionContextMenu;
+								setSessionContextMenu(null);
+								void copyText(id).catch(() => setDesktopError("无法复制会话 ID。"));
+							}}
+						>
+							<Copy size={14} aria-hidden="true" />
+							<span>复制会话 ID</span>
 						</button>
 						<button
 							type="button"

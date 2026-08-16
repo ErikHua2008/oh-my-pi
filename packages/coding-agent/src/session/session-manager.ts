@@ -2560,9 +2560,14 @@ export class SessionManager {
 	 * `cwd`, writing only the session header. The returned path can be passed to
 	 * `setSessionFile` / `AgentSession.switchSession` when a caller explicitly
 	 * needs a brand-new persisted session at a cwd-derived path.
+	 * @param sessionDir Optional explicit destination for isolated callers such
+	 *   as tests; normal callers use the cwd-derived default.
 	 */
-	static createEmptySessionFile(cwd: string, storage: SessionStorage = new FileSessionStorage()): string {
-		const sessionDir = SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+	static createEmptySessionFile(
+		cwd: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		sessionDir = SessionManager.getDefaultSessionDir(cwd, undefined, storage),
+	): string {
 		const id = mintSessionId();
 		const timestamp = nowIso();
 		const header: SessionHeader = {

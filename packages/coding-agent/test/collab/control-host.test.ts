@@ -371,6 +371,7 @@ describe("control room + session registry (multi-session core)", () => {
 
 	it("lists and imports a Codex conversation into its original project with a fresh OMP id", async () => {
 		harness = await setupHarness();
+		const { created } = spyOnCreateAgentSession();
 		const sourceProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-project-"));
 		const sourcePath = path.join(harness.sessionDir, "codex-rollout.jsonl");
 		await fs.writeFile(sourcePath, "source stays untouched\n");
@@ -440,12 +441,84 @@ describe("control room + session registry (multi-session core)", () => {
 		expect(imported.session).toMatchObject({
 			cwd: sourceProject,
 			title: "Imported from Codex",
-			requiresProjectSwitch: true,
+			requiresProjectSwitch: false,
 		});
+		expect(created).toHaveLength(1);
+		expect(created[0]?.session.sessionManager.getCwd()).toBe(sourceProject);
 		const targetDir = SessionManager.getDefaultSessionDir(sourceProject, path.join(harness.sessionDir, "agent"));
 		const targetFiles = await fs.readdir(targetDir);
 		expect(targetFiles.some(file => file.includes(imported.session.id) && file.endsWith(".jsonl"))).toBe(true);
 		expect(await fs.readFile(sourcePath, "utf8")).toBe("source stays untouched\n");
+
+		guest.socket.send({ t: "ctrl-resume", id: imported.session.id });
+		const resumed = await guest.nextFrame(
+			frame => frame.t === "ctrl-session" && frame.op === "resumed" && frame.id === imported.session.id,
+		);
+		if (resumed.t !== "ctrl-session") throw new Error(`expected ctrl-session, got ${resumed.t}`);
+		expect(resumed.link).toBeString();
+	});
+
+	it("lists and resumes a persisted session from another project without restarting the core", async () => {
+		harness = await setupHarness();
+		const { created } = spyOnCreateAgentSession();
+		const otherProject = await fs.mkdtemp(path.join(harness.sessionDir, "existing-project-"));
+		const otherSessionDir = SessionManager.getDefaultSessionDir(otherProject, path.join(harness.sessionDir, "agent"));
+		const otherSessionId = "existing-cross-project-session";
+		const otherSessionPath = path.join(otherSessionDir, `2026-08-16T00-00-00-000Z_${otherSessionId}.jsonl`);
+		await fs.writeFile(
+			otherSessionPath,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: otherSessionId,
+				timestamp: "2026-08-16T00:00:00.000Z",
+				cwd: otherProject,
+				title: "Existing imported chat",
+			})}\n`,
+		);
+
+		const listed = await harness.registry.list();
+		expect(listed.find(session => session.id === otherSessionId)).toMatchObject({
+			cwd: otherProject,
+			title: "Existing imported chat",
+			running: false,
+		});
+		await harness.registry.renameSession(otherSessionId, "Renamed cross-project chat");
+		expect((await harness.registry.list()).find(session => session.id === otherSessionId)?.title).toBe(
+			"Renamed cross-project chat",
+		);
+
+		const resumed = await harness.registry.resumeSession(otherSessionId);
+		expect(resumed.id).toBe(otherSessionId);
+		expect(resumed.link).toBeString();
+		expect(created).toHaveLength(1);
+		expect(created[0]?.session.sessionManager.getCwd()).toBe(otherProject);
+	});
+
+	it("does not show a disk-only session whose project directory no longer exists", async () => {
+		harness = await setupHarness();
+		const removedProject = await fs.mkdtemp(path.join(harness.sessionDir, "removed-project-"));
+		const removedSessionDir = SessionManager.getDefaultSessionDir(
+			removedProject,
+			path.join(harness.sessionDir, "agent"),
+		);
+		const removedSessionId = "removed-project-session";
+		const removedSessionPath = path.join(removedSessionDir, `2026-08-16T00-00-00-000Z_${removedSessionId}.jsonl`);
+		await fs.writeFile(
+			removedSessionPath,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: removedSessionId,
+				timestamp: "2026-08-16T00:00:00.000Z",
+				cwd: removedProject,
+				title: "Stale temporary chat",
+			})}\n`,
+		);
+		await fs.rm(removedProject, { recursive: true, force: true });
+
+		const listed = await harness.registry.list();
+		expect(listed.some(session => session.id === removedSessionId)).toBe(false);
 	});
 
 	it("keeps an untitled draft out of the sidebar until its first message persists", async () => {

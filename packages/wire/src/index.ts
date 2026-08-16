@@ -46,6 +46,21 @@ export interface LocalFileReference {
 	name: string;
 }
 
+/** Result of persisting a pathless clipboard/screenshot image on the host. */
+export interface ManagedImageReference {
+	file: LocalFileReference;
+	/** SHA-256 content id; useful for diagnostics and future thumbnail caches. */
+	imageId: string;
+	mimeType: string;
+	/** Small, ephemeral preview. It is never written into the session journal. */
+	thumbnail?: ImageContent;
+}
+
+/** Managed clipboard/screenshot upload bounds shared by desktop guest and Core. */
+export const MANAGED_IMAGE_MAX_BYTES = 24 * 1024 * 1024;
+export const MANAGED_IMAGE_MAX_BASE64_CHARS = Math.ceil((MANAGED_IMAGE_MAX_BYTES * 4) / 3) + 4;
+export const MANAGED_IMAGE_CHUNK_CHARS = 512 * 1024;
+
 export interface ThinkingContent {
 	type: "thinking";
 	thinking: string;
@@ -380,6 +395,17 @@ export type GuestFrame =
 	| { t: "fetch-history"; reqId: number; beforeId: string; limit: number }
 	/** Fetch one image exposed through an `ImageContent.imageId`. */
 	| { t: "fetch-image"; reqId: number; imageId: string; variant: ImageVariant }
+	/** Persist a pathless clipboard/screenshot image in the host media library. */
+	| {
+			t: "media-import";
+			reqId: number;
+			data: string;
+			mimeType: string;
+			name?: string;
+			/** Zero-based chunk position; each frame stays well below relay limits. */
+			chunkIndex: number;
+			chunkCount: number;
+	  }
 	/** Request the available models for the session room (targeted reply: `model-list` host frame). */
 	| { t: "model-list" }
 	/** Switch the session model; success is broadcast to all guests through the regular `state` frame. */
@@ -438,6 +464,8 @@ export type HostFrame =
 			mimeType?: string;
 			error?: string;
 	  }
+	/** Targeted result of a `media-import` request. */
+	| { t: "media-imported"; reqId: number; media?: ManagedImageReference; error?: string }
 	/** Targeted reply to `model-list`. */
 	| { t: "model-list"; models: WireModel[] }
 	| { t: "bye"; reason: string }
@@ -528,8 +556,10 @@ export type SessionStatus = "complete" | "interrupted" | "aborted" | "error" | "
  *   lazily; history-paging guests receive a bounded tail snapshot and request
  *   older entries by stable id. Guests omitting either capability retain the
  *   full legacy snapshot behavior.
+ * - `6`: writable guests can persist pathless clipboard/screenshot images in
+ *   the host media library and keep only the returned path reference in chat.
  */
-export const COLLAB_PROTO = 5;
+export const COLLAB_PROTO = 6;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";

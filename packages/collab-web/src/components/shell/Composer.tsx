@@ -1,11 +1,13 @@
 import type { LocalFileReference } from "@oh-my-pi/pi-wire";
-import { ArrowUp, File, Folder, Paperclip, SendHorizontal, Square, X } from "lucide-react";
-import type { KeyboardEvent, ReactNode, RefObject } from "react";
+import { MANAGED_IMAGE_MAX_BYTES } from "@oh-my-pi/pi-wire";
+import { ArrowUp, File, FileUp, Folder, ImagePlus, Pencil, Scissors, SendHorizontal, Square, X } from "lucide-react";
+import type { ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { GuestClient, GuestSnapshot } from "../../lib/client";
 import { type DesktopBridge, desktopBridge as defaultDesktopBridge } from "../../lib/desktop-bridge";
 import { shortenPath } from "../../lib/format";
 import { ModelPicker } from "./ModelPicker";
+import { ScreenshotAnnotator } from "./ScreenshotAnnotator";
 import { ThinkingPicker } from "./ThinkingPicker";
 
 export interface ComposerProps {
@@ -25,6 +27,22 @@ const MAX_ROWS = 8;
 
 interface DraftLocalFile extends LocalFileReference {
 	available: boolean;
+	type: "image" | "document";
+	preview?: string;
+	editBlob?: Blob;
+}
+
+interface PendingAnnotation {
+	image: Blob;
+	replacePath?: string;
+}
+
+const IMAGE_EXTENSIONS = new Set(["bmp", "gif", "jpeg", "jpg", "png", "tif", "tiff", "webp"]);
+const MAX_DRAFT_ATTACHMENTS = 32;
+
+function isImagePath(path: string): boolean {
+	const match = /\.([^.\\/]+)$/.exec(path);
+	return match !== null && IMAGE_EXTENSIONS.has(match[1]?.toLocaleLowerCase() ?? "");
 }
 
 function localFileName(path: string): string {
@@ -35,6 +53,27 @@ function localFileName(path: string): string {
 function comparableLocalPath(path: string): string {
 	const normalized = path.replaceAll("\\", "/");
 	return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//") ? normalized.toLocaleLowerCase() : normalized;
+}
+
+function blobBase64(image: Blob): Promise<string> {
+	const { promise, resolve, reject } = Promise.withResolvers<string>();
+	const reader = new FileReader();
+	reader.onerror = () => reject(new Error("unable to read clipboard image"));
+	reader.onload = () => {
+		const result = reader.result;
+		if (typeof result !== "string") {
+			reject(new Error("unable to read clipboard image"));
+			return;
+		}
+		const comma = result.indexOf(",");
+		if (comma < 0) {
+			reject(new Error("invalid clipboard image"));
+			return;
+		}
+		resolve(result.slice(comma + 1));
+	};
+	reader.readAsDataURL(image);
+	return promise;
 }
 
 function autosize(el: HTMLTextAreaElement | null): void {
@@ -159,7 +198,11 @@ export function Composer({
 	const [text, setText] = useState(prefill ?? "");
 	const [localFiles, setLocalFiles] = useState<readonly DraftLocalFile[]>([]);
 	const [attachmentError, setAttachmentError] = useState<string | null>(null);
+	const [attachmentHint, setAttachmentHint] = useState<string | null>(null);
 	const [attachmentBusy, setAttachmentBusy] = useState(false);
+	const [dragActive, setDragActive] = useState(false);
+	const [screenshotPending, setScreenshotPending] = useState(false);
+	const [annotation, setAnnotation] = useState<PendingAnnotation | null>(null);
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 
@@ -195,32 +238,151 @@ export function Composer({
 		});
 	}, [prefill]);
 
-	const pickAttachments = useCallback(async (): Promise<void> => {
-		setAttachmentBusy(true);
+	const addLocalPaths = useCallback((paths: readonly string[], requestedType?: "image" | "document"): void => {
+		setLocalFiles(current => {
+			const seen = new Set(current.map(file => comparableLocalPath(file.path)));
+			const additions: DraftLocalFile[] = [];
+			for (const path of paths) {
+				if (current.length + additions.length >= MAX_DRAFT_ATTACHMENTS) break;
+				const key = comparableLocalPath(path);
+				if (seen.has(key)) continue;
+				seen.add(key);
+				additions.push({
+					kind: "local-file",
+					path,
+					name: localFileName(path),
+					available: true,
+					type: requestedType === "image" || isImagePath(path) ? "image" : "document",
+				});
+			}
+			return additions.length > 0 ? [...current, ...additions] : current;
+		});
 		setAttachmentError(null);
-		try {
-			const paths = await desktop.pickAttachments();
-			setLocalFiles(current => {
-				const seen = new Set(current.map(file => comparableLocalPath(file.path)));
-				const additions: DraftLocalFile[] = [];
-				for (const path of paths) {
-					const key = comparableLocalPath(path);
-					if (seen.has(key)) continue;
-					seen.add(key);
-					additions.push({ kind: "local-file", path, name: localFileName(path), available: true });
-				}
-				return additions.length > 0 ? [...current, ...additions] : current;
-			});
-		} catch {
-			setAttachmentError("The native file picker is unavailable.");
-		} finally {
-			setAttachmentBusy(false);
+		setAttachmentHint(null);
+	}, []);
+
+	useEffect(
+		() => desktop.subscribeDroppedFiles(paths => canPrompt && addLocalPaths(paths)),
+		[addLocalPaths, canPrompt, desktop],
+	);
+
+	useEffect(() => {
+		if (!screenshotPending) return;
+		const timer = setTimeout(() => {
+			setScreenshotPending(false);
+			setAttachmentHint(current => (current?.startsWith("截图完成后") ? null : current));
+		}, 120_000);
+		return () => clearTimeout(timer);
+	}, [screenshotPending]);
+
+	const pickAttachments = useCallback(
+		async (kind: "image" | "document"): Promise<void> => {
+			setAttachmentBusy(true);
+			setAttachmentError(null);
+			setAttachmentHint(null);
+			try {
+				addLocalPaths(await desktop.pickAttachments(kind), kind);
+			} catch {
+				setAttachmentError("无法打开本机文件选择器。");
+			} finally {
+				setAttachmentBusy(false);
+			}
+		},
+		[addLocalPaths, desktop],
+	);
+
+	const importManagedImage = useCallback(
+		async (image: Blob, name: string, replacePath?: string): Promise<void> => {
+			if (image.size > MANAGED_IMAGE_MAX_BYTES) {
+				setAttachmentError(`剪贴板图片不能超过 ${MANAGED_IMAGE_MAX_BYTES / 1024 / 1024} MB。`);
+				return;
+			}
+			if (!replacePath && localFiles.length >= MAX_DRAFT_ATTACHMENTS) {
+				setAttachmentError(`一次最多引用 ${MAX_DRAFT_ATTACHMENTS} 个文件。`);
+				return;
+			}
+			setAttachmentBusy(true);
+			setAttachmentError(null);
+			setAttachmentHint(null);
+			try {
+				const media = await client.importManagedImage(await blobBase64(image), image.type || "image/png", name);
+				const preview = media.thumbnail
+					? `data:${media.thumbnail.mimeType};base64,${media.thumbnail.data}`
+					: undefined;
+				setLocalFiles(current => {
+					const withoutReplaced = replacePath ? current.filter(file => file.path !== replacePath) : current;
+					if (withoutReplaced.length >= MAX_DRAFT_ATTACHMENTS) return withoutReplaced;
+					if (
+						withoutReplaced.some(file => comparableLocalPath(file.path) === comparableLocalPath(media.file.path))
+					) {
+						return withoutReplaced;
+					}
+					return [
+						...withoutReplaced,
+						{
+							...media.file,
+							available: true,
+							type: "image",
+							preview,
+							editBlob: image,
+						},
+					];
+				});
+			} catch (error) {
+				setAttachmentError(error instanceof Error ? error.message : "剪贴板图片保存失败。");
+			} finally {
+				setAttachmentBusy(false);
+			}
+		},
+		[client, localFiles.length],
+	);
+
+	const startScreenshot = useCallback(async (): Promise<void> => {
+		setAttachmentError(null);
+		const started = await desktop.startScreenshot();
+		if (!started) {
+			setAttachmentError("Windows 截图工具不可用。");
+			return;
 		}
+		setScreenshotPending(true);
+		setAttachmentHint("截图完成后按 Ctrl+V 粘贴；粘贴后可画直线或箭头。");
 	}, [desktop]);
+
+	const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+		const item = Array.from(event.clipboardData.items).find(
+			candidate => candidate.kind === "file" && candidate.type.startsWith("image/"),
+		);
+		const image = item?.getAsFile();
+		if (!image) return;
+		event.preventDefault();
+		const name = image.name || `clipboard-${Date.now()}.png`;
+		if (screenshotPending) {
+			setScreenshotPending(false);
+			setAttachmentHint(null);
+			setAnnotation({ image });
+			return;
+		}
+		void importManagedImage(image, name);
+	};
+
+	const onDrop = (event: DragEvent<HTMLDivElement>): void => {
+		event.preventDefault();
+		setDragActive(false);
+		if (!canPrompt) return;
+		const paths = Array.from(event.dataTransfer.files)
+			.map(file => (file as File & { path?: string }).path)
+			.filter((path): path is string => typeof path === "string" && path.length > 0);
+		if (paths.length === 0) {
+			setAttachmentError("无法取得拖入文件的源路径，请使用上方的图片或文档按钮选择。");
+			return;
+		}
+		addLocalPaths(paths);
+	};
 
 	const removeAttachment = useCallback((path: string): void => {
 		setLocalFiles(current => current.filter(file => file.path !== path));
 		setAttachmentError(null);
+		setAttachmentHint(null);
 	}, []);
 
 	const send = useCallback(async (): Promise<void> => {
@@ -249,6 +411,7 @@ export function Composer({
 			);
 			setText("");
 			setLocalFiles([]);
+			setAttachmentHint(null);
 			onPrefillConsumed?.();
 		} catch {
 			setAttachmentError("The referenced files could not be checked.");
@@ -331,114 +494,181 @@ export function Composer({
 	}
 
 	return (
-		<div className="sh-composer">
-			<div className="sh-composer-card">
-				{localFiles.length > 0 && (
-					<div className="sh-composer-attachments" aria-label="local file references">
-						{localFiles.map(file => (
-							<div
-								key={file.path}
-								className={`sh-composer-attachment${file.available ? "" : " sh-composer-attachment-missing"}`}
-								title={file.path}
-							>
-								<File size={13} aria-hidden="true" />
-								<span>{file.name}</span>
-								{!file.available && <span className="sh-composer-attachment-status">unavailable</span>}
-								<button
-									type="button"
-									onClick={() => removeAttachment(file.path)}
-									title={`remove ${file.name}`}
-									aria-label={`remove ${file.name}`}
-								>
-									<X size={12} aria-hidden="true" />
-								</button>
-							</div>
-						))}
-					</div>
-				)}
-				{attachmentError && (
-					<div className="sh-composer-attachment-error" role="alert">
-						{attachmentError}
-					</div>
-				)}
-				<textarea
-					ref={taRef}
-					className="sh-composer-input"
-					value={text}
-					onChange={e => setText(e.target.value)}
-					onKeyDown={onKeyDown}
-					onCompositionStart={onCompositionStart}
-					onCompositionEnd={onCompositionEnd}
-					placeholder={
-						readOnly
-							? "read-only session — watching only"
-							: live
-								? "prompt the host agent…"
-								: "waiting for session…"
-					}
-					disabled={!canPrompt}
-					rows={1}
-					spellCheck={false}
-				/>
-				<div className="sh-composer-controls">
+		<>
+			<div
+				className={`sh-composer${dragActive ? " sh-composer-drag-active" : ""}`}
+				onDragEnter={event => {
+					if (event.dataTransfer.types.includes("Files")) setDragActive(true);
+				}}
+				onDragOver={event => {
+					if (!event.dataTransfer.types.includes("Files")) return;
+					event.preventDefault();
+					event.dataTransfer.dropEffect = "link";
+				}}
+				onDragLeave={event => {
+					if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false);
+				}}
+				onDrop={onDrop}
+			>
+				<div className="sh-composer-card">
 					{desktop.localFilesAvailable && (
-						<button
-							type="button"
-							className="sh-composer-attach"
-							onClick={() => void pickAttachments()}
-							disabled={!canPrompt || attachmentBusy}
-							title="reference local files"
-							aria-label="reference local files"
-						>
-							<Paperclip size={15} aria-hidden="true" />
-						</button>
+						<div className="sh-composer-tools" aria-label="附件工具">
+							<button
+								type="button"
+								onClick={() => void startScreenshot()}
+								disabled={!canPrompt || attachmentBusy}
+								title="截图"
+								aria-label="截图"
+							>
+								<Scissors size={18} aria-hidden="true" />
+							</button>
+							<button
+								type="button"
+								onClick={() => void pickAttachments("image")}
+								disabled={!canPrompt || attachmentBusy}
+								title="引用本机图片"
+								aria-label="引用本机图片"
+							>
+								<ImagePlus size={18} aria-hidden="true" />
+							</button>
+							<button
+								type="button"
+								onClick={() => void pickAttachments("document")}
+								disabled={!canPrompt || attachmentBusy}
+								title="引用本机文档"
+								aria-label="引用本机文档"
+							>
+								<FileUp size={18} aria-hidden="true" />
+							</button>
+							<span className="sh-composer-tools-label">可拖入文件 · Ctrl+V 粘贴图片</span>
+						</div>
 					)}
-					<Workspace cwd={snapshot.state?.cwd} />
-					{thinkingLevels.length > 0 && configuredThinkingLevel && (
-						<ThinkingPicker
-							levels={thinkingLevels}
-							value={configuredThinkingLevel}
+					{localFiles.length > 0 && (
+						<div className="sh-composer-attachments" aria-label="local file references">
+							{localFiles.map(file => (
+								<div
+									key={file.path}
+									className={`sh-composer-attachment sh-composer-attachment-${file.type}${file.available ? "" : " sh-composer-attachment-missing"}`}
+									title={file.path}
+								>
+									{file.preview ? (
+										<img src={file.preview} alt="" draggable={false} />
+									) : file.type === "image" ? (
+										<ImagePlus size={15} aria-hidden="true" />
+									) : (
+										<File size={13} aria-hidden="true" />
+									)}
+									<span className="sh-composer-attachment-name">{file.name}</span>
+									{!file.available && <span className="sh-composer-attachment-status">unavailable</span>}
+									{file.editBlob && (
+										<button
+											type="button"
+											onClick={() => {
+												if (file.editBlob) setAnnotation({ image: file.editBlob, replacePath: file.path });
+											}}
+											title="标注图片"
+											aria-label={`标注 ${file.name}`}
+										>
+											<Pencil size={12} aria-hidden="true" />
+										</button>
+									)}
+									<button
+										type="button"
+										onClick={() => removeAttachment(file.path)}
+										title={`remove ${file.name}`}
+										aria-label={`remove ${file.name}`}
+									>
+										<X size={12} aria-hidden="true" />
+									</button>
+								</div>
+							))}
+						</div>
+					)}
+					{attachmentError && (
+						<div className="sh-composer-attachment-error" role="alert">
+							{attachmentError}
+						</div>
+					)}
+					{attachmentHint && <div className="sh-composer-attachment-hint">{attachmentHint}</div>}
+					<textarea
+						ref={taRef}
+						className="sh-composer-input"
+						value={text}
+						onChange={e => setText(e.target.value)}
+						onKeyDown={onKeyDown}
+						onPaste={onPaste}
+						onCompositionStart={onCompositionStart}
+						onCompositionEnd={onCompositionEnd}
+						placeholder={
+							readOnly
+								? "read-only session — watching only"
+								: live
+									? "prompt the host agent…"
+									: "waiting for session…"
+						}
+						disabled={!canPrompt}
+						rows={1}
+						spellCheck={false}
+					/>
+					<div className="sh-composer-controls">
+						<Workspace cwd={snapshot.state?.cwd} />
+						{thinkingLevels.length > 0 && configuredThinkingLevel && (
+							<ThinkingPicker
+								levels={thinkingLevels}
+								value={configuredThinkingLevel}
+								disabled={!canPrompt}
+								desktop={desktop}
+								onChange={level => client.sendThinkingChange(level)}
+							/>
+						)}
+						<ModelPicker
+							snapshot={snapshot}
 							disabled={!canPrompt}
 							desktop={desktop}
-							onChange={level => client.sendThinkingChange(level)}
+							onModelList={() => client.sendModelList()}
+							onModelChange={(provider, id) => client.sendModelChange(provider, id)}
 						/>
-					)}
-					<ModelPicker
-						snapshot={snapshot}
-						disabled={!canPrompt}
-						desktop={desktop}
-						onModelList={() => client.sendModelList()}
-						onModelChange={(provider, id) => client.sendModelChange(provider, id)}
-					/>
-					<span className="sh-composer-control-spacer" />
-					{busy && queued > 0 && (
-						<span className="sh-queued">
-							<span className="sh-queued-label">queued </span>×{queued}
-						</span>
-					)}
-					{busy && !readOnly && (
+						<span className="sh-composer-control-spacer" />
+						{busy && queued > 0 && (
+							<span className="sh-queued">
+								<span className="sh-queued-label">queued </span>×{queued}
+							</span>
+						)}
+						{busy && !readOnly && (
+							<button
+								type="button"
+								className="sh-btn sh-btn-stop"
+								onClick={() => client.sendAbort()}
+								disabled={!live}
+								title="stop the current turn"
+							>
+								<Square size={11} /> <span className="sh-btn-label">Stop</span>
+							</button>
+						)}
 						<button
 							type="button"
-							className="sh-btn sh-btn-stop"
-							onClick={() => client.sendAbort()}
-							disabled={!live}
-							title="stop the current turn"
+							className="sh-composer-send"
+							onClick={() => void send()}
+							disabled={!canSend}
+							title="send (Enter)"
+							aria-label="send prompt"
 						>
-							<Square size={11} /> <span className="sh-btn-label">Stop</span>
+							<ArrowUp size={14} />
 						</button>
-					)}
-					<button
-						type="button"
-						className="sh-composer-send"
-						onClick={() => void send()}
-						disabled={!canSend}
-						title="send (Enter)"
-						aria-label="send prompt"
-					>
-						<ArrowUp size={14} />
-					</button>
+					</div>
 				</div>
 			</div>
-		</div>
+			{annotation && (
+				<ScreenshotAnnotator
+					image={annotation.image}
+					onCancel={() => setAnnotation(null)}
+					onComplete={image => {
+						const replacePath = annotation.replacePath;
+						setAnnotation(null);
+						void importManagedImage(image, `annotation-${Date.now()}.png`, replacePath);
+					}}
+				/>
+			)}
+		</>
 	);
 }

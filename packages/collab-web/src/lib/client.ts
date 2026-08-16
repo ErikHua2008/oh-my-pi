@@ -16,6 +16,7 @@ import type {
 	HostFrame,
 	ImageVariant,
 	LocalFileReference,
+	ManagedImageReference,
 	SessionEntry,
 	SessionHeader,
 	SessionState,
@@ -23,6 +24,7 @@ import type {
 	SubagentProgressPayload,
 	WireModel,
 } from "@oh-my-pi/pi-wire";
+import { MANAGED_IMAGE_CHUNK_CHARS, MANAGED_IMAGE_MAX_BASE64_CHARS } from "@oh-my-pi/pi-wire";
 import { importRoomKey } from "./codec";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
 import { CollabSocket } from "./socket";
@@ -111,12 +113,19 @@ interface PendingImage {
 	timer: Timer;
 }
 
+interface PendingMediaImport {
+	resolve: (result: ManagedImageReference) => void;
+	reject: (error: Error) => void;
+	timer: Timer;
+}
+
 interface PendingHistory {
 	reqId: number;
 	timer: Timer;
 }
 
 const IMAGE_TIMEOUT_MS = 15_000;
+const MEDIA_IMPORT_TIMEOUT_MS = 30_000;
 
 export class GuestClient {
 	readonly #socket: CollabSocket;
@@ -126,6 +135,7 @@ export class GuestClient {
 	readonly #listeners = new Set<() => void>();
 	readonly #pendingTranscripts = new Map<number, PendingTranscript>();
 	readonly #pendingImages = new Map<number, PendingImage>();
+	readonly #pendingMediaImports = new Map<number, PendingMediaImport>();
 	readonly #imageRequests = new Map<string, Promise<RemoteImage | null>>();
 	readonly #imageCache = new Map<string, RemoteImage>();
 	#reqSeq = 0;
@@ -305,6 +315,33 @@ export class GuestClient {
 		return request;
 	}
 
+	/** Persist a pathless clipboard/screenshot image on the host and return its stable path reference. */
+	importManagedImage(data: string, mimeType: string, name?: string): Promise<ManagedImageReference> {
+		if (data.length === 0 || data.length > MANAGED_IMAGE_MAX_BASE64_CHARS) {
+			return Promise.reject(new Error("clipboard image is too large"));
+		}
+		const reqId = ++this.#reqSeq;
+		const { promise, resolve, reject } = Promise.withResolvers<ManagedImageReference>();
+		const timer = setTimeout(() => {
+			this.#pendingMediaImports.delete(reqId);
+			reject(new Error("image import timed out"));
+		}, MEDIA_IMPORT_TIMEOUT_MS);
+		this.#pendingMediaImports.set(reqId, { resolve, reject, timer });
+		const chunkCount = Math.max(1, Math.ceil(data.length / MANAGED_IMAGE_CHUNK_CHARS));
+		for (let chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+			this.#socket.send({
+				t: "media-import",
+				reqId,
+				data: data.slice(chunkIndex * MANAGED_IMAGE_CHUNK_CHARS, (chunkIndex + 1) * MANAGED_IMAGE_CHUNK_CHARS),
+				mimeType,
+				name,
+				chunkIndex,
+				chunkCount,
+			});
+		}
+		return promise;
+	}
+
 	/** Test seam: apply a synthetic host frame through the real apply path. */
 	applyFrameForTest(frame: HostFrame): void {
 		this.#applyFrameSafe(frame);
@@ -353,6 +390,11 @@ export class GuestClient {
 			pending.resolve(null);
 		}
 		this.#pendingImages.clear();
+		for (const [, pending] of this.#pendingMediaImports) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error("session ended before the image was imported"));
+		}
+		this.#pendingMediaImports.clear();
 		this.#imageRequests.clear();
 		this.#imageCache.clear();
 		this.#clearUiRequests();
@@ -548,6 +590,18 @@ export class GuestClient {
 				const image = { data: frame.data, mimeType: frame.mimeType };
 				this.#imageCache.set(pending.key, image);
 				pending.resolve(image);
+				return;
+			}
+			case "media-imported": {
+				const pending = this.#pendingMediaImports.get(frame.reqId);
+				if (!pending) return;
+				this.#pendingMediaImports.delete(frame.reqId);
+				clearTimeout(pending.timer);
+				if (frame.error !== undefined || frame.media === undefined) {
+					pending.reject(new Error(frame.error ?? "image import failed"));
+					return;
+				}
+				pending.resolve(frame.media);
 				return;
 			}
 			case "bye":

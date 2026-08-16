@@ -403,6 +403,41 @@ describe("GuestClient frame apply", () => {
 		}
 	});
 
+	it("chunks pathless clipboard pixels below relay limits and resolves to a host-local path reference", async () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const client = liveClient();
+			const payload = "a".repeat(1_100_000);
+			const result = client.importManagedImage(payload, "image/png", "clipboard.png");
+			const requests = sent.filter(
+				(frame): frame is Extract<GuestFrame, { t: "media-import" }> => frame.t === "media-import",
+			);
+			expect(requests).toHaveLength(3);
+			const request = requests[0]!;
+			expect(requests.map(frame => frame.chunkIndex)).toEqual([0, 1, 2]);
+			expect(requests.every(frame => frame.chunkCount === 3 && frame.reqId === request.reqId)).toBe(true);
+			expect(requests.map(frame => frame.data).join("")).toBe(payload);
+			expect(Math.max(...requests.map(frame => frame.data.length))).toBeLessThanOrEqual(512 * 1024);
+			const media = {
+				file: {
+					kind: "local-file" as const,
+					path: "C:\\.omp\\agent\\media\\objects\\aa\\image.png",
+					name: "image.png",
+				},
+				imageId: "a".repeat(64),
+				mimeType: "image/png",
+				thumbnail: { type: "image" as const, data: "dGh1bWI=", mimeType: "image/webp" },
+			};
+			client.applyFrameForTest({ t: "media-imported", reqId: request.reqId, media });
+			await expect(result).resolves.toEqual(media);
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
 	it("deduplicates lazy image requests and reuses the resolved thumbnail", async () => {
 		const sent: GuestFrame[] = [];
 		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {

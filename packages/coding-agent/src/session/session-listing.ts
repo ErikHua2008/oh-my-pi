@@ -630,8 +630,10 @@ export function listSessionsReadOnly(sessionDir: string, storage: SessionStorage
 }
 
 /** List all sessions across all project directories (newest first). */
-export async function listAllSessions(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
-	const sessionsRoot = path.join(getDefaultAgentDir(), "sessions");
+export async function listAllSessions(
+	storage: SessionStorage = new FileSessionStorage(),
+	sessionsRoot: string = path.join(getDefaultAgentDir(), "sessions"),
+): Promise<SessionInfo[]> {
 	try {
 		const files = await Array.fromAsync(new Bun.Glob("*/*.jsonl").scan(sessionsRoot), name =>
 			path.join(sessionsRoot, name),
@@ -691,6 +693,8 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 export interface ResolveResumableSessionOptions {
 	/** Search default global session buckets after the active/custom session directory misses. */
 	allowGlobalFallback?: boolean;
+	/** Override the global sessions root (used by isolated/custom agent directories). */
+	sessionsRoot?: string;
 }
 
 function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions): value is SessionStorage {
@@ -717,7 +721,7 @@ export async function resolveResumableSession(
 		return undefined;
 	}
 
-	const globalSessions = await listAllSessions(storage);
+	const globalSessions = await listAllSessions(storage, resolvedOptions.sessionsRoot);
 	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (!globalMatch) {
 		return undefined;

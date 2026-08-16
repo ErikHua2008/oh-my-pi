@@ -239,8 +239,7 @@
 	box-shadow: none;
 }
 
-.sh-sessions-action:disabled,
-.sh-project-switch:disabled {
+.sh-sessions-action:disabled {
 	cursor: default;
 	opacity: 0.55;
 }
@@ -322,10 +321,6 @@
 	border: 0;
 	border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 	text-align: left;
-}
-
-.sh-project-switch:hover .sh-project-name {
-	color: var(--accent);
 }
 
 .sh-project-rename,

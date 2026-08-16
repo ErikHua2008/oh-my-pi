@@ -5,6 +5,7 @@ import type { GuestSnapshot } from "../src/lib/client";
 import { GuestClient } from "../src/lib/client";
 import { Composer, shouldSubmitOnEnter } from "../src/components/shell/Composer";
 import { ModelPicker } from "../src/components/shell/ModelPicker";
+import { createDesktopBridge } from "../src/lib/desktop-bridge";
 import { encodeBase64Url } from "../src/lib/link";
 
 const LINK = `roomroomroom1234#${encodeBase64Url(new Uint8Array(32))}`;
@@ -124,6 +125,18 @@ describe("Composer session metadata and controls", () => {
 		expect(readOnly).toContain('disabled=""');
 		expect(waiting).toContain("waiting for session…");
 		expect(waiting).toContain('disabled=""');
+	});
+
+	it("shows separate screenshot, image-reference, and document-reference tools in the native shell", () => {
+		const desktop = createDesktopBridge(async <T,>(): Promise<T> => null as T);
+		const html = renderToStaticMarkup(
+			<Composer client={client} snapshot={{ ...snapshot(null), working: false }} desktop={desktop} />,
+		);
+
+		expect(html).toContain('aria-label="截图"');
+		expect(html).toContain('aria-label="引用本机图片"');
+		expect(html).toContain('aria-label="引用本机文档"');
+		expect(html).toContain("可拖入文件 · Ctrl+V 粘贴图片");
 	});
 
 	it("keeps queue and abort controls observable while the host is working", () => {

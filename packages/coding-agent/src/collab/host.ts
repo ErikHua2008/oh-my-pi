@@ -24,6 +24,7 @@ import type {
 	WireModel,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
+import { MANAGED_IMAGE_CHUNK_CHARS, MANAGED_IMAGE_MAX_BASE64_CHARS } from "@oh-my-pi/pi-wire";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
@@ -31,10 +32,12 @@ import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/message
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import { resizeImage } from "../utils/image-resize";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
 import type { CollabHostContext } from "./host-context";
 import { CollabImageStore, replaceImagesWithRefs } from "./image-replication";
+import { ManagedMediaStore } from "./managed-media-store";
 import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
@@ -70,6 +73,10 @@ const INITIAL_HISTORY_ENTRIES = 200;
 const MAX_HISTORY_PAGE_ENTRIES = 500;
 const MAX_LOCAL_FILE_REFERENCES = 32;
 const MAX_LOCAL_FILE_PATH_LENGTH = 32_767;
+const MANAGED_IMAGE_THUMBNAIL_MAX_BYTES = 48 * 1024;
+const MANAGED_IMAGE_CHUNK_MAX_COUNT = Math.ceil(MANAGED_IMAGE_MAX_BASE64_CHARS / MANAGED_IMAGE_CHUNK_CHARS);
+const MANAGED_IMAGE_ASSEMBLY_TIMEOUT_MS = 30_000;
+const MANAGED_IMAGE_MAX_PENDING_PER_PEER = 4;
 const UNSAFE_LOCAL_FILE_PATH = /[\u0000-\u001f\u007f]/;
 const WIRE_AGENT_EVENT_TYPES: Record<WireAgentEvent["type"], true> = {
 	agent_start: true,
@@ -188,6 +195,19 @@ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+export interface CollabHostOptions {
+	/** Test seam and alternate durable-media root; production uses the agent media directory. */
+	managedMediaStore?: ManagedMediaStore;
+}
+
+interface PendingManagedImage {
+	mimeType: string;
+	chunkCount: number;
+	chunks: (string | undefined)[];
+	receivedChars: number;
+	timer: Timer;
+}
+
 export class CollabHost {
 	#ctx: CollabHostContext;
 	#socket: CollabSocket | null = null;
@@ -200,6 +220,8 @@ export class CollabHost {
 	#unsubscribe?: () => void;
 	#peers = new Map<number, { name: string; canWrite: boolean; mediaRefs: boolean; historyPaging: boolean }>();
 	readonly #images = new CollabImageStore();
+	readonly #managedMedia: ManagedMediaStore;
+	readonly #pendingManagedImages = new Map<string, PendingManagedImage>();
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
@@ -210,8 +232,9 @@ export class CollabHost {
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
 
-	constructor(ctx: CollabHostContext) {
+	constructor(ctx: CollabHostContext, options: CollabHostOptions = {}) {
 		this.#ctx = ctx;
+		this.#managedMedia = options.managedMediaStore ?? new ManagedMediaStore();
 	}
 
 	get link(): string {
@@ -382,6 +405,8 @@ export class CollabHost {
 		this.#streamingInterval = null;
 		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
 		this.#pendingUi.clear();
+		for (const pending of this.#pendingManagedImages.values()) clearTimeout(pending.timer);
+		this.#pendingManagedImages.clear();
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
@@ -435,6 +460,16 @@ export class CollabHost {
 				break;
 			case "fetch-image":
 				void this.#handleFetchImage(frame.reqId, frame.imageId, frame.variant, fromPeer);
+				break;
+			case "media-import":
+				this.#handleMediaImportChunk(
+					frame.reqId,
+					frame.data,
+					frame.mimeType,
+					frame.chunkIndex,
+					frame.chunkCount,
+					fromPeer,
+				);
 				break;
 			case "model-list":
 				void this.#handleModelList(fromPeer);
@@ -707,6 +742,12 @@ export class CollabHost {
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
+		const prefix = `${peer}:`;
+		for (const [key, pending] of this.#pendingManagedImages) {
+			if (!key.startsWith(prefix)) continue;
+			clearTimeout(pending.timer);
+			this.#pendingManagedImages.delete(key);
+		}
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
@@ -958,6 +999,138 @@ export class CollabHost {
 		} catch (error) {
 			logger.debug("collab image fetch failed", { imageId, variant, error: String(error) });
 			this.#socket?.send({ t: "image", reqId, imageId, variant, error: "image unavailable" }, fromPeer);
+		}
+	}
+
+	#handleMediaImportChunk(
+		reqId: number,
+		data: string,
+		mimeType: string,
+		chunkIndex: number,
+		chunkCount: number,
+		fromPeer: number,
+	): void {
+		const socket = this.#socket;
+		const peer = this.#peers.get(fromPeer);
+		if (!socket) return;
+		if (!peer?.canWrite) {
+			socket.send({ t: "media-imported", reqId, error: "read-only guests cannot import media" }, fromPeer);
+			return;
+		}
+		const key = `${fromPeer}:${reqId}`;
+		const reject = (message: string): void => {
+			const pending = this.#pendingManagedImages.get(key);
+			if (pending) clearTimeout(pending.timer);
+			this.#pendingManagedImages.delete(key);
+			socket.send({ t: "media-imported", reqId, error: message }, fromPeer);
+		};
+		if (
+			!Number.isSafeInteger(chunkIndex) ||
+			!Number.isSafeInteger(chunkCount) ||
+			chunkIndex < 0 ||
+			chunkCount < 1 ||
+			chunkIndex >= chunkCount ||
+			chunkCount > MANAGED_IMAGE_CHUNK_MAX_COUNT ||
+			data.length > MANAGED_IMAGE_CHUNK_CHARS
+		) {
+			reject("invalid managed image chunk");
+			return;
+		}
+
+		let pending = this.#pendingManagedImages.get(key);
+		if (!pending) {
+			let peerPending = 0;
+			for (const pendingKey of this.#pendingManagedImages.keys()) {
+				if (pendingKey.startsWith(`${fromPeer}:`)) ++peerPending;
+			}
+			if (peerPending >= MANAGED_IMAGE_MAX_PENDING_PER_PEER) {
+				reject("too many image imports are pending");
+				return;
+			}
+			const timer = setTimeout(() => {
+				this.#pendingManagedImages.delete(key);
+				this.#socket?.send({ t: "media-imported", reqId, error: "image import timed out" }, fromPeer);
+			}, MANAGED_IMAGE_ASSEMBLY_TIMEOUT_MS);
+			pending = {
+				mimeType,
+				chunkCount,
+				chunks: Array<string | undefined>(chunkCount).fill(undefined),
+				receivedChars: 0,
+				timer,
+			};
+			this.#pendingManagedImages.set(key, pending);
+		} else if (pending.mimeType !== mimeType || pending.chunkCount !== chunkCount) {
+			reject("managed image chunks do not agree");
+			return;
+		}
+
+		const previous = pending.chunks[chunkIndex];
+		if (previous !== undefined) {
+			if (previous !== data) reject("managed image chunk changed during upload");
+			return;
+		}
+		pending.chunks[chunkIndex] = data;
+		pending.receivedChars += data.length;
+		if (pending.receivedChars > MANAGED_IMAGE_MAX_BASE64_CHARS) {
+			reject("managed image is too large");
+			return;
+		}
+		if (pending.chunks.some(chunk => chunk === undefined)) return;
+
+		clearTimeout(pending.timer);
+		this.#pendingManagedImages.delete(key);
+		void this.#persistManagedImage(reqId, pending.chunks.join(""), mimeType, fromPeer);
+	}
+
+	async #persistManagedImage(reqId: number, data: string, mimeType: string, fromPeer: number): Promise<void> {
+		const socket = this.#socket;
+		if (!socket) return;
+		try {
+			const imported = await this.#managedMedia.importImage(data, mimeType);
+			let thumbnail: ImageContent | undefined;
+			try {
+				const resized = await resizeImage(
+					{ type: "image", data, mimeType: imported.mimeType },
+					{
+						maxWidth: 320,
+						maxHeight: 240,
+						minDimension: 1,
+						maxBytes: MANAGED_IMAGE_THUMBNAIL_MAX_BYTES,
+						jpegQuality: 68,
+					},
+				);
+				thumbnail = { type: "image", data: resized.data, mimeType: resized.mimeType };
+			} catch (error) {
+				logger.debug("Managed media thumbnail creation failed", {
+					imageId: imported.imageId,
+					error: String(error),
+				});
+			}
+			if (!this.#peers.get(fromPeer)?.canWrite) return;
+			socket.send(
+				{
+					t: "media-imported",
+					reqId,
+					media: {
+						file: imported.file,
+						imageId: imported.imageId,
+						mimeType: imported.mimeType,
+						thumbnail,
+					},
+				},
+				fromPeer,
+			);
+		} catch (error) {
+			logger.debug("Managed media import failed", { fromPeer, error: String(error) });
+			if (!this.#peers.get(fromPeer)?.canWrite) return;
+			socket.send(
+				{
+					t: "media-imported",
+					reqId,
+					error: error instanceof Error ? error.message : "media import failed",
+				},
+				fromPeer,
+			);
 		}
 	}
 

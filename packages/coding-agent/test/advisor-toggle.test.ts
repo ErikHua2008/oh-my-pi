@@ -425,7 +425,7 @@ describe("AgentSession advisor toggle", () => {
 		const advisor = enableAdvisor();
 		appendAdvisorCost(advisor, 0.5, 1);
 		const previousSessionFile = sessionManager.getSessionFile();
-		const targetSessionFile = SessionManager.createEmptySessionFile(tempDir.path());
+		const targetSessionFile = SessionManager.createEmptySessionFile(tempDir.path(), undefined, tempDir.path());
 		const failure = new Error("switch failed before advisor reset");
 		const setSessionFile = sessionManager.setSessionFile.bind(sessionManager);
 		vi.spyOn(sessionManager, "setSessionFile").mockImplementation(async file => {
@@ -446,7 +446,7 @@ describe("AgentSession advisor toggle", () => {
 	it("adopts only the target session's recorded advisor cost after a switch", async () => {
 		const advisor = enableAdvisor();
 		appendAdvisorCost(advisor, 0.5, 1);
-		const targetSessionFile = SessionManager.createEmptySessionFile(tempDir.path());
+		const targetSessionFile = SessionManager.createEmptySessionFile(tempDir.path(), undefined, tempDir.path());
 		await writeAdvisorTranscript(targetSessionFile, "__advisor.jsonl", [0.25]);
 		const setSessionFile = sessionManager.setSessionFile.bind(sessionManager);
 		vi.spyOn(sessionManager, "setSessionFile").mockImplementation(async file => {
@@ -461,7 +461,7 @@ describe("AgentSession advisor toggle", () => {
 		expect((await loadAdvisorTranscriptCosts(targetSessionFile)).get("")).toBeCloseTo(0.25, 8);
 	});
 	it("hydrates persisted advisor cost during SDK session startup", async () => {
-		const sessionFile = SessionManager.createEmptySessionFile(tempDir.path());
+		const sessionFile = SessionManager.createEmptySessionFile(tempDir.path(), undefined, tempDir.path());
 		await writeAdvisorTranscript(sessionFile, "__advisor.jsonl", [0.5]);
 		// A subagent advisor writes one directory deeper; its spend belongs to that
 		// subagent and must not inflate the resumed primary conversation.

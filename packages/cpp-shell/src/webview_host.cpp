@@ -1,8 +1,12 @@
 #include "omp_shell/webview_host.h"
 
+#include "omp_shell/text_utils.h"
+
 #include <ShlObj.h>
 
+#include <algorithm>
 #include <filesystem>
+#include <nlohmann/json.hpp>
 #include <utility>
 
 namespace omp::shell {
@@ -167,6 +171,16 @@ constexpr wchar_t kDesktopBridgeScript[] = LR"js(
     window.chrome.webview.postMessage(JSON.stringify({ channel: "omp-desktop", id, command, args }));
   });
   window.__TAURI_INTERNALS__ = { ...(window.__TAURI_INTERNALS__ || {}), invoke };
+  window.addEventListener("dragover", event => {
+    if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
+  });
+  window.addEventListener("drop", event => {
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (files.length === 0 || typeof window.chrome.webview.postMessageWithAdditionalObjects !== "function") return;
+    event.preventDefault();
+    event.stopPropagation();
+    window.chrome.webview.postMessageWithAdditionalObjects("omp-drop-files", files.slice(0, 32));
+  });
 })();
 )js";
 
@@ -348,6 +362,38 @@ void WebViewHost::ConfigureController() {
 				if (SUCCEEDED(arguments->TryGetWebMessageAsString(&raw_message)) && raw_message != nullptr) {
 					std::wstring message(raw_message);
 					CoTaskMemFree(raw_message);
+					if (message == L"omp-drop-files") {
+						Microsoft::WRL::ComPtr<ICoreWebView2WebMessageReceivedEventArgs2> arguments2;
+						Microsoft::WRL::ComPtr<ICoreWebView2ObjectCollectionView> objects;
+						nlohmann::json paths = nlohmann::json::array();
+						if (SUCCEEDED(arguments->QueryInterface(IID_PPV_ARGS(&arguments2))) &&
+							SUCCEEDED(arguments2->get_AdditionalObjects(&objects)) && objects != nullptr) {
+							UINT32 count = 0;
+							if (SUCCEEDED(objects->get_Count(&count))) {
+								count = std::min<UINT32>(count, 32U);
+								for (UINT32 index = 0; index < count; ++index) {
+									Microsoft::WRL::ComPtr<IUnknown> value;
+									Microsoft::WRL::ComPtr<ICoreWebView2File> file;
+									LPWSTR file_path = nullptr;
+									if (SUCCEEDED(objects->GetValueAtIndex(index, &value)) && value != nullptr &&
+										SUCCEEDED(value.As(&file)) && SUCCEEDED(file->get_Path(&file_path)) &&
+										file_path != nullptr) {
+										std::error_code status_error;
+										if (std::filesystem::is_regular_file(file_path, status_error) && !status_error) {
+											paths.push_back(WideToUtf8(file_path));
+										}
+										CoTaskMemFree(file_path);
+									}
+								}
+							}
+						}
+						if (!paths.empty()) {
+							const std::wstring payload =
+								Utf8ToWide(nlohmann::json{{"channel", "omp-files-dropped"}, {"paths", paths}}.dump());
+							webview_->PostWebMessageAsJson(payload.c_str());
+						}
+						return S_OK;
+					}
 					if (message_handler_) {
 						message_handler_(std::move(message));
 					}

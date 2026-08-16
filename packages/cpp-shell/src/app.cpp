@@ -464,6 +464,32 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 			native_transcript_.SetBounds(native_transcript_bounds_);
 		}
 		return 0;
+	case WM_DROPFILES: {
+		const HDROP drop = reinterpret_cast<HDROP>(wparam);
+		const UINT count = std::min<UINT>(DragQueryFileW(drop, 0xFFFFFFFFU, nullptr, 0), 32U);
+		nlohmann::json paths = nlohmann::json::array();
+		for (UINT index = 0; index < count; ++index) {
+			const UINT length = DragQueryFileW(drop, index, nullptr, 0);
+			if (length == 0) {
+				continue;
+			}
+			std::wstring value(static_cast<std::size_t>(length) + 1, L'\0');
+			if (DragQueryFileW(drop, index, value.data(), length + 1) == 0) {
+				continue;
+			}
+			value.resize(length);
+			std::error_code status_error;
+			if (std::filesystem::is_regular_file(value, status_error) && !status_error) {
+				paths.push_back(WideToUtf8(value));
+			}
+		}
+		DragFinish(drop);
+		if (!paths.empty()) {
+			webview_.PostJson(
+				Utf8ToWide(nlohmann::json{{"channel", "omp-files-dropped"}, {"paths", std::move(paths)}}.dump()));
+		}
+		return 0;
+	}
 	case WM_EXITSIZEMOVE:
 		if (agent_rail_open_ && has_compact_window_bounds_ && !IsZoomed(window_) && !IsIconic(window_)) {
 			RECT resized{};
@@ -678,6 +704,7 @@ bool App::CreateMainWindow(int show_command) {
 	if (window_ == nullptr) {
 		return false;
 	}
+	DragAcceptFiles(window_, TRUE);
 	const LONG_PTR window_style = GetWindowLongPtrW(window_, GWL_STYLE);
 	SetWindowLongPtrW(window_, GWL_STYLE, window_style & ~static_cast<LONG_PTR>(WS_CAPTION));
 	SetWindowPos(window_,
@@ -929,7 +956,7 @@ void App::PickProject() {
 	}
 }
 
-std::vector<std::wstring> App::PickAttachments() const {
+std::vector<std::wstring> App::PickAttachments(std::string_view kind) const {
 	Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
 	if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
 		throw std::runtime_error("unable to create the Windows file picker");
@@ -941,7 +968,23 @@ std::vector<std::wstring> App::PickAttachments() const {
 			FOS_NOCHANGEDIR))) {
 		throw std::runtime_error("unable to configure the Windows file picker");
 	}
-	dialog->SetTitle(L"选择要引用的本机文件");
+	if (kind == "image") {
+		const COMDLG_FILTERSPEC filters[] = {
+			{L"图片文件", L"*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.tif;*.tiff"},
+		};
+		static_cast<void>(dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters));
+		static_cast<void>(dialog->SetFileTypeIndex(1));
+		dialog->SetTitle(L"选择要引用的本机图片");
+	} else {
+		const COMDLG_FILTERSPEC filters[] = {
+			{L"文档和常用文件",
+				L"*.pdf;*.doc;*.docx;*.xls;*.xlsx;*.ppt;*.pptx;*.txt;*.md;*.csv;*.json;*.xml;*.html;*.htm;*.zip;*.7z"},
+			{L"所有文件", L"*.*"},
+		};
+		static_cast<void>(dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters));
+		static_cast<void>(dialog->SetFileTypeIndex(1));
+		dialog->SetTitle(L"选择要引用的本机文档或文件");
+	}
 	const HRESULT shown = dialog->Show(window_);
 	if (shown == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
 		return {};
@@ -1457,10 +1500,20 @@ void App::HandleDesktopRequest(std::string_view payload) {
 		}
 		if (command == "attachment_pick") {
 			Json paths = Json::array();
-			for (const auto& path : PickAttachments()) {
+			const std::string kind = args.value("kind", "document");
+			for (const auto& path : PickAttachments(kind)) {
 				paths.push_back(WideToUtf8(path));
 			}
 			reply(true, std::move(paths));
+			return;
+		}
+		if (command == "screenshot_start") {
+			const HINSTANCE opened = ShellExecuteW(window_, L"open", L"ms-screenclip:", nullptr, nullptr, SW_SHOWNORMAL);
+			if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+				reply(false, nullptr, "Windows screen snip is unavailable");
+				return;
+			}
+			reply(true, nullptr);
 			return;
 		}
 		if (command == "attachment_status") {

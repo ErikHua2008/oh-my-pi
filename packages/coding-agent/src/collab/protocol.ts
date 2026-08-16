@@ -16,6 +16,7 @@ import type {
 	GuestFrame,
 	ImageVariant,
 	LocalFileReference,
+	ManagedImageReference,
 	ParsedCollabLink,
 	Participant,
 	SessionState,
@@ -127,6 +128,7 @@ export type CollabFrame =
 			mimeType?: string;
 			error?: string;
 	  }
+	| { t: "media-imported"; reqId: number; media?: ManagedImageReference; error?: string }
 	/** Targeted reply to `model-list` (wire-shaped model descriptors). */
 	| { t: "model-list"; models: WireModel[] }
 	| { t: "bye"; reason: string }

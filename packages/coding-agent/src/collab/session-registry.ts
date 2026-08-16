@@ -10,7 +10,7 @@
  */
 
 import * as path from "node:path";
-import { directoryExists, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { directoryExists, getProjectDir, getSessionsDir, logger } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import { MCPManager } from "../mcp";
 // Cyclic import with ../modes/core-mode (core-mode will import this registry
@@ -20,7 +20,7 @@ import { createHeadlessCollabContext } from "../modes/core-mode";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { createForeignSessionStore, persistForeignSession } from "../session/foreign-session-import";
-import { listSessions, resolveResumableSession } from "../session/session-listing";
+import { listAllSessions, listSessions, resolveResumableSession } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 import { EventBus } from "../utils/event-bus";
@@ -38,6 +38,11 @@ function sameProjectPath(left: string, right: string): boolean {
 	return process.platform === "win32"
 		? resolvedLeft.toLocaleLowerCase() === resolvedRight.toLocaleLowerCase()
 		: resolvedLeft === resolvedRight;
+}
+
+function comparableFilePath(value: string): string {
+	const resolved = path.resolve(value);
+	return process.platform === "win32" ? resolved.toLocaleLowerCase() : resolved;
 }
 
 /** One live session tracked by the registry. */
@@ -168,18 +173,19 @@ export class SessionRegistry {
 			},
 			suppressBreadcrumb: true,
 		});
+		let managed = false;
 		try {
-			const requiresProjectSwitch = !sameProjectPath(imported.getCwd(), this.#cwd);
+			await this.#provisionSession(imported);
+			managed = true;
 			const result: ImportedForeignSession = {
 				id: imported.getSessionId(),
 				cwd: imported.getCwd(),
 				title: imported.getSessionName(),
-				requiresProjectSwitch,
+				requiresProjectSwitch: false,
 			};
-			if (!requiresProjectSwitch) this.#emitChange();
 			return result;
 		} finally {
-			await imported.close();
+			if (!managed) await imported.close();
 		}
 	}
 
@@ -198,13 +204,18 @@ export class SessionRegistry {
 		}
 
 		let resolvedPath: string;
+		let resolvedFromLocalDirectory = false;
 		if (idOrPath.includes("/") || idOrPath.includes("\\") || idOrPath.endsWith(".jsonl")) {
 			// Direct path argument (mirrors main.ts resume handling).
 			resolvedPath = path.resolve(idOrPath);
 		} else {
-			const match = await resolveResumableSession(idOrPath, this.#cwd, this.#sessionDir);
+			const match = await resolveResumableSession(idOrPath, this.#cwd, this.#sessionDir, {
+				allowGlobalFallback: true,
+				sessionsRoot: getSessionsDir(this.#agentDir),
+			});
 			if (!match) throw new Error("no such session");
 			resolvedPath = path.resolve(match.session.path);
+			resolvedFromLocalDirectory = match.scope === "local";
 		}
 
 		// File equality is the dedupe key: it also covers id-style arguments,
@@ -216,7 +227,12 @@ export class SessionRegistry {
 			return { id: entry.id, link: entry.collabHost.webLink };
 		}
 
-		const sessionManager = await SessionManager.open(resolvedPath, this.#sessionDir);
+		const sessionManager = await SessionManager.open(
+			resolvedPath,
+			resolvedFromLocalDirectory ? this.#sessionDir : undefined,
+			undefined,
+			{ initialCwd: this.#cwd },
+		);
 		return await this.#provisionSession(sessionManager);
 	}
 
@@ -233,17 +249,31 @@ export class SessionRegistry {
 		}
 
 		let resolvedPath: string;
+		let resolvedFromLocalDirectory = false;
 		if (idOrPath.includes("/") || idOrPath.includes("\\") || idOrPath.endsWith(".jsonl")) {
 			resolvedPath = path.resolve(idOrPath);
 		} else {
-			const match = await resolveResumableSession(idOrPath, this.#cwd, this.#sessionDir);
+			const match = await resolveResumableSession(idOrPath, this.#cwd, this.#sessionDir, {
+				allowGlobalFallback: true,
+				sessionsRoot: getSessionsDir(this.#agentDir),
+			});
 			if (!match) throw new Error("no such session");
 			resolvedPath = path.resolve(match.session.path);
+			resolvedFromLocalDirectory = match.scope === "local";
 		}
-		const sessionManager = await SessionManager.open(resolvedPath, this.#sessionDir);
-		const renamed = await sessionManager.setSessionName(title, "user", "control-rename");
-		if (!renamed) throw new Error("session could not be renamed");
-		this.#emitChange();
+		const sessionManager = await SessionManager.open(
+			resolvedPath,
+			resolvedFromLocalDirectory ? this.#sessionDir : undefined,
+			undefined,
+			{ initialCwd: this.#cwd },
+		);
+		try {
+			const renamed = await sessionManager.setSessionName(title, "user", "control-rename");
+			if (!renamed) throw new Error("session could not be renamed");
+			this.#emitChange();
+		} finally {
+			await sessionManager.close();
+		}
 	}
 
 	/**
@@ -276,18 +306,50 @@ export class SessionRegistry {
 	/** List all sessions (disk + live), newest first by modification time. */
 	async list(): Promise<SessionSummary[]> {
 		const storage = new FileSessionStorage();
-		const infos = await listSessions(this.#sessionDir, storage);
+		const [localInfos, globalInfos] = await Promise.all([
+			listSessions(this.#sessionDir, storage),
+			listAllSessions(storage, getSessionsDir(this.#agentDir)),
+		]);
+		const seenPaths = new Set<string>();
+		const infos = [...localInfos, ...globalInfos].filter(info => {
+			const key = comparableFilePath(info.path);
+			if (seenPaths.has(key)) return false;
+			seenPaths.add(key);
+			return true;
+		});
+		infos.sort((left, right) => right.modified.getTime() - left.modified.getTime());
+
+		// Global scans can retain transcripts for projects that no longer exist,
+		// especially short-lived test/scratch workspaces under the OS temp folder.
+		// Keep those transcripts resumable by id/path, but do not turn an unavailable
+		// cwd into a phantom project in the desktop sidebar. Resolve each unique cwd
+		// once and in parallel so a project with many sessions pays for a single stat.
+		const projectAvailability = new Map<string, boolean>();
+		const projectPaths = new Map<string, string>();
+		for (const info of infos) {
+			if (!info.cwd || this.#active.has(info.id)) continue;
+			projectPaths.set(comparableFilePath(info.cwd), info.cwd);
+		}
+		await Promise.all(
+			Array.from(projectPaths, async ([key, projectPath]) => {
+				projectAvailability.set(key, await directoryExists(projectPath));
+			}),
+		);
+
 		const summaries: SessionSummary[] = [];
 		const seen = new Set<string>();
 		for (const info of infos) {
 			const active = this.#active.get(info.id);
+			// A live session remains visible even if its recorded project disappeared;
+			// SessionManager may already have adopted the current launch directory.
+			if (!active && info.cwd && projectAvailability.get(comparableFilePath(info.cwd)) === false) continue;
 			// Dropping sessions are invisible until the drop completes.
 			if (active && active.state === "dropping") continue;
 			seen.add(info.id);
 			const summary: SessionSummary = {
 				id: info.id,
 				title: info.title,
-				cwd: info.cwd,
+				cwd: active?.sessionManager.getCwd() ?? info.cwd,
 				createdAt: info.created.toISOString(),
 				modifiedAt: info.modified.toISOString(),
 				messageCount: info.messageCount,
@@ -372,6 +434,7 @@ export class SessionRegistry {
 		try {
 			const result = await createAgentSession({
 				...this.#baseSessionOptions,
+				cwd: sessionManager.getCwd(),
 				sessionManager,
 				eventBus,
 				agentId,
