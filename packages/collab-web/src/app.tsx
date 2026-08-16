@@ -152,6 +152,10 @@ export function App(): ReactNode {
 					if (controlFlow.fail(ctrl)) setControlPending(false);
 					pushNotice("error", message);
 				};
+				ctrl.onEnded = () => {
+					// A terminal room/socket event cannot produce the pending reply.
+					if (controlFlow.fail(ctrl)) setControlPending(false);
+				};
 				ctrl.onSession = info => handleCtrlSession(ctrl, info);
 				ctrl.connect();
 				try {

@@ -148,6 +148,8 @@ describe("ControlClient phase transitions", () => {
 
 	it("starts connecting, goes live on welcome, and ends with a reason on bye", () => {
 		const { client, socket } = makeClient(CTRL_WRITE_LINK);
+		const onEnded = vi.fn();
+		client.onEnded = onEnded;
 		expect(client.getSnapshot().phase).toBe("connecting");
 		expect(client.getSnapshot().readOnly).toBe(false);
 
@@ -160,6 +162,12 @@ describe("ControlClient phase transitions", () => {
 		snap = client.getSnapshot();
 		expect(snap.phase).toBe("ended");
 		expect(snap.endedReason).toBe("core shutdown");
+		expect(onEnded).toHaveBeenCalledTimes(1);
+		expect(onEnded).toHaveBeenCalledWith("core shutdown");
+
+		// A later close notification belongs to the same terminal transition.
+		socket.onClose?.("already closed", false);
+		expect(onEnded).toHaveBeenCalledTimes(1);
 	});
 
 	it("marks readOnly for view links", () => {

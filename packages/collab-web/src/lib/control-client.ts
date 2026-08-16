@@ -55,6 +55,8 @@ export class ControlClient {
 	onError?: (message: string) => void;
 	/** Directed `ctrl-session` replies surface here (the App verifies its pending op). */
 	onSession?: (info: ControlSessionInfo) => void;
+	/** Terminal room/socket events surface here so the App can cancel pending work. */
+	onEnded?: (reason: string) => void;
 
 	/** @throws Error when the link does not parse or is not a control-room link. */
 	constructor(link: string, displayName: string) {
@@ -148,6 +150,7 @@ export class ControlClient {
 		this.#phase = "ended";
 		this.#endedReason = reason;
 		this.#commit();
+		this.onEnded?.(reason);
 		this.#socket.close();
 	}
 

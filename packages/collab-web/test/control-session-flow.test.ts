@@ -49,6 +49,9 @@ function bind(flow: ControlSessionFlow, control: LiveControl, opened: string[]):
 		const accepted = flow.accept(control.client, info);
 		if (accepted) opened.push(accepted.id);
 	};
+	control.client.onEnded = () => {
+		flow.fail(control.client);
+	};
 }
 
 describe("App control-session coordination", () => {
@@ -101,6 +104,32 @@ describe("App control-session coordination", () => {
 		expect(flow.fail(staleControl.client)).toBe(false);
 		expect(flow.pending).toBe(true);
 		expect(flow.fail(control.client)).toBe(true);
+		expect(flow.pending).toBe(false);
+	});
+
+	it("clears pending create when the control room closes", () => {
+		const control = makeControl("room-closed");
+		const flow = new ControlSessionFlow();
+		flow.activate(control.client);
+		bind(flow, control, []);
+		expect(flow.startCreate(control.client)).toBe(true);
+
+		control.socket.onControl?.({ t: "room-closed" });
+
+		expect(control.client.getSnapshot().phase).toBe("ended");
+		expect(flow.pending).toBe(false);
+	});
+
+	it("clears pending resume when the host ends the control room", () => {
+		const control = makeControl("host-bye");
+		const flow = new ControlSessionFlow();
+		flow.activate(control.client);
+		bind(flow, control, []);
+		expect(flow.startResume(control.client, "existing")).toBe(true);
+
+		control.socket.onFrame?.({ t: "ctrl-bye", reason: "core shutdown" }, 0);
+
+		expect(control.client.getSnapshot().phase).toBe("ended");
 		expect(flow.pending).toBe(false);
 	});
 

@@ -22,6 +22,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(OMP_CPP_SHELL_BUILD_TESTS "Build cpp-shell unit tests" ON)
+option(OMP_CPP_SHELL_BUILD_WEB_ASSETS "Rebuild collab-web assets with the native shell" ON)
+
+if(OMP_CPP_SHELL_BUILD_WEB_ASSETS)
+	find_program(OMP_BUN_EXECUTABLE NAMES bun bun.exe REQUIRED)
+	get_filename_component(OMP_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+	set(OMP_COLLAB_WEB_DIRECTORY "${OMP_REPOSITORY_ROOT}/packages/collab-web")
+	add_custom_target(
+		omp_collab_web_assets ALL
+		COMMAND "${OMP_BUN_EXECUTABLE}" run build
+		WORKING_DIRECTORY "${OMP_COLLAB_WEB_DIRECTORY}"
+		COMMENT "Rebuilding collab-web assets for the C++ shell"
+		VERBATIM
+		USES_TERMINAL
+	)
+endif()
 
 include(cmake/Dependencies.cmake)
 
@@ -55,6 +70,9 @@ add_executable(
 	src/omp_shell.rc
 	src/webview_host.cpp
 )
+if(TARGET omp_collab_web_assets)
+	add_dependencies(omp-cpp-shell omp_collab_web_assets)
+endif()
 target_include_directories(omp-cpp-shell PRIVATE include)
 target_compile_definitions(omp-cpp-shell PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(

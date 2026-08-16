@@ -84,6 +84,11 @@ guarantees:
 - Bun 1.3.14+ for source-mode development
 
 The WebView2 SDK is fetched at a pinned version during CMake configuration.
+The CMake build also rebuilds `packages/collab-web/dist` with Bun before linking
+the shell. This keeps the frameless native window and its Web title bar on the
+same revision after a fresh clone, pull, or branch switch. Set
+`OMP_CPP_SHELL_BUILD_WEB_ASSETS=OFF` only when an external build step already
+provides matching assets.
 
 ## Build and test
 
