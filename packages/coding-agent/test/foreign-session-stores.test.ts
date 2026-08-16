@@ -30,7 +30,7 @@ async function createClaudeFixture(): Promise<{ info: ForeignSessionInfo; store:
 	const root = path.join(tempRoot, ".claude");
 	const cwd = path.join(tempRoot, "project-with-hyphen");
 	const id = "11111111-1111-4111-8111-111111111111";
-	const projectDirectory = cwd.replaceAll(path.sep, "-");
+	const projectDirectory = cwd.replaceAll(path.sep, "-").replaceAll(":", "");
 	const sessionPath = path.join(root, "projects", projectDirectory, `${id}.jsonl`);
 	await writeJsonl(path.join(root, "history.jsonl"), [
 		{ sessionId: id, timestamp: 1_767_225_600_000, display: "First prompt", project: cwd },
@@ -109,7 +109,12 @@ describe("ClaudeSessionStore", () => {
 		const root = path.join(tempRoot, ".claude");
 		const cwd = path.join(tempRoot, "legacy");
 		const id = "22222222-2222-4222-8222-222222222222";
-		const sessionPath = path.join(root, ".projects", cwd.replaceAll(path.sep, "-"), `${id}.jsonl`);
+		const sessionPath = path.join(
+			root,
+			".projects",
+			cwd.replaceAll(path.sep, "-").replaceAll(":", ""),
+			`${id}.jsonl`,
+		);
 		await writeJsonl(path.join(root, "history.jsonl"), [
 			{ session_id: id, ts: 1_735_689_600_000, text: "Legacy prompt" },
 		]);
@@ -139,30 +144,78 @@ describe("CodexSessionStore", () => {
 		const database = new Database(path.join(root, "state_5.sqlite"));
 		try {
 			database.run(
-				"CREATE TABLE threads (id TEXT, rollout_path TEXT, created_at INTEGER, updated_at INTEGER, cwd TEXT, title TEXT, first_user_message TEXT)",
+				"CREATE TABLE threads (id TEXT, rollout_path TEXT, created_at INTEGER, updated_at INTEGER, cwd TEXT, title TEXT, name TEXT, first_user_message TEXT, archived INTEGER)",
 			);
-			database.run("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)", [
+			database.run("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
 				"33333333-3333-4333-8333-333333333333",
 				"sessions/missing.jsonl",
 				1_767_225_600,
 				1_767_225_660,
 				path.join(tempRoot, "codex-project"),
 				"Indexed Codex",
+				null,
 				"Indexed prompt",
+				0,
+			]);
+			database.run("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+				"33333333-3333-4333-8333-333333333334",
+				"archived_sessions/missing.jsonl",
+				1_767_225_590,
+				1_767_225_670,
+				path.join(tempRoot, "archived-codex-project"),
+				"Archived Codex",
+				null,
+				"Archived prompt",
+				1,
 			]);
 		} finally {
 			database.close();
 		}
+		await Bun.write(
+			path.join(root, "session_index.jsonl"),
+			[
+				JSON.stringify({
+					id: "33333333-3333-4333-8333-333333333333",
+					thread_name: "Old visible name",
+					updated_at: "2026-01-01T00:00:30.000Z",
+				}),
+				JSON.stringify({
+					id: "33333333-3333-4333-8333-333333333333",
+					thread_name: "Current visible name",
+					updated_at: "2026-01-01T00:01:00.000Z",
+				}),
+			].join("\n"),
+		);
+		await Bun.write(
+			path.join(root, ".codex-global-state.json"),
+			JSON.stringify({
+				"electron-persisted-atom-state": {
+					"thread-descriptions-v1": {
+						"33333333-3333-4333-8333-333333333333": "Semantic summary for the current chat",
+					},
+				},
+			}),
+		);
 
 		const sessions = await new CodexSessionStore(root).list();
 
 		expect(sessions).toHaveLength(1);
 		expect(sessions[0]).toMatchObject({
 			id: "33333333-3333-4333-8333-333333333333",
-			title: "Indexed Codex",
+			title: "Current visible name",
+			description: "Semantic summary for the current chat",
+			archived: false,
 			firstMessage: "Indexed prompt",
 		});
 		expect(sessions[0]?.modified.toISOString()).toBe("2026-01-01T00:01:00.000Z");
+
+		const archived = await new CodexSessionStore(root).list({ archived: true });
+		expect(archived).toHaveLength(1);
+		expect(archived[0]).toMatchObject({
+			id: "33333333-3333-4333-8333-333333333334",
+			title: "Archived Codex",
+			archived: true,
+		});
 	});
 
 	it("lists and converts legacy rollouts with complete tool linkage", async () => {
@@ -173,6 +226,14 @@ describe("CodexSessionStore", () => {
 		await writeJsonl(path.join(root, "session_index.jsonl"), [
 			{ id, thread_name: "Legacy Codex", updated_at: "2025-01-01T00:00:12.000Z" },
 		]);
+		await Bun.write(
+			path.join(root, ".codex-global-state.json"),
+			JSON.stringify({
+				"electron-persisted-atom-state": {
+					"thread-descriptions-v1": { [id]: "Semantic summary for this work" },
+				},
+			}),
+		);
 		const replacementHistory = [
 			{ type: "message", role: "user", content: [{ type: "input_text", text: "Retained context" }] },
 			{ type: "compaction", encrypted_content: "encrypted-compaction" },
@@ -227,15 +288,27 @@ describe("CodexSessionStore", () => {
 				payload: { type: "thread_name_updated", thread_name: "Imported Codex" },
 			},
 		]);
+		const archivedId = "44444444-4444-4444-8444-444444444445";
+		await writeJsonl(path.join(root, "archived_sessions", `rollout-${archivedId}.jsonl`), [
+			{
+				type: "session_meta",
+				timestamp: "2025-01-02T00:00:00.000Z",
+				payload: { id: archivedId, cwd: path.join(tempRoot, "archived-codex-project") },
+			},
+		]);
 		const store = new CodexSessionStore(root);
-		const info = (await store.list())[0];
+		const listed = await store.list();
+		expect(listed.map(session => session.id)).toEqual([id]);
+		expect((await store.list({ archived: true })).map(session => session.id)).toEqual([archivedId]);
+		const info = listed[0];
 		if (!info) throw new Error("Codex fixture was not listed");
 
 		const manager = await store.load(info);
 
 		expect(info.title).toBe("Legacy Codex");
+		expect(info.description).toBe("Semantic summary for this work");
 		expect(manager.getSessionFile()).toBeUndefined();
-		expect(manager.getSessionName()).toBe("Imported Codex");
+		expect(manager.getSessionName()).toBe("Legacy Codex");
 		const entries = manager.getEntries();
 		expect(entries.some(entry => entry.type === "model_change" && entry.model === "openai-codex/gpt-5.3-codex")).toBe(
 			true,

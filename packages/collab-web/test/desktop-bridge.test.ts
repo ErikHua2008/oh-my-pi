@@ -25,6 +25,8 @@ describe("DesktopBridge browser fallback", () => {
 		expect(await desktopBridge.listProjects()).toEqual([]);
 		await expect(desktopBridge.openProject()).resolves.toBeUndefined();
 		await expect(desktopBridge.switchProject("/work/project")).resolves.toBeUndefined();
+		expect(await desktopBridge.openImportedSession("/work/project", "session-1")).toBe(false);
+		expect(await desktopBridge.takePendingImportedSession()).toBeNull();
 		await expect(desktopBridge.renameProject("/work/project", "Project")).resolves.toBeUndefined();
 		await expect(desktopBridge.removeProject("/work/project")).resolves.toBeUndefined();
 		await expect(desktopBridge.revealPath("/work/project")).resolves.toBeUndefined();
@@ -63,7 +65,12 @@ describe("DesktopBridge native transcript capability", () => {
 			calls.push({ command, args });
 			return (
 				command === "native_transcript_take_events"
-					? ["load-earlier", { type: "image-needed", imageId: "image-1" }, "unknown"]
+					? [
+							"load-earlier",
+							{ type: "image-needed", imageId: "image-1" },
+							{ type: "edit-message", rowId: "entry-1" },
+							"unknown",
+						]
 					: null
 			) as T;
 		});
@@ -96,6 +103,7 @@ describe("DesktopBridge native transcript capability", () => {
 		expect(await bridge.takeNativeTranscriptEvents()).toEqual([
 			"load-earlier",
 			{ type: "image-needed", imageId: "image-1" },
+			{ type: "edit-message", rowId: "entry-1" },
 		]);
 
 		expect(calls.map(call => call.command)).toEqual([
@@ -202,6 +210,8 @@ describe("DesktopBridge Tauri capability probe", () => {
 
 		await bridge.openProject();
 		await bridge.switchProject("/srv/other");
+		expect(await bridge.openImportedSession("/srv/imported", "session-imported")).toBe(false);
+		expect(await bridge.takePendingImportedSession()).toBeNull();
 		await bridge.renameProject("/srv/other", "Other repo");
 		await bridge.removeProject("/srv/other");
 		await bridge.revealPath("/srv/other");
@@ -214,6 +224,8 @@ describe("DesktopBridge Tauri capability probe", () => {
 			{ command: "project_list", args: undefined },
 			{ command: "project_open", args: undefined },
 			{ command: "project_switch", args: { path: "/srv/other" } },
+			{ command: "project_open_imported", args: { path: "/srv/imported", sessionId: "session-imported" } },
+			{ command: "project_take_imported", args: undefined },
 			{ command: "project_rename", args: { path: "/srv/other", name: "Other repo" } },
 			{ command: "project_remove", args: { path: "/srv/other" } },
 			{ command: "project_reveal", args: { path: "/srv/other" } },

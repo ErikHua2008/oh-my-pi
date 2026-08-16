@@ -10,7 +10,7 @@
  */
 
 import * as path from "node:path";
-import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { directoryExists, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import { MCPManager } from "../mcp";
 // Cyclic import with ../modes/core-mode (core-mode will import this registry
@@ -19,12 +19,26 @@ import { MCPManager } from "../mcp";
 import { createHeadlessCollabContext } from "../modes/core-mode";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
+import { createForeignSessionStore, persistForeignSession } from "../session/foreign-session-import";
 import { listSessions, resolveResumableSession } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 import { EventBus } from "../utils/event-bus";
 import { CollabHost } from "./host";
-import { parseCollabLink, type SessionSummary } from "./protocol";
+import {
+	type ForeignSessionSummary,
+	type ImportedForeignSession,
+	parseCollabLink,
+	type SessionSummary,
+} from "./protocol";
+
+function sameProjectPath(left: string, right: string): boolean {
+	const resolvedLeft = path.resolve(left);
+	const resolvedRight = path.resolve(right);
+	return process.platform === "win32"
+		? resolvedLeft.toLocaleLowerCase() === resolvedRight.toLocaleLowerCase()
+		: resolvedLeft === resolvedRight;
+}
 
 /** One live session tracked by the registry. */
 export interface ManagedSession {
@@ -67,6 +81,7 @@ export class SessionRegistry {
 	readonly #webLinkBase: string;
 	readonly #baseSessionOptions: CreateAgentSessionOptions;
 	readonly #sessionDir: string;
+	readonly #agentDir: string;
 	readonly #cwd: string;
 	/** Active sessions in registration order; entries stay until fully torn down. */
 	readonly #active = new Map<string, ManagedSession>();
@@ -79,6 +94,7 @@ export class SessionRegistry {
 		this.#webLinkBase = options.webLinkBase;
 		this.#baseSessionOptions = options.baseSessionOptions;
 		this.#cwd = options.baseSessionOptions.cwd ?? getProjectDir();
+		this.#agentDir = options.agentDir;
 		this.#sessionDir = options.sessionDir || SessionManager.getDefaultSessionDir(this.#cwd, options.agentDir);
 	}
 
@@ -106,6 +122,65 @@ export class SessionRegistry {
 	async createSession(): Promise<{ id: string; link: string }> {
 		const sessionManager = SessionManager.create(this.#cwd, this.#sessionDir);
 		return await this.#provisionSession(sessionManager);
+	}
+
+	/** List locally stored foreign sessions without reading their transcript bodies. */
+	async listForeignSessions(source: "codex", archived = false): Promise<ForeignSessionSummary[]> {
+		const store = createForeignSessionStore(source);
+		const sessions = await store.list({ archived });
+		return sessions.map(session => ({
+			source: "codex",
+			id: session.id,
+			path: session.path,
+			cwd: session.cwd,
+			title: session.title,
+			description: session.description,
+			archived: session.archived === true,
+			createdAt: session.created.toISOString(),
+			modifiedAt: session.modified.toISOString(),
+			messageCount: session.messageCount,
+			firstMessage: session.firstMessage,
+		}));
+	}
+
+	/** Convert and persist one foreign transcript under its original project directory. */
+	async importForeignSession(
+		source: "codex",
+		sourceId: string,
+		sourcePath: string,
+		archived = false,
+	): Promise<ImportedForeignSession> {
+		const store = createForeignSessionStore(source);
+		const available = await store.list({ archived });
+		const selected = available.find(
+			session => session.id === sourceId && path.resolve(session.path) === path.resolve(sourcePath),
+		);
+		if (!selected) throw new Error("selected Codex session is no longer available");
+		const imported = await persistForeignSession(store, selected, {
+			sessionDirForCwd: cwd =>
+				sameProjectPath(cwd, this.#cwd)
+					? this.#sessionDir
+					: SessionManager.getDefaultSessionDir(cwd, this.#agentDir),
+			validateCwd: async cwd => {
+				if (!(await directoryExists(cwd))) {
+					throw new Error(`the original Codex project folder is no longer available: ${cwd}`);
+				}
+			},
+			suppressBreadcrumb: true,
+		});
+		try {
+			const requiresProjectSwitch = !sameProjectPath(imported.getCwd(), this.#cwd);
+			const result: ImportedForeignSession = {
+				id: imported.getSessionId(),
+				cwd: imported.getCwd(),
+				title: imported.getSessionName(),
+				requiresProjectSwitch,
+			};
+			if (!requiresProjectSwitch) this.#emitChange();
+			return result;
+		} finally {
+			await imported.close();
+		}
 	}
 
 	/**

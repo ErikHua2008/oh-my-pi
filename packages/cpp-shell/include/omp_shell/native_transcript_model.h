@@ -56,6 +56,8 @@ struct NativeTranscriptRow final {
 	std::vector<std::string> media_ids;
 	std::int64_t duration_ms = -1;
 	std::vector<NativeTranscriptProcessItem> process_items;
+	std::string time_label;
+	bool can_edit = false;
 };
 
 struct NativeTranscriptVisibleRange final {

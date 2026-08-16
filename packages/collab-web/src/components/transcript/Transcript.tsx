@@ -399,11 +399,13 @@ function MessageActions({
 	text,
 	canEdit,
 	onEdit,
+	kind = "user",
 }: {
 	timestamp: string;
 	text: string;
 	canEdit: boolean;
 	onEdit?: () => void;
+	kind?: "user" | "assistant";
 }): ReactNode {
 	const [copied, setCopied] = useState(false);
 	const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -427,18 +429,23 @@ function MessageActions({
 			});
 	};
 
+	const copyButton = (
+		<button
+			type="button"
+			className="tr-message-action"
+			onClick={copy}
+			title={kind === "assistant" ? "copy response" : "copy message"}
+			aria-label={kind === "assistant" ? "copy response" : "copy message"}
+		>
+			{copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
+		</button>
+	);
+
 	return (
-		<div className="tr-message-actions">
-			<span className="tr-message-time">{messageTime(timestamp)}</span>
-			<button
-				type="button"
-				className="tr-message-action"
-				onClick={copy}
-				title="copy message"
-				aria-label="copy message"
-			>
-				{copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
-			</button>
+		<div className="tr-message-actions" data-kind={kind}>
+			{kind === "assistant" && copyButton}
+			{timestamp.length > 0 && <span className="tr-message-time">{messageTime(timestamp)}</span>}
+			{kind === "user" && copyButton}
 			{canEdit && onEdit !== undefined && (
 				<button
 					type="button"
@@ -580,10 +587,19 @@ function ProcessAssistantBlocks({
 	return blocks;
 }
 
-function FinalAssistantBody({ message }: { message: AssistantMessage }): ReactNode {
+function finalAssistantText(message: AssistantMessage): string {
+	const parts = message.content
+		.filter((block): block is TextContent => block.type === "text" && block.text.length > 0)
+		.map(block => block.text);
+	if (message.errorMessage) parts.push(message.errorMessage);
+	return parts.join("\n\n");
+}
+
+function FinalAssistantBody({ message, timestamp }: { message: AssistantMessage; timestamp: string }): ReactNode {
 	const failed = message.stopReason === "error" || message.stopReason === "aborted";
+	const text = finalAssistantText(message);
 	return (
-		<>
+		<div className="tr-assistant-message">
 			{message.content.map((block, index) =>
 				block.type === "text" && block.text.length > 0 ? (
 					<div key={index} className="tr-assistant-bubble">
@@ -601,7 +617,8 @@ function FinalAssistantBody({ message }: { message: AssistantMessage }): ReactNo
 					)}
 				</div>
 			)}
-		</>
+			{text.length > 0 && <MessageActions timestamp={timestamp} text={text} canEdit={false} kind="assistant" />}
+		</div>
 	);
 }
 
@@ -737,8 +754,15 @@ function AssistantTurnBody({
 					</div>
 				</WorkDisclosure>
 			)}
-			{turn?.finalEntry !== undefined && <FinalAssistantBody message={turn.finalEntry.message} />}
-			{showStreamFinal && stream !== null && <FinalAssistantBody message={stream} />}
+			{turn?.finalEntry !== undefined && (
+				<FinalAssistantBody message={turn.finalEntry.message} timestamp={turn.finalEntry.timestamp} />
+			)}
+			{showStreamFinal && stream !== null && (
+				<FinalAssistantBody
+					message={stream}
+					timestamp={Number.isFinite(stream.timestamp) ? new Date(stream.timestamp).toISOString() : ""}
+				/>
+			)}
 		</>
 	);
 }
@@ -873,12 +897,18 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		() => false,
 	);
 	const nativeEligible = compact !== true && desktop.nativeTranscriptAvailable;
+	const lastUserEntryId = useMemo(() => [...entries].reverse().find(isTranscriptUserPrompt)?.id, [entries]);
 	const [nativeEnabled, setNativeEnabled] = useState(false);
 	const nativeSurfaceVisible = nativeEnabled && !nativeSurfaceBlocked;
 	const [nativeRevision, setNativeRevision] = useState(0);
 	const nativeRows = useMemo(
-		() => (nativeEligible ? projectNativeTranscript(entries) : []),
-		[entries, nativeEligible],
+		() =>
+			nativeEligible
+				? projectNativeTranscript(entries, {
+						editableUserEntryId: onEditLastUserMessage !== undefined && !working ? lastUserEntryId : undefined,
+					})
+				: [],
+		[entries, lastUserEntryId, nativeEligible, onEditLastUserMessage, working],
 	);
 	const nativeHasMedia = useMemo(() => nativeRows.some(row => row.mediaIds.length > 0), [nativeRows]);
 	const loadEarlierRef = useRef(onLoadEarlier);
@@ -920,7 +950,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	useEffect(() => {
 		if (!nativeEligible) return;
 		const handleEvent = (event: DesktopNativeTranscriptEvent): void => {
-			if (typeof event !== "string") {
+			if (typeof event !== "string" && event.type === "image-needed") {
 				void host?.loadImage?.(event.imageId, "thumbnail").then(payload =>
 					desktop.provideNativeTranscriptImage({
 						imageId: event.imageId,
@@ -928,6 +958,17 @@ export function Transcript(props: TranscriptProps): ReactNode {
 						data: payload?.data ?? "",
 					}),
 				);
+				return;
+			}
+			if (typeof event !== "string" && event.type === "edit-message") {
+				if (working || onEditLastUserMessage === undefined || event.rowId !== lastUserEntryId) return;
+				const entry = entries.find(candidate => candidate.id === event.rowId);
+				if (entry?.type === "message" && entry.message.role === "user") {
+					onEditLastUserMessage(messageText(entry.message.content));
+				} else if (entry?.type === "custom_message" && entry.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
+					const details = parseCollabPromptDetails(entry.details);
+					onEditLastUserMessage(messageText(details.displayText ?? entry.content));
+				}
 				return;
 			}
 			if (event === "load-earlier" && nativeEnabled && !historyLoading) loadEarlierRef.current?.();
@@ -955,7 +996,19 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			if (timer !== undefined) window.clearInterval(timer);
 			unsubscribe();
 		};
-	}, [desktop, historyLoading, historyRemaining, host, nativeEligible, nativeEnabled, nativeHasMedia]);
+	}, [
+		desktop,
+		entries,
+		historyLoading,
+		historyRemaining,
+		host,
+		lastUserEntryId,
+		nativeEligible,
+		nativeEnabled,
+		nativeHasMedia,
+		onEditLastUserMessage,
+		working,
+	]);
 	const pageSize = compact === true ? 80 : 200;
 	const [visibleLimit, setVisibleLimit] = useState(pageSize);
 	const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
@@ -992,8 +1045,6 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			active = false;
 		};
 	}, [desktop, visibleLocalFiles]);
-
-	const lastUserEntryId = useMemo(() => [...entries].reverse().find(isTranscriptUserPrompt)?.id, [entries]);
 
 	const results = useMemo(() => {
 		const map = new Map<string, ToolResultMessage>();

@@ -326,6 +326,10 @@ describe("Transcript thinking disclosure", () => {
 
 		expect(countElements(html, ".tr-think")).toBe(1);
 		expect(countElements(html, ".tr-assistant-bubble")).toBe(1);
+		expect(countElements(html, '.tr-message-actions[data-kind="assistant"]')).toBe(1);
+		expect(countElements(html, 'button[title="copy response"]')).toBe(1);
+		expect(countElements(html, '.tr-message-actions[data-kind="assistant"] .tr-message-time')).toBe(1);
+		expect(html).not.toContain('title="edit and resend"');
 		expect(html).toContain("思考并工作了 4秒");
 		expect(html).toContain("已经完成，测试也通过了。");
 		expect(html).not.toContain("先分析实现");
@@ -410,10 +414,16 @@ describe("Transcript message Markdown", () => {
 			},
 		];
 
-		const html = renderTranscript({ entries, working: false });
+		const html = renderTranscript({ entries, working: false, onEditLastUserMessage: () => {} });
 
 		expect(countElements(html, ".tr-user-bubble")).toBe(1);
 		expect(countElements(html, ".tr-assistant-bubble")).toBe(1);
+		expect(countElements(html, '.tr-message-actions[data-kind="user"]')).toBe(1);
+		expect(countElements(html, '.tr-message-actions[data-kind="assistant"]')).toBe(1);
+		expect(countElements(html, 'button[title="copy message"]')).toBe(1);
+		expect(countElements(html, 'button[title="copy response"]')).toBe(1);
+		expect(countElements(html, 'button[title="edit and resend"]')).toBe(1);
+		expect(countElements(html, ".tr-message-time")).toBe(2);
 		expect(html).toContain("user bubble");
 		expect(html).toContain("OMP bubble");
 	});

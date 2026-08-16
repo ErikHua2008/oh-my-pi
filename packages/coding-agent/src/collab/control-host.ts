@@ -29,7 +29,10 @@ const SESSIONS_DEBOUNCE_MS = 100;
 const SESSIONS_INTERVAL_MS = 2000;
 
 /** Mutating control frames; only peers with a valid write token may send these. */
-type MutationFrame = Extract<ControlGuestFrame, { t: "ctrl-create" | "ctrl-resume" | "ctrl-rename" | "ctrl-drop" }>;
+type MutationFrame = Extract<
+	ControlGuestFrame,
+	{ t: "ctrl-create" | "ctrl-resume" | "ctrl-rename" | "ctrl-drop" | "ctrl-import" }
+>;
 
 export class ControlHost {
 	#registry: SessionRegistry;
@@ -151,10 +154,14 @@ export class ControlHost {
 			case "ctrl-list":
 				void this.#handleList(fromPeer);
 				break;
+			case "ctrl-import-list":
+				if ("archived" in frame) void this.#handleImportList(frame.reqId, frame.source, frame.archived, fromPeer);
+				break;
 			case "ctrl-create":
 			case "ctrl-resume":
 			case "ctrl-rename":
 			case "ctrl-drop":
+			case "ctrl-import":
 				void this.#handleMutation(frame, fromPeer);
 				break;
 			default:
@@ -191,10 +198,31 @@ export class ControlHost {
 		}
 	}
 
+	async #handleImportList(reqId: number, source: "codex", archived: boolean, fromPeer: number): Promise<void> {
+		const peer = this.#peers.get(fromPeer);
+		const socket = this.#socket;
+		if (!peer || !socket) return;
+		if (!peer.canWrite) {
+			socket.send({ t: "ctrl-request-error", reqId, message: "read-only" }, fromPeer);
+			return;
+		}
+		try {
+			const sessions = await this.#registry.listForeignSessions(source, archived);
+			socket.send({ t: "ctrl-import-list", reqId, source, sessions }, fromPeer);
+		} catch (err) {
+			socket.send({ t: "ctrl-request-error", reqId, message: String(err) }, fromPeer);
+		}
+	}
+
 	async #handleMutation(frame: MutationFrame, fromPeer: number): Promise<void> {
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
-			this.#socket?.send({ t: "ctrl-error", message: "read-only" }, fromPeer);
+			this.#socket?.send(
+				frame.t === "ctrl-import"
+					? { t: "ctrl-request-error", reqId: frame.reqId, message: "read-only" }
+					: { t: "ctrl-error", message: "read-only" },
+				fromPeer,
+			);
 			return;
 		}
 		try {
@@ -206,13 +234,25 @@ export class ControlHost {
 				this.#socket?.send({ t: "ctrl-session", op: "resumed", id, link }, fromPeer);
 			} else if (frame.t === "ctrl-rename") {
 				await this.#registry.renameSession(frame.id, frame.title);
-			} else {
+			} else if (frame.t === "ctrl-drop") {
 				// Drop has no link to hand back; the next ctrl-sessions
 				// broadcast reflects the removal.
 				await this.#registry.dropSession(frame.id);
+			} else {
+				const session = await this.#registry.importForeignSession(
+					frame.source,
+					frame.id,
+					frame.path,
+					frame.archived,
+				);
+				this.#socket?.send({ t: "ctrl-imported", reqId: frame.reqId, source: frame.source, session }, fromPeer);
 			}
 		} catch (err) {
-			this.#socket?.send({ t: "ctrl-error", message: String(err) }, fromPeer);
+			if (frame.t === "ctrl-import") {
+				this.#socket?.send({ t: "ctrl-request-error", reqId: frame.reqId, message: String(err) }, fromPeer);
+			} else {
+				this.#socket?.send({ t: "ctrl-error", message: String(err) }, fromPeer);
+			}
 		}
 	}
 

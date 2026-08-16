@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <iterator>
 #include <limits>
@@ -237,6 +238,16 @@ NativeTranscriptRow ParseNativeRow(const nlohmann::json& value) {
 		throw std::invalid_argument("native transcript flags are out of range");
 	}
 	row.flags = static_cast<NativeTranscriptRowFlags>(static_cast<std::uint8_t>(flags));
+	if (const auto time_label = value.find("timeLabel"); time_label != value.end()) {
+		if (!time_label->is_string()) {
+			throw std::invalid_argument("native transcript time label must be a string");
+		}
+		row.time_label = time_label->get<std::string>();
+		if (row.time_label.size() > 32) {
+			throw std::invalid_argument("native transcript time label exceeds its size limit");
+		}
+	}
+	row.can_edit = value.value("canEdit", false);
 	row.height = std::clamp(value.value("estimatedHeight", 48), 1, 100'000);
 	if (const auto duration = value.find("durationMs"); duration != value.end()) {
 		if (!duration->is_number_integer()) {
@@ -419,6 +430,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 				nlohmann::json event{{"channel", "omp-native-transcript-event"},
 					{"event", "image-needed"},
 					{"imageId", image_id}};
+				webview_.PostJson(Utf8ToWide(event.dump()));
+			});
+			native_transcript_.SetEditRequestHandler([this](std::string_view row_id) {
+				nlohmann::json event{{"channel", "omp-native-transcript-event"},
+					{"event", "edit-message"},
+					{"rowId", row_id}};
 				webview_.PostJson(Utf8ToWide(event.dump()));
 			});
 		}
@@ -1358,6 +1375,38 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			}
 			reply(true, nullptr);
 			SwitchProject(path);
+			return;
+		}
+		if (command == "project_open_imported") {
+			const std::wstring path = Utf8ToWide(args.at("path").get_ref<const std::string&>());
+			const std::string session_id = args.at("sessionId").get<std::string>();
+			if (session_id.empty() || session_id.size() > 128 ||
+				!std::ranges::all_of(session_id, [](unsigned char ch) { return std::isalnum(ch) || ch == '-' || ch == '_'; })) {
+				reply(false, nullptr, "imported session id is invalid");
+				return;
+			}
+			std::error_code path_error;
+			const std::wstring canonical = CanonicalDirectory(path, path_error);
+			if (path_error || canonical.empty()) {
+				reply(false, nullptr, "the imported session project directory is not available");
+				return;
+			}
+			const bool switched = !core_.running() ||
+				ComparableProjectPath(canonical) != ComparableProjectPath(project_directory_);
+			if (!switched) {
+				reply(true, Json{{"switched", false}});
+				return;
+			}
+			pending_imported_session_id_ = session_id;
+			reply(true, Json{{"switched", true}});
+			SwitchProject(canonical);
+			return;
+		}
+		if (command == "project_take_imported") {
+			Json value{{"session_id",
+				pending_imported_session_id_.empty() ? Json(nullptr) : Json(pending_imported_session_id_)}};
+			pending_imported_session_id_.clear();
+			reply(true, std::move(value));
 			return;
 		}
 		if (command == "project_rename") {

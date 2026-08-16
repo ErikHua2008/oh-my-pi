@@ -14,7 +14,7 @@ import type {
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { t } from "../i18n";
 import { readForeignJsonRecords } from "./foreign-session-jsonl";
-import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
+import type { ForeignSessionInfo, ForeignSessionListOptions, ForeignSessionStore } from "./foreign-session-store";
 import type { CompactionEntry, ModelChangeEntry, SessionEntry, SessionMessageEntry } from "./session-entries";
 import { SessionManager } from "./session-manager";
 
@@ -25,6 +25,7 @@ interface CodexThreadRow {
 	updated_at: number | null;
 	cwd: string;
 	title: string | null;
+	name: string | null;
 	first_user_message: string | null;
 }
 
@@ -232,6 +233,29 @@ async function loadIndex(root: string): Promise<Map<string, CodexIndexRow>> {
 		if (id && threadName && updatedAt) index.set(id, { id, thread_name: threadName, updated_at: updatedAt });
 	}
 	return index;
+}
+
+async function loadSidebarDescriptions(root: string): Promise<Map<string, string>> {
+	for (const fileName of [".codex-global-state.json", ".codex-global-state.json.bak"]) {
+		try {
+			const parsed: unknown = await Bun.file(path.join(root, fileName)).json();
+			if (!isRecord(parsed)) continue;
+			const atomState = parsed["electron-persisted-atom-state"];
+			if (!isRecord(atomState)) continue;
+			const descriptions = atomState["thread-descriptions-v1"];
+			if (!isRecord(descriptions)) return new Map();
+			const result = new Map<string, string>();
+			for (const [id, value] of Object.entries(descriptions)) {
+				if (typeof value !== "string") continue;
+				const title = value.trim();
+				if (title.length > 0) result.set(id, title);
+			}
+			return result;
+		} catch {
+			// The live state file may be between atomic replacements; try its backup.
+		}
+	}
+	return new Map();
 }
 
 function convertedResponseItem(
@@ -466,17 +490,22 @@ export class CodexSessionStore implements ForeignSessionStore {
 	}
 
 	/** Lists Codex sessions from its state index without reading transcript bodies. */
-	async list(): Promise<ForeignSessionInfo[]> {
-		const databasePath = await stateDatabasePath(this.#root);
+	async list(options: ForeignSessionListOptions = {}): Promise<ForeignSessionInfo[]> {
+		const archived = options.archived === true;
+		const [databasePath, index, sidebarDescriptions] = await Promise.all([
+			stateDatabasePath(this.#root),
+			loadIndex(this.#root),
+			loadSidebarDescriptions(this.#root),
+		]);
 		if (databasePath) {
 			try {
 				const database = new Database(databasePath, { readonly: true });
 				try {
 					const rows = database
-						.query<CodexThreadRow, []>(
-							"SELECT id, rollout_path, created_at, updated_at, cwd, title, first_user_message FROM threads",
+						.query<CodexThreadRow, [number]>(
+							"SELECT id, rollout_path, created_at, updated_at, cwd, title, name, first_user_message FROM threads WHERE COALESCE(archived, 0) = ?",
 						)
-						.all();
+						.all(archived ? 1 : 0);
 					const sessions: ForeignSessionInfo[] = [];
 					for (const row of rows) {
 						if (!row.id || !row.rollout_path || !row.cwd) continue;
@@ -485,12 +514,16 @@ export class CodexSessionStore implements ForeignSessionStore {
 							: path.join(this.#root, row.rollout_path);
 						const modified = dateFromEpoch(row.updated_at, new Date(0));
 						const created = dateFromEpoch(row.created_at, modified);
+						const visibleTitle = row.name?.trim() || index.get(row.id)?.thread_name?.trim();
 						sessions.push({
 							source: "codex",
 							id: row.id,
 							path: rolloutPath,
 							cwd: row.cwd,
-							title: row.title ?? undefined,
+							title: visibleTitle ?? row.title ?? undefined,
+							description: sidebarDescriptions.get(row.id),
+							archived,
+							titleIsAuthoritative: visibleTitle !== undefined,
 							created,
 							modified,
 							firstMessage: row.first_user_message ?? undefined,
@@ -509,8 +542,9 @@ export class CodexSessionStore implements ForeignSessionStore {
 			}
 		}
 
-		const index = await loadIndex(this.#root);
-		const roots = ["sessions", ".sessions", "archived_sessions"].map(name => path.join(this.#root, name));
+		const roots = (archived ? ["archived_sessions"] : ["sessions", ".sessions"]).map(name =>
+			path.join(this.#root, name),
+		);
 		const files = (await Promise.all(roots.map(rolloutFiles))).flat();
 		const sessions: ForeignSessionInfo[] = [];
 		for (const filePath of files) {
@@ -530,6 +564,9 @@ export class CodexSessionStore implements ForeignSessionStore {
 				path: filePath,
 				cwd,
 				title: indexed?.thread_name,
+				description: sidebarDescriptions.get(id),
+				archived,
+				titleIsAuthoritative: indexed?.thread_name !== undefined,
 				created,
 				modified,
 			});
@@ -615,7 +652,7 @@ export class CodexSessionStore implements ForeignSessionStore {
 			if (item.rollbackTurns) rollback(converted, item.rollbackTurns);
 			else converted.push(item);
 			if (item.followingMessage) converted.push({ message: item.followingMessage });
-			if (item.title) title = item.title;
+			if (item.title && !info.titleIsAuthoritative) title = item.title;
 		}
 
 		let parentId: string | null = null;

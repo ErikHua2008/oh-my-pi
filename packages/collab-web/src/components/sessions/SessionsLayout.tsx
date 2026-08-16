@@ -1,6 +1,7 @@
+import type { ForeignSessionSummary, ImportedForeignSession } from "@oh-my-pi/pi-wire";
 import { Menu, Plus } from "lucide-react";
 import type { KeyboardEvent, ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ControlClient, ControlSnapshot } from "../../lib/control-client";
 import { useControlSnapshot } from "../../lib/use-control";
 import { SettingsModal } from "../shell/SettingsModal";
@@ -16,6 +17,7 @@ export interface SessionsLayoutProps {
 	content: ReactNode;
 	onOpenSession(id: string): void;
 	onNewSession(): void;
+	onOpenImportedSession(session: ImportedForeignSession): Promise<void>;
 	onRenameSession(id: string, title: string): void;
 	onDropSession(id: string): void;
 	onLeave(): void;
@@ -32,6 +34,7 @@ export function SessionsLayout({
 	content,
 	onOpenSession,
 	onNewSession,
+	onOpenImportedSession,
 	onRenameSession,
 	onDropSession,
 	onLeave,
@@ -52,6 +55,14 @@ export function SessionsLayout({
 		setSidebarOpen(false);
 		onNewSession();
 	};
+	const listCodexSessions = useCallback((archived = false) => client.listCodexSessions(archived), [client]);
+	const importCodexSession = useCallback(
+		async (source: ForeignSessionSummary): Promise<void> => {
+			const imported = await client.importCodexSession(source);
+			await onOpenImportedSession(imported);
+		},
+		[client, onOpenImportedSession],
+	);
 
 	useEffect(() => {
 		const media = window.matchMedia("(max-width: 900px)");
@@ -142,6 +153,8 @@ export function SessionsLayout({
 					onOpenSettings={() => setSettingsOpen(true)}
 					onOpenSession={openSession}
 					onNewSession={newSession}
+					onListCodexSessions={listCodexSessions}
+					onImportCodexSession={importCodexSession}
 					onRenameSession={onRenameSession}
 					onDropSession={onDropSession}
 					onLeave={onLeave}

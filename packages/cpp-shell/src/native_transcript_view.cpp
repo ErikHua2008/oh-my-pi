@@ -36,7 +36,9 @@ constexpr float kThumbnailHeight = 160.0F;
 constexpr float kMediaGap = 8.0F;
 constexpr float kScrollbarHotWidth = 5.0F;
 constexpr UINT_PTR kScrollbarHideTimer = 1;
+constexpr UINT_PTR kMessageCopyFeedbackTimer = 2;
 constexpr UINT kScrollbarHideDelayMs = 1'100;
+constexpr UINT kMessageCopyFeedbackDelayMs = 1'200;
 constexpr UINT kContextCopy = 1;
 constexpr UINT kContextSelectAll = 2;
 constexpr NativeMenuItem kContextCopyItem{L"复制\tCtrl+C", false, false};
@@ -86,6 +88,36 @@ constexpr NativeMenuItem kContextSelectAllItem{L"全选\tCtrl+A", false, false};
 	key.push_back('\x1f');
 	key.append(item.id);
 	return key;
+}
+
+bool WriteClipboardText(HWND owner, std::wstring_view text) {
+	if (text.empty() || !OpenClipboard(owner)) {
+		return false;
+	}
+	if (!EmptyClipboard()) {
+		CloseClipboard();
+		return false;
+	}
+	const std::size_t byte_count = (text.size() + 1) * sizeof(wchar_t);
+	HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, byte_count);
+	bool copied = false;
+	if (memory != nullptr) {
+		void* destination = GlobalLock(memory);
+		if (destination != nullptr) {
+			std::memcpy(destination, text.data(), text.size() * sizeof(wchar_t));
+			static_cast<wchar_t*>(destination)[text.size()] = L'\0';
+			GlobalUnlock(memory);
+			if (SetClipboardData(CF_UNICODETEXT, memory) != nullptr) {
+				memory = nullptr;
+				copied = true;
+			}
+		}
+	}
+	if (memory != nullptr) {
+		GlobalFree(memory);
+	}
+	CloseClipboard();
+	return copied;
 }
 
 } // namespace
@@ -175,6 +207,7 @@ bool NativeTranscriptView::Create(HWND parent, HINSTANCE instance) {
 void NativeTranscriptView::Destroy() {
 	if (window_ != nullptr) {
 		KillTimer(window_, kScrollbarHideTimer);
+		KillTimer(window_, kMessageCopyFeedbackTimer);
 	}
 	DiscardDeviceResources();
 	layout_cache_.clear();
@@ -272,6 +305,7 @@ void NativeTranscriptView::SetDarkTheme(bool dark) {
 void NativeTranscriptView::Clear() {
 	if (window_ != nullptr) {
 		KillTimer(window_, kScrollbarHideTimer);
+		KillTimer(window_, kMessageCopyFeedbackTimer);
 	}
 	model_.Clear();
 	layout_cache_.clear();
@@ -291,6 +325,8 @@ void NativeTranscriptView::Clear() {
 	scrollbar_dragging_ = false;
 	jump_button_hovered_ = false;
 	jump_button_pressed_ = false;
+	hovered_message_action_.reset();
+	copied_row_id_.clear();
 	mouse_tracking_ = false;
 	stick_to_bottom_ = true;
 	occlusion_.reset();
@@ -330,6 +366,13 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 		(selection_focus_ && !model_.IndexOf(selection_focus_->row_id))) {
 		ClearSelection();
 	}
+	if (hovered_message_action_ && !model_.IndexOf(hovered_message_action_->row_id)) {
+		hovered_message_action_.reset();
+	}
+	if (!copied_row_id_.empty() && !model_.IndexOf(copied_row_id_)) {
+		copied_row_id_.clear();
+		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
+	}
 	layout_cache_.clear();
 	if (keep_tail) {
 		ScrollToBottom();
@@ -366,6 +409,11 @@ void NativeTranscriptView::Remove(std::string_view id) {
 	if ((selection_anchor_ && selection_anchor_->row_id == id) ||
 		(selection_focus_ && selection_focus_->row_id == id)) {
 		ClearSelection();
+	}
+	if (hovered_message_action_ && hovered_message_action_->row_id == id) hovered_message_action_.reset();
+	if (copied_row_id_ == id) {
+		copied_row_id_.clear();
+		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
 	}
 	layout_cache_.erase(std::string(id));
 	std::string process_prefix(id);
@@ -415,6 +463,10 @@ bool NativeTranscriptView::TakeHistoryRequest() noexcept {
 
 void NativeTranscriptView::SetImageRequestHandler(std::function<void(std::string_view)> handler) {
 	image_request_handler_ = std::move(handler);
+}
+
+void NativeTranscriptView::SetEditRequestHandler(std::function<void(std::string_view)> handler) {
+	edit_request_handler_ = std::move(handler);
 }
 
 void NativeTranscriptView::ProvideImage(std::string image_id, std::vector<std::uint8_t> encoded_bytes) {
@@ -488,6 +540,14 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			KillTimer(window_, kScrollbarHideTimer);
 			if (overlay_scrollbar_visible_) {
 				overlay_scrollbar_visible_ = false;
+				InvalidateRect(window_, nullptr, FALSE);
+			}
+			return 0;
+		}
+		if (wparam == kMessageCopyFeedbackTimer) {
+			KillTimer(window_, kMessageCopyFeedbackTimer);
+			if (!copied_row_id_.empty()) {
+				copied_row_id_.clear();
 				InvalidateRect(window_, nullptr, FALSE);
 			}
 			return 0;
@@ -613,6 +673,14 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			scrollbar_drag_anchor_offset_ = scroll_offset_;
 			return 0;
 		}
+		if (const auto action = HitTestMessageAction(point)) {
+			if (action->action == MessageActionKind::Copy) {
+				CopyRowToClipboard(action->row_id);
+			} else if (edit_request_handler_) {
+				edit_request_handler_(action->row_id);
+			}
+			return 0;
+		}
 		if (const auto process_item = HitTestProcessItemHeader(point)) {
 			ToggleProcessItem(*process_item);
 			return 0;
@@ -642,6 +710,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			mouse_tracking_ = TrackMouseEvent(&tracking) != FALSE;
 		}
 		UpdateOverlayHover(point);
+		UpdateMessageActionHover(point);
 		if (scrollbar_dragging_ && (wparam & MK_LBUTTON) != 0) {
 			const NativeTranscriptScrollbarGeometry scrollbar = CurrentScrollbarGeometry();
 			const float travel = scrollbar.track.Height() - scrollbar.thumb.Height();
@@ -709,9 +778,10 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 	}
 	case WM_MOUSELEAVE:
 		mouse_tracking_ = false;
-		if (scrollbar_hovered_ || jump_button_hovered_) {
+		if (scrollbar_hovered_ || jump_button_hovered_ || hovered_message_action_) {
 			scrollbar_hovered_ = false;
 			jump_button_hovered_ = false;
+			hovered_message_action_.reset();
 			InvalidateRect(window_, nullptr, FALSE);
 		}
 		ScheduleOverlayScrollbarHide();
@@ -734,6 +804,10 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 					SetCursor(LoadCursorW(nullptr, IDC_HAND));
 					return TRUE;
 				}
+				if (HitTestMessageAction(point)) {
+					SetCursor(LoadCursorW(nullptr, IDC_HAND));
+					return TRUE;
+				}
 			}
 			SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
 			return TRUE;
@@ -741,7 +815,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		break;
 	case WM_LBUTTONDBLCLK: {
 		const POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
-		if (HitTestProcessItemHeader(point) || HitTestExpandableHeader(point)) {
+		if (HitTestMessageAction(point) || HitTestProcessItemHeader(point) || HitTestExpandableHeader(point)) {
 			return 0;
 		}
 		if (const auto hit = HitTestText(point)) {
@@ -770,6 +844,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		return DLGC_WANTARROWS | DLGC_WANTCHARS;
 	case WM_NCDESTROY:
 		KillTimer(window_, kScrollbarHideTimer);
+		KillTimer(window_, kMessageCopyFeedbackTimer);
 		SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
 		window_ = nullptr;
 		return 0;
@@ -935,7 +1010,8 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 			user,
 			cached->measured_width,
 			cached->measured_height,
-			row.media_ids.size());
+			row.media_ids.size(),
+			!row.time_label.empty());
 	}
 	float structured_height = 2.0F * kRowVerticalPadding + kLabelHeight + kTextGap;
 	if (structured_process) {
@@ -1025,6 +1101,9 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 			D2D1_DRAW_TEXT_OPTIONS_CLIP);
 		DrawMedia(row, content_left, origin.y + cached->measured_height + kMediaGap, content_width);
 	}
+	if (message && !row.time_label.empty()) {
+		DrawMessageActions(row, bubble_layout, row_top);
+	}
 	if (structured_process) {
 		float item_top = row_top + kRowVerticalPadding + kLabelHeight + kTextGap;
 		for (const NativeTranscriptProcessItem& item : row.process_items) {
@@ -1111,6 +1190,88 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 			D2D1::Point2F(viewport_width - horizontal_padding, row_top + row_height - 1.0F),
 			line_brush_.Get(),
 			1.0F);
+	}
+}
+
+void NativeTranscriptView::DrawMessageActions(
+	const NativeTranscriptRow& row,
+	const NativeTranscriptBubbleLayout& bubble_layout,
+	float row_top) {
+	const bool user = row.kind == NativeTranscriptRowKind::User;
+	NativeTranscriptMessageActionsLayout actions =
+		ComputeNativeTranscriptMessageActionsLayout(bubble_layout, user, row.can_edit);
+	const auto offset = [row_top](NativeTranscriptRectF& rect) {
+		rect.top += row_top;
+		rect.bottom += row_top;
+	};
+	offset(actions.time);
+	offset(actions.copy);
+	if (actions.has_edit) offset(actions.edit);
+
+	const auto is_hovered = [this, &row](MessageActionKind action) {
+		return hovered_message_action_ && hovered_message_action_->row_id == row.id &&
+			hovered_message_action_->action == action;
+	};
+	const auto draw_hover = [this](const NativeTranscriptRectF& rect) {
+		render_target_->FillRoundedRectangle(D2D1::RoundedRect(ToD2DRect(rect), 5.0F, 5.0F), assistant_brush_.Get());
+	};
+	if (is_hovered(MessageActionKind::Copy)) draw_hover(actions.copy);
+	if (actions.has_edit && is_hovered(MessageActionKind::Edit)) draw_hover(actions.edit);
+
+	const std::wstring time = Utf8ToWide(row.time_label);
+	render_target_->DrawTextW(
+		time.data(),
+		static_cast<UINT32>(time.size()),
+		label_format_.Get(),
+		ToD2DRect(actions.time),
+		muted_brush_.Get(),
+		D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+	ID2D1SolidColorBrush* copy_brush = is_hovered(MessageActionKind::Copy) ? primary_brush_.Get() : muted_brush_.Get();
+	const float copy_left = actions.copy.left + 7.0F;
+	const float copy_top = actions.copy.top + 6.0F;
+	if (copied_row_id_ == row.id) {
+		render_target_->DrawLine(
+			D2D1::Point2F(copy_left, copy_top + 6.0F),
+			D2D1::Point2F(copy_left + 3.0F, copy_top + 9.0F),
+			copy_brush,
+			1.7F);
+		render_target_->DrawLine(
+			D2D1::Point2F(copy_left + 3.0F, copy_top + 9.0F),
+			D2D1::Point2F(copy_left + 10.0F, copy_top + 1.0F),
+			copy_brush,
+			1.7F);
+	} else {
+		render_target_->DrawRoundedRectangle(
+			D2D1::RoundedRect(D2D1::RectF(copy_left + 3.0F, copy_top, copy_left + 11.0F, copy_top + 10.0F), 2.0F, 2.0F),
+			copy_brush,
+			1.4F);
+		render_target_->DrawRoundedRectangle(
+			D2D1::RoundedRect(D2D1::RectF(copy_left, copy_top + 3.0F, copy_left + 8.0F, copy_top + 13.0F), 2.0F, 2.0F),
+			copy_brush,
+			1.4F);
+	}
+
+	if (actions.has_edit) {
+		ID2D1SolidColorBrush* edit_brush =
+			is_hovered(MessageActionKind::Edit) ? primary_brush_.Get() : muted_brush_.Get();
+		const float left = actions.edit.left + 6.0F;
+		const float top = actions.edit.top + 6.0F;
+		render_target_->DrawLine(
+			D2D1::Point2F(left + 1.0F, top + 10.0F),
+			D2D1::Point2F(left + 10.0F, top + 1.0F),
+			edit_brush,
+			2.0F);
+		render_target_->DrawLine(
+			D2D1::Point2F(left, top + 13.0F),
+			D2D1::Point2F(left + 4.0F, top + 12.0F),
+			edit_brush,
+			1.5F);
+		render_target_->DrawLine(
+			D2D1::Point2F(left + 9.0F, top + 1.0F),
+			D2D1::Point2F(left + 12.0F, top + 4.0F),
+			edit_brush,
+			1.5F);
 	}
 }
 
@@ -1418,6 +1579,56 @@ std::optional<NativeTranscriptView::ProcessItemHit> NativeTranscriptView::HitTes
 	return std::nullopt;
 }
 
+std::optional<NativeTranscriptView::MessageActionHit> NativeTranscriptView::HitTestMessageAction(POINT point) {
+	if (model_.Empty() || window_ == nullptr) {
+		return std::nullopt;
+	}
+	RECT client{};
+	GetClientRect(window_, &client);
+	if (client.right <= client.left || client.bottom <= client.top) {
+		return std::nullopt;
+	}
+	const float scale = std::max(0.01F, DpiScale());
+	const float x = static_cast<float>(point.x) / scale;
+	const float y = static_cast<float>(point.y) / scale;
+	const float viewport_width = static_cast<float>(client.right - client.left) / scale;
+	const std::int64_t content_y = scroll_offset_ + static_cast<std::int64_t>(std::floor(y));
+	const NativeTranscriptVisibleRange range = model_.VisibleRange(content_y, 1);
+	if (range.Empty() || range.first >= model_.Size()) {
+		return std::nullopt;
+	}
+	const NativeTranscriptRow& row = model_.RowAt(range.first);
+	const bool user = row.kind == NativeTranscriptRowKind::User;
+	if ((!user && row.kind != NativeTranscriptRowKind::Assistant) || row.time_label.empty()) {
+		return std::nullopt;
+	}
+	TextLayout* layout = GetTextLayout(row, NativeTranscriptBubbleMaxContentWidth(viewport_width, user));
+	if (layout == nullptr) {
+		return std::nullopt;
+	}
+	NativeTranscriptBubbleLayout bubble = ComputeNativeTranscriptBubbleLayout(
+		viewport_width, user, layout->measured_width, layout->measured_height, row.media_ids.size(), true);
+	NativeTranscriptMessageActionsLayout actions =
+		ComputeNativeTranscriptMessageActionsLayout(bubble, user, row.can_edit);
+	const float row_top = static_cast<float>(model_.RowTop(range.first) - scroll_offset_);
+	const auto hit = [x, y, row_top](const NativeTranscriptRectF& rect) {
+		return rect.Contains(x, y - row_top);
+	};
+	if (hit(actions.copy)) return MessageActionHit{row.id, MessageActionKind::Copy};
+	if (actions.has_edit && hit(actions.edit)) return MessageActionHit{row.id, MessageActionKind::Edit};
+	return std::nullopt;
+}
+
+void NativeTranscriptView::UpdateMessageActionHover(POINT point) {
+	const auto next = HitTestMessageAction(point);
+	const bool unchanged = (!next && !hovered_message_action_) ||
+		(next && hovered_message_action_ && next->row_id == hovered_message_action_->row_id &&
+			next->action == hovered_message_action_->action);
+	if (unchanged) return;
+	hovered_message_action_ = next;
+	if (window_ != nullptr) InvalidateRect(window_, nullptr, FALSE);
+}
+
 void NativeTranscriptView::ToggleExpandable(std::string_view row_id) {
 	const auto index = model_.IndexOf(row_id);
 	if (!index) {
@@ -1694,29 +1905,17 @@ void NativeTranscriptView::CopySelectionToClipboard() {
 			selection->last_index,
 			selection->first_position,
 			selection->last_position});
-	if (text.empty() || !OpenClipboard(window_)) {
-		return;
-	}
-	if (!EmptyClipboard()) {
-		CloseClipboard();
-		return;
-	}
-	const std::size_t byte_count = (text.size() + 1) * sizeof(wchar_t);
-	HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, byte_count);
-	if (memory != nullptr) {
-		void* destination = GlobalLock(memory);
-		if (destination != nullptr) {
-			std::memcpy(destination, text.c_str(), byte_count);
-			GlobalUnlock(memory);
-			if (SetClipboardData(CF_UNICODETEXT, memory) != nullptr) {
-				memory = nullptr;
-			}
-		}
-	}
-	if (memory != nullptr) {
-		GlobalFree(memory);
-	}
-	CloseClipboard();
+	static_cast<void>(WriteClipboardText(window_, text));
+}
+
+void NativeTranscriptView::CopyRowToClipboard(std::string_view row_id) {
+	const auto index = model_.IndexOf(row_id);
+	if (!index) return;
+	if (!WriteClipboardText(window_, Utf8ToWide(model_.RowAt(*index).text))) return;
+	copied_row_id_ = row_id;
+	KillTimer(window_, kMessageCopyFeedbackTimer);
+	SetTimer(window_, kMessageCopyFeedbackTimer, kMessageCopyFeedbackDelayMs, nullptr);
+	InvalidateRect(window_, nullptr, FALSE);
 }
 
 void NativeTranscriptView::ShowContextMenu(POINT screen_point) {

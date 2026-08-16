@@ -38,6 +38,7 @@ export function useNativeTranscriptOcclusion(
 	open: boolean,
 	surfaceRef: RefObject<HTMLElement | null>,
 	desktop: Pick<DesktopBridge, "setNativeTranscriptOcclusion"> = defaultDesktopBridge,
+	layoutKey?: unknown,
 ): void {
 	useLayoutEffect(() => {
 		if (!open) return;
@@ -76,5 +77,5 @@ export function useNativeTranscriptOcclusion(
 			window.visualViewport?.removeEventListener("resize", schedule);
 			void desktop.setNativeTranscriptOcclusion(null);
 		};
-	}, [desktop, open, surfaceRef]);
+	}, [desktop, layoutKey, open, surfaceRef]);
 }

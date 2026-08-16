@@ -41,6 +41,8 @@ export type {
 	CollabUiSelectItem,
 	ControlGuestFrame,
 	ControlHostFrame,
+	ForeignSessionSummary,
+	ImportedForeignSession,
 	ParsedCollabLink,
 	RelayControlMessage,
 	RelayControlToGuest,

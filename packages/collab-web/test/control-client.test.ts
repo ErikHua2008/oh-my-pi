@@ -129,6 +129,73 @@ describe("ControlClient frame apply", () => {
 		expect(onError).toHaveBeenCalledWith("read-only");
 		expect(client.getSnapshot()).toBe(before);
 	});
+
+	it("round-trips Codex conversation listing and import requests by request id", async () => {
+		const sent: ControlGuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: ControlGuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const { client, socket } = makeClient(CTRL_WRITE_LINK);
+			const listPromise = client.listCodexSessions(true);
+			const listRequest = sent.at(-1);
+			if (listRequest?.t !== "ctrl-import-list") throw new Error("expected ctrl-import-list");
+			expect(listRequest.archived).toBe(true);
+			const source = {
+				source: "codex" as const,
+				id: "codex-1",
+				path: "/codex/rollout.jsonl",
+				cwd: "/work/project",
+				title: "Imported chat",
+				description: "Semantic chat summary",
+				archived: true,
+				createdAt: "2026-08-01T00:00:00.000Z",
+				modifiedAt: "2026-08-02T00:00:00.000Z",
+			};
+			socket.onFrame?.({ t: "ctrl-import-list", reqId: listRequest.reqId, source: "codex", sessions: [source] }, 0);
+			expect(await listPromise).toEqual([source]);
+
+			const importPromise = client.importCodexSession(source);
+			const importRequest = sent.at(-1);
+			if (importRequest?.t !== "ctrl-import") throw new Error("expected ctrl-import");
+			expect(importRequest).toEqual({
+				t: "ctrl-import",
+				reqId: importRequest.reqId,
+				source: "codex",
+				id: source.id,
+				path: source.path,
+				archived: true,
+			});
+			const imported = {
+				id: "omp-1",
+				cwd: source.cwd,
+				title: source.title,
+				requiresProjectSwitch: true,
+			};
+			socket.onFrame?.({ t: "ctrl-imported", reqId: importRequest.reqId, source: "codex", session: imported }, 0);
+			expect(await importPromise).toEqual(imported);
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
+	it("rejects the matching Codex request when the host returns a correlated error", async () => {
+		const sent: ControlGuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: ControlGuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const { client, socket } = makeClient(CTRL_WRITE_LINK);
+			const promise = client.listCodexSessions(false);
+			const request = sent.at(-1);
+			if (request?.t !== "ctrl-import-list") throw new Error("expected ctrl-import-list");
+			expect(request.archived).toBe(false);
+			socket.onFrame?.({ t: "ctrl-request-error", reqId: request.reqId, message: "read-only" }, 0);
+			await expect(promise).rejects.toThrow("read-only");
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
 });
 
 describe("ControlClient phase transitions", () => {

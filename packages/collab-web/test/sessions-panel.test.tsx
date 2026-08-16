@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import type { SessionSummary } from "@oh-my-pi/pi-wire";
+import type { ForeignSessionSummary, SessionSummary } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
+import { CodexImportModal, groupCodexImportSessions } from "../src/components/sessions/CodexImportModal";
 import {
 	SessionsPanel,
 	groupSessionsByProject,
@@ -23,6 +24,26 @@ function session(id: string, cwd: string, modifiedAt: string, title = id): Sessi
 	};
 }
 
+function codexSession(
+	id: string,
+	cwd: string,
+	modifiedAt: string,
+	title: string,
+	description?: string,
+): ForeignSessionSummary {
+	return {
+		source: "codex",
+		id,
+		path: `C:\\codex\\${id}.jsonl`,
+		cwd,
+		title,
+		description,
+		archived: false,
+		createdAt: "2026-08-01T00:00:00.000Z",
+		modifiedAt,
+	};
+}
+
 function snapshot(sessions: readonly SessionSummary[], readOnly = false): ControlSnapshot {
 	return {
 		phase: "live",
@@ -40,6 +61,8 @@ function renderPanel(snap: ControlSnapshot, activeSessionId: string | null = nul
 			onOpenSettings={() => {}}
 			onOpenSession={() => {}}
 			onNewSession={() => {}}
+			onListCodexSessions={async () => []}
+			onImportCodexSession={async () => {}}
 			onRenameSession={() => {}}
 			onDropSession={() => {}}
 			onLeave={() => {}}
@@ -88,6 +111,29 @@ describe("SessionsPanel project grouping", () => {
 	});
 });
 
+describe("Codex import conversation matching", () => {
+	it("groups visible Codex thread names under their original projects", () => {
+		const groups = groupCodexImportSessions([
+			codexSession("screen", "C:\\work\\test", "2026-08-03T00:00:00.000Z", "Screen", "Screenshot analysis"),
+			codexSession("main", "C:\\work\\OMP", "2026-08-05T00:00:00.000Z", "main", "C++ shell work"),
+			codexSession("gitlab", "c:/work/test/", "2026-08-04T00:00:00.000Z", "Gitlab126&127"),
+		]);
+
+		expect(groups.map(group => group.name)).toEqual(["OMP", "test"]);
+		expect(groups[1]?.sessions.map(item => item.title)).toEqual(["Gitlab126&127", "Screen"]);
+	});
+
+	it("shows an explicit archived-chat control in the picker", () => {
+		const html = renderToStaticMarkup(
+			<CodexImportModal loadSessions={async () => []} onImport={async () => {}} onClose={() => {}} />,
+		);
+
+		expect(html).toContain("Current chats");
+		expect(html).toContain("Archived chats");
+		expect(html).toContain("Search chats or projects");
+	});
+});
+
 describe("SessionsPanel session actions", () => {
 	it("uses the Grimoire Router App name and both monochrome theme marks", () => {
 		const html = renderPanel(snapshot([]));
@@ -98,14 +144,14 @@ describe("SessionsPanel session actions", () => {
 		expect(html).not.toContain(">OMP<");
 	});
 
-	it("places the future Codex import action directly after the new-session action", () => {
+	it("places the Codex import action directly after the new-session action", () => {
 		const html = renderPanel(snapshot([]));
 		const newSessionIndex = html.indexOf("New session");
 		const importIndex = html.indexOf("Import Chat from Codex");
 
 		expect(newSessionIndex).toBeGreaterThan(-1);
 		expect(importIndex).toBeGreaterThan(newSessionIndex);
-		expect(html).toContain('disabled="" title="Coming soon"');
+		expect(html).toContain(">Import Chat from Codex</span>");
 	});
 
 	it("keeps context menus inside every viewport edge", () => {

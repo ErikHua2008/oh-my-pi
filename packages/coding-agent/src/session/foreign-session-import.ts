@@ -5,6 +5,16 @@ import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } fr
 import type { SessionInfo } from "./session-listing";
 import type { SessionManager } from "./session-manager";
 
+export interface PersistForeignSessionOptions {
+	fallbackCwd?: string;
+	sessionDir?: string;
+	/** Resolve the destination after the transcript's authoritative cwd has been loaded. */
+	sessionDirForCwd?(cwd: string): string;
+	/** Reject an unavailable or disallowed authoritative cwd before creating the OMP copy. */
+	validateCwd?(cwd: string): Promise<void>;
+	suppressBreadcrumb?: boolean;
+}
+
 /** Construct the importer for a supported foreign session source. */
 export function createForeignSessionStore(source: ForeignSessionSource): ForeignSessionStore {
 	return source === "claude" ? new ClaudeSessionStore() : new CodexSessionStore();
@@ -36,17 +46,24 @@ export function foreignSessionInfoToSessionInfo(info: ForeignSessionInfo): Sessi
 export async function persistForeignSession(
 	store: ForeignSessionStore,
 	info: ForeignSessionInfo,
-	options?: { fallbackCwd?: string; sessionDir?: string; suppressBreadcrumb?: boolean },
+	options?: PersistForeignSessionOptions,
 ): Promise<SessionManager> {
 	const imported = await store.load(info);
-	imported.appendCustomEntry("foreign_session_import", {
-		source: info.source,
-		sourceId: info.id,
-		sourcePath: info.path,
-		sourceCwd: info.cwd,
-	});
-	if (options?.fallbackCwd && !(await directoryExists(imported.getCwd()))) {
-		await imported.moveTo(options.fallbackCwd);
+	try {
+		imported.appendCustomEntry("foreign_session_import", {
+			source: info.source,
+			sourceId: info.id,
+			sourcePath: info.path,
+			sourceCwd: info.cwd,
+		});
+		if (options?.fallbackCwd && !(await directoryExists(imported.getCwd()))) {
+			await imported.moveTo(options.fallbackCwd);
+		}
+		const cwd = imported.getCwd();
+		await options?.validateCwd?.(cwd);
+		const sessionDir = options?.sessionDirForCwd?.(cwd) ?? options?.sessionDir;
+		return await imported.persistCopy({ sessionDir, suppressBreadcrumb: options?.suppressBreadcrumb });
+	} finally {
+		await imported.close();
 	}
-	return await imported.persistCopy(options);
 }

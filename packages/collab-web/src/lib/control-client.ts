@@ -11,7 +11,12 @@
  * / `onError` callbacks.
  */
 
-import type { ControlHostFrame, SessionSummary } from "@oh-my-pi/pi-wire";
+import type {
+	ControlHostFrame,
+	ForeignSessionSummary,
+	ImportedForeignSession,
+	SessionSummary,
+} from "@oh-my-pi/pi-wire";
 import { importRoomKey } from "./codec";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
 import { CollabSocket } from "./socket";
@@ -34,6 +39,14 @@ export interface ControlSessionInfo {
 
 /** Mirrors the session guest's WELCOME_TIMEOUT_MS. */
 const WELCOME_TIMEOUT_MS = 30_000;
+const IMPORT_LIST_TIMEOUT_MS = 30_000;
+const IMPORT_TIMEOUT_MS = 120_000;
+
+interface PendingRequest<T> {
+	resolve(value: T): void;
+	reject(error: Error): void;
+	timeout: Timer;
+}
 
 export class ControlClient {
 	readonly #socket: CollabSocket;
@@ -50,6 +63,9 @@ export class ControlClient {
 	#readOnly = false;
 	#sessions: readonly SessionSummary[] = [];
 	#snapshot: ControlSnapshot;
+	#nextRequestId = 1;
+	readonly #pendingImportLists = new Map<number, PendingRequest<readonly ForeignSessionSummary[]>>();
+	readonly #pendingImports = new Map<number, PendingRequest<ImportedForeignSession>>();
 
 	/** Host-side `ctrl-error` frames surface here (the App shows a toast). */
 	onError?: (message: string) => void;
@@ -92,6 +108,7 @@ export class ControlClient {
 
 	close(): void {
 		this.#clearWelcomeTimer();
+		this.#rejectPendingRequests(new Error("control room closed"));
 		this.#socket.close();
 	}
 
@@ -127,6 +144,39 @@ export class ControlClient {
 		this.#socket.send({ t: "ctrl-rename", id, title });
 	}
 
+	listCodexSessions(archived = false): Promise<readonly ForeignSessionSummary[]> {
+		const reqId = this.#nextRequestId++;
+		const { promise, resolve, reject } = Promise.withResolvers<readonly ForeignSessionSummary[]>();
+		const timeout = setTimeout(() => {
+			this.#pendingImportLists.delete(reqId);
+			reject(new Error("timed out while loading Codex conversations"));
+		}, IMPORT_LIST_TIMEOUT_MS);
+		this.#pendingImportLists.set(reqId, { resolve, reject, timeout });
+		this.#socket.send({ t: "ctrl-import-list", reqId, source: "codex", archived });
+		return promise;
+	}
+
+	importCodexSession(
+		session: Pick<ForeignSessionSummary, "id" | "path" | "archived">,
+	): Promise<ImportedForeignSession> {
+		const reqId = this.#nextRequestId++;
+		const { promise, resolve, reject } = Promise.withResolvers<ImportedForeignSession>();
+		const timeout = setTimeout(() => {
+			this.#pendingImports.delete(reqId);
+			reject(new Error("timed out while importing the Codex conversation"));
+		}, IMPORT_TIMEOUT_MS);
+		this.#pendingImports.set(reqId, { resolve, reject, timeout });
+		this.#socket.send({
+			t: "ctrl-import",
+			reqId,
+			source: "codex",
+			id: session.id,
+			path: session.path,
+			archived: session.archived,
+		});
+		return promise;
+	}
+
 	#handleOpen(): void {
 		this.#socket.send({ t: "ctrl-hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
@@ -149,6 +199,7 @@ export class ControlClient {
 		this.#clearWelcomeTimer();
 		this.#phase = "ended";
 		this.#endedReason = reason;
+		this.#rejectPendingRequests(new Error(reason));
 		this.#commit();
 		this.onEnded?.(reason);
 		this.#socket.close();
@@ -159,6 +210,34 @@ export class ControlClient {
 			clearTimeout(this.#welcomeTimer);
 			this.#welcomeTimer = null;
 		}
+	}
+
+	#rejectPendingRequests(error: Error): void {
+		for (const request of this.#pendingImportLists.values()) {
+			clearTimeout(request.timeout);
+			request.reject(error);
+		}
+		for (const request of this.#pendingImports.values()) {
+			clearTimeout(request.timeout);
+			request.reject(error);
+		}
+		this.#pendingImportLists.clear();
+		this.#pendingImports.clear();
+	}
+
+	#rejectRequest(reqId: number, message: string): void {
+		const list = this.#pendingImportLists.get(reqId);
+		if (list) {
+			this.#pendingImportLists.delete(reqId);
+			clearTimeout(list.timeout);
+			list.reject(new Error(message));
+			return;
+		}
+		const imported = this.#pendingImports.get(reqId);
+		if (!imported) return;
+		this.#pendingImports.delete(reqId);
+		clearTimeout(imported.timeout);
+		imported.reject(new Error(message));
 	}
 
 	/** Surfaces apply failures instead of letting the socket's recv chain swallow them. */
@@ -190,6 +269,25 @@ export class ControlClient {
 				// Consumed by the App (pending-op verification + switch); the
 				// snapshot intentionally does not change for these frames.
 				this.onSession?.(frame);
+				return;
+			case "ctrl-import-list": {
+				const pending = this.#pendingImportLists.get(frame.reqId);
+				if (!pending) return;
+				this.#pendingImportLists.delete(frame.reqId);
+				clearTimeout(pending.timeout);
+				pending.resolve(frame.sessions);
+				return;
+			}
+			case "ctrl-imported": {
+				const pending = this.#pendingImports.get(frame.reqId);
+				if (!pending) return;
+				this.#pendingImports.delete(frame.reqId);
+				clearTimeout(pending.timeout);
+				pending.resolve(frame.session);
+				return;
+			}
+			case "ctrl-request-error":
+				this.#rejectRequest(frame.reqId, frame.message);
 				return;
 			case "ctrl-error":
 				this.onError?.(frame.message);

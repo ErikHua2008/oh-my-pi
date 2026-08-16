@@ -31,6 +31,10 @@ export interface DesktopNativeTranscriptRow {
 	flags: number;
 	estimatedHeight: number;
 	mediaIds: readonly string[];
+	/** Localized compact time displayed below a completed message bubble. */
+	timeLabel?: string;
+	/** Only the final editable user prompt receives the native pencil action. */
+	canEdit?: boolean;
 	/** Exact completed reasoning/model-call duration when durable timestamps are available. */
 	durationMs?: number;
 	/** Second-level operation disclosures shown after the reasoning row is opened. */
@@ -78,6 +82,7 @@ export type DesktopNativeTranscriptEvent =
 	| "load-earlier"
 	| "use-native"
 	| "use-web"
+	| { type: "edit-message"; rowId: string }
 	| { type: "image-needed"; imageId: string };
 
 export type DesktopWindowAction =
@@ -120,6 +125,10 @@ export interface DesktopBridge {
 	listProjects(): Promise<readonly DesktopProject[]>;
 	openProject(): Promise<void>;
 	switchProject(path: string): Promise<void>;
+	/** Switch to an imported transcript's original project; true when navigation was started. */
+	openImportedSession(path: string, sessionId: string): Promise<boolean>;
+	/** Consume the imported session that should be resumed after a native project switch. */
+	takePendingImportedSession(): Promise<string | null>;
 	renameProject(path: string, name: string): Promise<void>;
 	removeProject(path: string): Promise<void>;
 	revealPath(path: string): Promise<void>;
@@ -151,6 +160,21 @@ interface SessionPreferencesResponse {
 }
 
 const ATTACHMENT_STATUS_BATCH = 64;
+
+function parseNativeTranscriptEvent(value: unknown): DesktopNativeTranscriptEvent | null {
+	if (value === "load-earlier" || value === "use-native" || value === "use-web") return value;
+	if (value === null || typeof value !== "object") return null;
+	const record = value as Record<string, unknown>;
+	const type = typeof record.type === "string" ? record.type : record.event;
+	if (type === "load-earlier" || type === "use-native" || type === "use-web") return type;
+	if (type === "image-needed" && typeof record.imageId === "string") {
+		return { type, imageId: record.imageId };
+	}
+	if (type === "edit-message" && typeof record.rowId === "string") {
+		return { type, rowId: record.rowId };
+	}
+	return null;
+}
 
 export type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -214,6 +238,12 @@ function browserBridge(): DesktopBridge {
 		},
 		async openProject() {},
 		async switchProject(_path: string) {},
+		async openImportedSession(_path: string, _sessionId: string) {
+			return false;
+		},
+		async takePendingImportedSession() {
+			return null;
+		},
 		async renameProject(_path: string, _name: string) {},
 		async removeProject(_path: string) {},
 		async revealPath(_path: string) {},
@@ -357,6 +387,21 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 				throw error;
 			}
 		},
+		async openImportedSession(path: string, sessionId: string) {
+			if (authorization !== "authorized") throw new Error("desktop project access is unavailable");
+			const result = await invoke<{ switched?: boolean }>("project_open_imported", { path, sessionId });
+			return result.switched === true;
+		},
+		async takePendingImportedSession() {
+			if (authorization === "denied") return null;
+			try {
+				const result = await invoke<{ session_id?: string | null }>("project_take_imported");
+				authorization = "authorized";
+				return typeof result.session_id === "string" && result.session_id.length > 0 ? result.session_id : null;
+			} catch {
+				return null;
+			}
+		},
 		async renameProject(path: string, name: string) {
 			if (authorization !== "authorized") return;
 			try {
@@ -465,22 +510,9 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 				const events = await invoke<unknown>("native_transcript_take_events");
 				nativeTranscriptAuthorization = "authorized";
 				if (!Array.isArray(events)) return [];
-				const filtered: DesktopNativeTranscriptEvent[] = [];
-				for (const event of events) {
-					if (event === "load-earlier") {
-						filtered.push(event);
-					} else if (
-						event !== null &&
-						typeof event === "object" &&
-						(event as Record<string, unknown>).type === "image-needed" &&
-						typeof (event as Record<string, unknown>).imageId === "string"
-					) {
-						filtered.push({
-							type: "image-needed",
-							imageId: (event as Record<string, unknown>).imageId as string,
-						});
-					}
-				}
+				const filtered = events
+					.map(parseNativeTranscriptEvent)
+					.filter((event): event is DesktopNativeTranscriptEvent => event !== null);
 				return filtered;
 			} catch {
 				nativeTranscriptAuthorization = "denied";
@@ -493,46 +525,19 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 			if (webview !== undefined) {
 				const listener = (event: MessageEvent<unknown>): void => {
 					const message = event.data;
-					if (
-						message !== null &&
-						typeof message === "object" &&
-						(message as Record<string, unknown>).channel === "omp-native-transcript-event" &&
-						typeof (message as Record<string, unknown>).event === "string"
-					) {
-						const nativeEvent = (message as Record<string, unknown>).event;
-						if (nativeEvent === "load-earlier" || nativeEvent === "use-native" || nativeEvent === "use-web") {
-							handler(nativeEvent);
-						} else if (
-							nativeEvent === "image-needed" &&
-							typeof (message as Record<string, unknown>).imageId === "string"
-						) {
-							handler({
-								type: "image-needed",
-								imageId: (message as Record<string, unknown>).imageId as string,
-							});
-						}
-					}
+					if (message === null || typeof message !== "object") return;
+					const record = message as Record<string, unknown>;
+					if (record.channel !== "omp-native-transcript-event") return;
+					const nativeEvent = parseNativeTranscriptEvent(record);
+					if (nativeEvent !== null) handler(nativeEvent);
 				};
 				webview.addEventListener("message", listener);
 				return () => webview.removeEventListener("message", listener);
 			}
 			const listener = (event: Event): void => {
 				const detail = (event as CustomEvent<unknown>).detail;
-				if (detail === "load-earlier" || detail === "use-native" || detail === "use-web") handler(detail);
-				if (detail !== null && typeof detail === "object") {
-					const nativeEvent = (detail as Record<string, unknown>).event;
-					if (nativeEvent === "load-earlier" || nativeEvent === "use-native" || nativeEvent === "use-web") {
-						handler(nativeEvent);
-					} else if (
-						nativeEvent === "image-needed" &&
-						typeof (detail as Record<string, unknown>).imageId === "string"
-					) {
-						handler({
-							type: "image-needed",
-							imageId: (detail as Record<string, unknown>).imageId as string,
-						});
-					}
-				}
+				const nativeEvent = parseNativeTranscriptEvent(detail);
+				if (nativeEvent !== null) handler(nativeEvent);
 			};
 			window.addEventListener("omp-native-transcript", listener);
 			return () => window.removeEventListener("omp-native-transcript", listener);

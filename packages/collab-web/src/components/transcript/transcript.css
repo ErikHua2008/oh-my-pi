@@ -117,6 +117,13 @@
 	color: var(--chat-assistant-fg);
 }
 
+.tr-assistant-message {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	min-width: 0;
+}
+
 .tr-local-files {
 	display: flex;
 	flex-wrap: wrap;

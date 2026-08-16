@@ -1,4 +1,4 @@
-import type { SessionSummary } from "@oh-my-pi/pi-wire";
+import type { ForeignSessionSummary, SessionSummary } from "@oh-my-pi/pi-wire";
 import {
 	Check,
 	ChevronRight,
@@ -21,6 +21,7 @@ import type { ControlSnapshot } from "../../lib/control-client";
 import { copyText, type DesktopProject, desktopBridge } from "../../lib/desktop-bridge";
 import { relTime } from "../../lib/format";
 import { useNativeTranscriptOcclusion } from "../shell/useNativeTranscriptOcclusion";
+import { CodexImportModal } from "./CodexImportModal";
 
 export interface SessionsPanelProps {
 	snapshot: ControlSnapshot;
@@ -29,6 +30,8 @@ export interface SessionsPanelProps {
 	onOpenSettings(): void;
 	onOpenSession(id: string): void;
 	onNewSession(): void;
+	onListCodexSessions(archived?: boolean): Promise<readonly ForeignSessionSummary[]>;
+	onImportCodexSession(session: ForeignSessionSummary): Promise<void>;
 	onRenameSession(id: string, title: string): void;
 	onDropSession(id: string): void;
 	onLeave(): void;
@@ -277,6 +280,8 @@ export function SessionsPanel({
 	onOpenSettings,
 	onOpenSession,
 	onNewSession,
+	onListCodexSessions,
+	onImportCodexSession,
 	onRenameSession,
 	onDropSession,
 	onLeave,
@@ -291,6 +296,7 @@ export function SessionsPanel({
 	const [renamingSession, setRenamingSession] = useState<string | null>(null);
 	const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenu | null>(null);
 	const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenu | null>(null);
+	const [codexImportOpen, setCodexImportOpen] = useState(false);
 	const projectContextMenuRef = useRef<HTMLDivElement | null>(null);
 	const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
 	const [pinnedSessions, setPinnedSessions] = useState<ReadonlySet<string>>(() => loadStringSet(PINNED_SESSIONS_KEY));
@@ -506,7 +512,12 @@ export function SessionsPanel({
 								<Plus size={16} aria-hidden="true" />
 								<span>{pending ? "Starting session…" : "New session"}</span>
 							</button>
-							<button type="button" className="sh-sessions-action" disabled title="Coming soon">
+							<button
+								type="button"
+								className="sh-sessions-action"
+								disabled={pending || phase !== "live"}
+								onClick={() => setCodexImportOpen(true)}
+							>
 								<Download size={16} aria-hidden="true" />
 								<span>Import Chat from Codex</span>
 							</button>
@@ -695,6 +706,15 @@ export function SessionsPanel({
 					</button>
 				</div>
 			</div>
+			{codexImportOpen &&
+				createPortal(
+					<CodexImportModal
+						loadSessions={onListCodexSessions}
+						onImport={onImportCodexSession}
+						onClose={() => setCodexImportOpen(false)}
+					/>,
+					document.body,
+				)}
 			{projectContextMenu !== null &&
 				createPortal(
 					<div

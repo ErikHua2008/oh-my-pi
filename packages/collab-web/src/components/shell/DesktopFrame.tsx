@@ -1,7 +1,8 @@
 import { ArrowLeft, ArrowRight, Minus, PanelLeft, Square, X } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { type DesktopWindowAction, desktopBridge, isCppShellHost } from "../../lib/desktop-bridge";
 import { useSystemTheme } from "../../lib/theme";
+import { useNativeTranscriptOcclusion } from "./useNativeTranscriptOcclusion";
 
 type MenuName = "file" | "edit" | "view" | "help";
 
@@ -55,8 +56,10 @@ function menuLabel(menu: MenuName): string {
 
 export function DesktopFrame({ children, canGoBack = false, onBack }: DesktopFrameProps): ReactNode {
 	const [openMenu, setOpenMenu] = useState<MenuName | null>(null);
+	const menuPopupRef = useRef<HTMLDivElement | null>(null);
 	const nativeFrame = isCppShellHost();
 	const theme = useSystemTheme();
+	useNativeTranscriptOcclusion(nativeFrame && openMenu !== null, menuPopupRef, desktopBridge, openMenu);
 
 	useEffect(() => {
 		if (nativeFrame) void desktopBridge.setWindowTheme(theme);
@@ -138,7 +141,7 @@ export function DesktopFrame({ children, canGoBack = false, onBack }: DesktopFra
 								{menuLabel(menu)}
 							</button>
 							{openMenu === menu && (
-								<div className="sh-desktop-menu-popup" role="menu">
+								<div ref={menuPopupRef} className="sh-desktop-menu-popup" role="menu">
 									{MENUS[menu].map(item => (
 										<button
 											key={item.action}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "omp_shell/native_transcript_controls.h"
+#include "omp_shell/native_transcript_bubble.h"
 #include "omp_shell/native_transcript_model.h"
 #include "omp_shell/native_transcript_theme.h"
 
@@ -49,6 +50,7 @@ public:
 	void SetHistoryRequestHandler(std::function<void()> handler);
 	[[nodiscard]] bool TakeHistoryRequest() noexcept;
 	void SetImageRequestHandler(std::function<void(std::string_view)> handler);
+	void SetEditRequestHandler(std::function<void(std::string_view)> handler);
 	void ProvideImage(std::string image_id, std::vector<std::uint8_t> encoded_bytes);
 	[[nodiscard]] const NativeTranscriptModel& Model() const noexcept { return model_; }
 
@@ -81,6 +83,11 @@ private:
 		std::string row_id;
 		std::string item_key;
 	};
+	enum class MessageActionKind : std::uint8_t { Copy, Edit };
+	struct MessageActionHit final {
+		std::string row_id;
+		MessageActionKind action = MessageActionKind::Copy;
+	};
 
 	static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 	LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
@@ -91,6 +98,10 @@ private:
 	void Paint();
 	void DrawRow(std::size_t index, float viewport_width);
 	void DrawOverlayControls(float viewport_width, float viewport_height);
+	void DrawMessageActions(
+		const NativeTranscriptRow& row,
+		const NativeTranscriptBubbleLayout& bubble_layout,
+		float row_top);
 	void DrawSelection(
 		std::size_t index,
 		const TextLayout& layout,
@@ -104,6 +115,8 @@ private:
 	[[nodiscard]] bool IsCollapsedExpandable(const NativeTranscriptRow& row) const;
 	[[nodiscard]] std::optional<std::string> HitTestExpandableHeader(POINT point) const;
 	[[nodiscard]] std::optional<ProcessItemHit> HitTestProcessItemHeader(POINT point) const;
+	[[nodiscard]] std::optional<MessageActionHit> HitTestMessageAction(POINT point);
+	void UpdateMessageActionHover(POINT point);
 	void ToggleExpandable(std::string_view row_id);
 	void ToggleProcessItem(const ProcessItemHit& hit);
 	[[nodiscard]] bool ScrollProcessDetailAtPoint(POINT point, int wheel_delta);
@@ -114,6 +127,7 @@ private:
 	void SelectAll();
 	void SelectRow(const SelectionPoint& point);
 	void CopySelectionToClipboard();
+	void CopyRowToClipboard(std::string_view row_id);
 	void ShowContextMenu(POINT screen_point);
 	[[nodiscard]] D2D1_POINT_2F PointToDip(POINT point) const noexcept;
 	[[nodiscard]] NativeTranscriptScrollbarGeometry CurrentScrollbarGeometry() const noexcept;
@@ -163,10 +177,13 @@ private:
 	std::unordered_map<std::string, float> process_detail_scroll_offsets_;
 	std::optional<SelectionPoint> selection_anchor_;
 	std::optional<SelectionPoint> selection_focus_;
+	std::optional<MessageActionHit> hovered_message_action_;
+	std::string copied_row_id_;
 	std::int64_t scroll_offset_ = 0;
 	std::size_t history_remaining_ = 0;
 	std::function<void()> history_request_handler_;
 	std::function<void(std::string_view)> image_request_handler_;
+	std::function<void(std::string_view)> edit_request_handler_;
 	float scrollbar_drag_anchor_y_ = 0.0F;
 	std::int64_t scrollbar_drag_anchor_offset_ = 0;
 	int wheel_remainder_ = 0;

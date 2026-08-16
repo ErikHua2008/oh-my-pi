@@ -28,6 +28,16 @@ const NativeRowFlag = {
 	Failed: 8,
 } as const;
 
+export interface NativeTranscriptProjectionOptions {
+	readonly editableUserEntryId?: string;
+}
+
+function timeLabel(timestamp: string): string | undefined {
+	const parsed = Date.parse(timestamp);
+	if (Number.isNaN(parsed)) return undefined;
+	return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }).format(parsed);
+}
+
 function boundedText(value: string): string {
 	if (value.length <= MAX_ROW_TEXT) return value;
 	return `${value.slice(0, MAX_ROW_TEXT)}\n\n[内容过长，原生视图已截断；可切换 Web 兼容视图查看完整内容]`;
@@ -140,6 +150,7 @@ function row(
 	mediaIds: readonly string[] = [],
 	durationMs?: number,
 	processItems: readonly DesktopNativeTranscriptProcessItem[] = [],
+	metadata: Pick<DesktopNativeTranscriptRow, "timeLabel" | "canEdit"> = {},
 ): DesktopNativeTranscriptRow {
 	const bounded = boundedText(text);
 	return {
@@ -154,6 +165,7 @@ function row(
 		mediaIds,
 		durationMs,
 		processItems,
+		...metadata,
 	};
 }
 
@@ -278,6 +290,10 @@ function nativeTurnRows(turn: TranscriptAssistantTurn): DesktopNativeTranscriptR
 				failed ? "error" : "assistant",
 				assistantResponseText(message) || "…",
 				failed ? NativeRowFlag.Failed : 0,
+				[],
+				undefined,
+				[],
+				{ timeLabel: timeLabel(turn.finalEntry.timestamp) },
 			),
 		);
 	}
@@ -285,7 +301,10 @@ function nativeTurnRows(turn: TranscriptAssistantTurn): DesktopNativeTranscriptR
 }
 
 /** Convert durable wire entries to compact native rows grouped by user turn. */
-export function projectNativeTranscript(entries: readonly SessionEntry[]): DesktopNativeTranscriptRow[] {
+export function projectNativeTranscript(
+	entries: readonly SessionEntry[],
+	options: NativeTranscriptProjectionOptions = {},
+): DesktopNativeTranscriptRow[] {
 	const rows: DesktopNativeTranscriptRow[] = [];
 	for (const item of projectTranscriptItems(entries)) {
 		if (item.kind === "assistant-turn") {
@@ -297,13 +316,30 @@ export function projectNativeTranscript(entries: readonly SessionEntry[]): Deskt
 			case "message":
 				if (entry.message.role === "user") {
 					rows.push(
-						row(entry.id, "user", contentText(entry.message.content), 0, contentMediaIds(entry.message.content)),
+						row(
+							entry.id,
+							"user",
+							contentText(entry.message.content),
+							0,
+							contentMediaIds(entry.message.content),
+							undefined,
+							[],
+							{
+								timeLabel: timeLabel(entry.timestamp),
+								canEdit: entry.id === options.editableUserEntryId,
+							},
+						),
 					);
 				}
 				break;
 			case "custom_message":
 				if (entry.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
-					rows.push(row(entry.id, "user", customPromptText(entry), 0, contentMediaIds(entry.content)));
+					rows.push(
+						row(entry.id, "user", customPromptText(entry), 0, contentMediaIds(entry.content), undefined, [], {
+							timeLabel: timeLabel(entry.timestamp),
+							canEdit: entry.id === options.editableUserEntryId,
+						}),
+					);
 				} else if (entry.display && !isSystemReminder(entry.customType, contentText(entry.content))) {
 					rows.push(
 						row(

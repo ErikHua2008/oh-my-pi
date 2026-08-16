@@ -60,6 +60,7 @@ private:
 	std::wstring pending_navigation_;
 	std::wstring pending_core_failure_summary_;
 	std::wstring pending_core_failure_detail_;
+	std::string pending_imported_session_id_;
 	std::string native_session_id_;
 	std::vector<std::string> pending_native_images_;
 	RECT native_transcript_bounds_{};

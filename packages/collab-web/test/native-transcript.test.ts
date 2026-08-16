@@ -42,9 +42,11 @@ describe("native transcript projection", () => {
 			},
 		];
 
-		const projected = projectNativeTranscript(entries);
+		const projected = projectNativeTranscript(entries, { editableUserEntryId: "user-1" });
 		expect(projected.map(row => row.id)).toEqual(["user-1", "turn:user-1:process"]);
 		expect(projected[0]?.mediaIds).toEqual(["sha256-image"]);
+		expect(projected[0]?.timeLabel).toBeTruthy();
+		expect(projected[0]?.canEdit).toBe(true);
 		expect(projected[0]?.text).not.toContain("VERY-LARGE-BASE64");
 		expect(projected[1]?.text).toBe("我来检查。\n\n已查看图片");
 		expect(projected[1]?.text).not.toContain("inspect_image");
@@ -128,6 +130,7 @@ describe("native transcript projection", () => {
 			kind: "assistant",
 			text: "这是最终回答。",
 		});
+		expect(projected[1]?.timeLabel).toBeTruthy();
 
 		const completedTail = projectNativeStream(message, true, false, "session-1");
 		expect(completedTail?.kind).toBe("assistant");

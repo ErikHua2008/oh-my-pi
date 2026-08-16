@@ -1,3 +1,4 @@
+import type { ImportedForeignSession } from "@oh-my-pi/pi-wire";
 import { X } from "lucide-react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -288,6 +289,44 @@ export function App(): ReactNode {
 		client.sendDrop(id);
 	}, []);
 
+	const openImportedSession = useCallback(
+		async (client: ControlClient, session: ImportedForeignSession): Promise<void> => {
+			if (controlFlow.activeClient !== client) throw new Error("the control room changed during import");
+			if (!session.requiresProjectSwitch) {
+				startResume(client, session.id);
+				return;
+			}
+			if (!desktopBridge.available) {
+				throw new Error(
+					"the imported conversation belongs to another project, but desktop project switching is unavailable",
+				);
+			}
+			const switched = await desktopBridge.openImportedSession(session.cwd, session.id);
+			if (!switched) startResume(client, session.id);
+		},
+		[controlFlow, startResume],
+	);
+
+	useEffect(() => {
+		if (appState?.kind !== "control" || appState.session !== null || controlPending) return;
+		const client = appState.client;
+		let checked = false;
+		let active = true;
+		const resumePendingImport = (): void => {
+			if (checked || client.getSnapshot().phase !== "live") return;
+			checked = true;
+			void desktopBridge.takePendingImportedSession().then(sessionId => {
+				if (active && sessionId) startResume(client, sessionId);
+			});
+		};
+		const unsubscribe = client.subscribe(resumePendingImport);
+		resumePendingImport();
+		return () => {
+			active = false;
+			unsubscribe();
+		};
+	}, [appState, controlPending, startResume]);
+
 	if (!appState) {
 		return (
 			<DesktopFrame>
@@ -329,6 +368,7 @@ export function App(): ReactNode {
 				}
 				onOpenSession={id => startResume(appState.client, id)}
 				onNewSession={() => startCreate(appState.client)}
+				onOpenImportedSession={session => openImportedSession(appState.client, session)}
 				onRenameSession={(id, title) => appState.client.sendRename(id, title)}
 				onDropSession={id => startDrop(appState.client, id)}
 				onLeave={leave}

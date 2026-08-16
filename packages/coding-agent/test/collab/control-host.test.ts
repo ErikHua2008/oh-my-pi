@@ -24,7 +24,9 @@ import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { SessionRegistry } from "@oh-my-pi/pi-coding-agent/collab/session-registry";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { CodexSessionStore } from "@oh-my-pi/pi-coding-agent/session/codex-session-store";
+import type { ForeignSessionInfo } from "@oh-my-pi/pi-coding-agent/session/foreign-session-store";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { Settings } from "../../src/config/settings";
 import * as sdk from "../../src/sdk";
 import { EventBus } from "../../src/utils/event-bus";
@@ -367,6 +369,85 @@ describe("control room + session registry (multi-session core)", () => {
 		expect(initial.link).toBe(harness.initialHost.webLink);
 	});
 
+	it("lists and imports a Codex conversation into its original project with a fresh OMP id", async () => {
+		harness = await setupHarness();
+		const sourceProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-project-"));
+		const sourcePath = path.join(harness.sessionDir, "codex-rollout.jsonl");
+		await fs.writeFile(sourcePath, "source stays untouched\n");
+		const source: ForeignSessionInfo = {
+			source: "codex",
+			id: "codex-source-id",
+			path: sourcePath,
+			cwd: sourceProject,
+			title: "Imported from Codex",
+			description: "Inspect the project and preserve its context",
+			archived: true,
+			created: new Date("2026-08-01T00:00:00.000Z"),
+			modified: new Date("2026-08-02T00:00:00.000Z"),
+			firstMessage: "Inspect the project",
+			messageCount: 1,
+		};
+		vi.spyOn(CodexSessionStore.prototype, "list").mockResolvedValue([source]);
+		vi.spyOn(CodexSessionStore.prototype, "load").mockImplementation(async info => {
+			const manager = SessionManager.inMemory(info.cwd);
+			manager.ingestReplicatedEntry({
+				type: "message",
+				id: "codex-user-1",
+				parentId: null,
+				timestamp: "2026-08-01T00:00:00.000Z",
+				message: { role: "user", content: "Inspect the project", timestamp: 1_754_006_400_000 },
+			});
+			await manager.setSessionName(info.title ?? "Imported from Codex");
+			return manager;
+		});
+
+		const guest = await joinRoom(harness.controlHost.webLink, "importer", { ctrl: true });
+		guestCleanups.push(() => guest.close());
+		await guest.nextFrame(f => f.t === "ctrl-welcome");
+
+		guest.socket.send({ t: "ctrl-import-list", reqId: 51, source: "codex", archived: true });
+		const listed = await guest.nextFrame(f => f.t === "ctrl-import-list" && f.reqId === 51);
+		if (listed.t !== "ctrl-import-list" || !("sessions" in listed)) {
+			throw new Error(`expected ctrl-import-list response, got ${listed.t}`);
+		}
+		expect(listed.sessions).toEqual([
+			{
+				source: "codex",
+				id: source.id,
+				path: source.path,
+				cwd: source.cwd,
+				title: source.title,
+				description: source.description,
+				archived: true,
+				createdAt: source.created.toISOString(),
+				modifiedAt: source.modified.toISOString(),
+				messageCount: 1,
+				firstMessage: source.firstMessage,
+			},
+		]);
+
+		guest.socket.send({
+			t: "ctrl-import",
+			reqId: 52,
+			source: "codex",
+			id: source.id,
+			path: source.path,
+			archived: true,
+		});
+		const imported = await guest.nextFrame(f => f.t === "ctrl-imported" && f.reqId === 52);
+		if (imported.t !== "ctrl-imported") throw new Error(`expected ctrl-imported, got ${imported.t}`);
+		expect(imported.session.id).not.toBe(source.id);
+		expect(imported.session).toMatchObject({
+			cwd: sourceProject,
+			title: "Imported from Codex",
+			requiresProjectSwitch: true,
+		});
+		const targetDir = SessionManager.getDefaultSessionDir(sourceProject, path.join(harness.sessionDir, "agent"));
+		const targetFiles = await fs.readdir(targetDir);
+		expect(targetFiles.some(file => file.includes(imported.session.id) && file.endsWith(".jsonl"))).toBe(true);
+		expect(await fs.readFile(sourcePath, "utf8")).toBe("source stays untouched\n");
+	});
+
 	it("keeps an untitled draft out of the sidebar until its first message persists", async () => {
 		harness = await setupHarness(false);
 
@@ -460,6 +541,25 @@ describe("control room + session registry (multi-session core)", () => {
 		const renameErr = await guest.nextFrame(f => f.t === "ctrl-error");
 		if (renameErr.t !== "ctrl-error") throw new Error(`expected ctrl-error, got ${renameErr.t}`);
 		expect(renameErr.message).toBe("read-only");
+
+		guest.socket.send({ t: "ctrl-import-list", reqId: 41, source: "codex", archived: false });
+		const importListErr = await guest.nextFrame(f => f.t === "ctrl-request-error" && f.reqId === 41);
+		if (importListErr.t !== "ctrl-request-error") {
+			throw new Error(`expected ctrl-request-error, got ${importListErr.t}`);
+		}
+		expect(importListErr.message).toBe("read-only");
+
+		guest.socket.send({
+			t: "ctrl-import",
+			reqId: 42,
+			source: "codex",
+			id: "forbidden-session",
+			path: "C:\\codex\\forbidden.jsonl",
+			archived: false,
+		});
+		const importErr = await guest.nextFrame(f => f.t === "ctrl-request-error" && f.reqId === 42);
+		if (importErr.t !== "ctrl-request-error") throw new Error(`expected ctrl-request-error, got ${importErr.t}`);
+		expect(importErr.message).toBe("read-only");
 
 		guest.socket.send({ t: "ctrl-list" });
 		const sessionsFrame = await guest.nextFrame(f => f.t === "ctrl-sessions");

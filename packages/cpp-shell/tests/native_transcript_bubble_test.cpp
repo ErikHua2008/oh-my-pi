@@ -32,3 +32,23 @@ OMP_TEST("native transcript bubbles leave a dedicated scrollbar lane") {
 	const auto compact = omp::shell::ComputeNativeTranscriptBubbleLayout(700.0F, true, 18.0F, 20.0F, 0);
 	OMP_CHECK(compact.bubble.right == 688.0F);
 }
+
+OMP_TEST("native message actions preserve the familiar user and assistant order") {
+	const auto user = omp::shell::ComputeNativeTranscriptBubbleLayout(800.0F, true, 180.0F, 24.0F, 0, true);
+	const auto assistant =
+		omp::shell::ComputeNativeTranscriptBubbleLayout(800.0F, false, 180.0F, 24.0F, 0, true);
+	const auto user_actions = omp::shell::ComputeNativeTranscriptMessageActionsLayout(user, true, true);
+	const auto assistant_actions =
+		omp::shell::ComputeNativeTranscriptMessageActionsLayout(assistant, false, false);
+
+	OMP_CHECK(user.row_height == 80.0F);
+	OMP_CHECK(user_actions.has_edit);
+	OMP_CHECK(user_actions.time.right < user_actions.copy.left);
+	OMP_CHECK(user_actions.copy.right < user_actions.edit.left);
+	OMP_CHECK(user_actions.edit.right == user.bubble.right);
+
+	OMP_CHECK(assistant.row_height == 80.0F);
+	OMP_CHECK(!assistant_actions.has_edit);
+	OMP_CHECK(assistant_actions.copy.left == assistant.bubble.left);
+	OMP_CHECK(assistant_actions.copy.right < assistant_actions.time.left);
+}

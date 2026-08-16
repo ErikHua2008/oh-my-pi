@@ -455,14 +455,42 @@ export type ControlGuestFrame =
 	| { t: "ctrl-create" }
 	| { t: "ctrl-resume"; id: string }
 	| { t: "ctrl-rename"; id: string; title: string }
-	| { t: "ctrl-drop"; id: string };
+	| { t: "ctrl-drop"; id: string }
+	| { t: "ctrl-import-list"; reqId: number; source: "codex"; archived: boolean }
+	| { t: "ctrl-import"; reqId: number; source: "codex"; id: string; path: string; archived: boolean };
 
 export type ControlHostFrame =
 	| { t: "ctrl-welcome"; proto: number; readOnly?: true }
 	| { t: "ctrl-sessions"; sessions: SessionSummary[] }
 	| { t: "ctrl-session"; op: "created" | "resumed"; id: string; link: string; title?: string }
+	| { t: "ctrl-import-list"; reqId: number; source: "codex"; sessions: ForeignSessionSummary[] }
+	| { t: "ctrl-imported"; reqId: number; source: "codex"; session: ImportedForeignSession }
+	| { t: "ctrl-request-error"; reqId: number; message: string }
 	| { t: "ctrl-error"; message: string }
 	| { t: "ctrl-bye"; reason: string };
+
+/** Read-only metadata shown before importing a locally stored foreign transcript. */
+export interface ForeignSessionSummary {
+	source: "codex";
+	id: string;
+	path: string;
+	cwd: string;
+	title?: string;
+	description?: string;
+	archived: boolean;
+	createdAt: string;
+	modifiedAt: string;
+	messageCount?: number;
+	firstMessage?: string;
+}
+
+/** Fresh OMP identity produced after a foreign transcript has been persisted. */
+export interface ImportedForeignSession {
+	id: string;
+	cwd: string;
+	title?: string;
+	requiresProjectSwitch: boolean;
+}
 
 export interface SessionSummary {
 	id: string;
