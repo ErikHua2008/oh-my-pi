@@ -53,6 +53,8 @@ function activeTool(): ActiveTool {
 
 function renderTranscript(props: {
 	entries?: readonly SessionEntry[];
+	stream?: AssistantMessage | null;
+	streamDone?: boolean;
 	activeTools?: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
 	onEditLastUserMessage?: (text: string) => void;
@@ -62,8 +64,8 @@ function renderTranscript(props: {
 	return renderToStaticMarkup(
 		<Transcript
 			entries={props.entries ?? []}
-			stream={null}
-			streamDone={true}
+			stream={props.stream ?? null}
+			streamDone={props.streamDone ?? true}
 			activeTools={props.activeTools ?? new Map()}
 			working={props.working}
 			onEditLastUserMessage={props.onEditLastUserMessage}
@@ -116,6 +118,40 @@ describe("Transcript live tool rendering", () => {
 		const html = renderTranscript({ working: true, activeTools: new Map() });
 
 		expect(html).toContain("thinking…");
+	});
+});
+
+describe("Transcript thinking disclosure", () => {
+	const thinkingMessage: AssistantMessage = {
+		role: "assistant",
+		content: [{ type: "thinking", thinking: "private streamed reasoning" }],
+		model: "test/model",
+		usage: assistantUsage(),
+		stopReason: "stop",
+		timestamp: 1,
+	};
+
+	it("keeps live thinking open while it is arriving", () => {
+		const html = renderTranscript({ working: true, stream: thinkingMessage, streamDone: false });
+
+		expect(html).toContain('aria-expanded="true"');
+		expect(html).toContain("private streamed reasoning");
+	});
+
+	it("renders completed thinking collapsed by default", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "completed-thinking",
+				parentId: null,
+				timestamp: "2026-08-16T00:00:00Z",
+				message: thinkingMessage,
+			},
+		];
+		const html = renderTranscript({ working: false, entries });
+
+		expect(html).toContain('aria-expanded="false"');
+		expect(html).not.toContain("private streamed reasoning");
 	});
 });
 

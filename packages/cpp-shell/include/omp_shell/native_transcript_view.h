@@ -92,6 +92,9 @@ private:
 	void RequestMedia(std::string_view image_id);
 	void TrimMediaCache();
 	[[nodiscard]] TextLayout* GetTextLayout(const NativeTranscriptRow& row, float width);
+	[[nodiscard]] bool IsCollapsedReasoning(const NativeTranscriptRow& row) const;
+	[[nodiscard]] std::optional<std::string> HitTestReasoningHeader(POINT point) const;
+	void ToggleReasoning(std::string_view row_id);
 	[[nodiscard]] std::optional<SelectionPoint> HitTestText(POINT point);
 	[[nodiscard]] std::optional<SelectionSpan> NormalizedSelection() const;
 	[[nodiscard]] bool HasSelection() const;
@@ -139,6 +142,7 @@ private:
 	std::unordered_map<std::string, TextLayout> layout_cache_;
 	std::unordered_map<std::string, MediaEntry> media_cache_;
 	std::unordered_set<std::string> requested_media_;
+	std::unordered_set<std::string> expanded_reasoning_;
 	std::optional<SelectionPoint> selection_anchor_;
 	std::optional<SelectionPoint> selection_focus_;
 	std::int64_t scroll_offset_ = 0;

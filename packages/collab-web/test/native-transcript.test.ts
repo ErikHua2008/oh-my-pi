@@ -80,4 +80,47 @@ describe("native transcript projection", () => {
 		});
 		expect(projectNativeStream(null, false, false, "session-1")).toBeNull();
 	});
+
+	it("separates completed reasoning into a collapsed expandable native row", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "需要保留但默认隐藏的详细思考" },
+				{ type: "text", text: "这是最终回答。" },
+			],
+			model: "test/model",
+			usage: usage(),
+			stopReason: "stop",
+			timestamp: 2,
+		};
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "assistant-with-reasoning",
+				parentId: null,
+				timestamp: "2026-08-16T00:00:00Z",
+				message,
+			},
+		];
+
+		const projected = projectNativeTranscript(entries);
+		expect(projected).toHaveLength(2);
+		expect(projected[0]).toMatchObject({
+			id: "assistant-with-reasoning:reasoning:0",
+			kind: "reasoning",
+			flags: 2,
+			estimatedHeight: 42,
+			text: "需要保留但默认隐藏的详细思考",
+		});
+		expect(projected[1]).toMatchObject({
+			id: "assistant-with-reasoning",
+			kind: "assistant",
+			text: "这是最终回答。",
+		});
+
+		const completedTail = projectNativeStream(message, true, false, "session-1");
+		expect(completedTail?.text).toContain("思考过程（已折叠）");
+		expect(completedTail?.text).not.toContain("需要保留但默认隐藏的详细思考");
+		expect(completedTail?.text).toContain("这是最终回答。");
+	});
 });

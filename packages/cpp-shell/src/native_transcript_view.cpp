@@ -17,6 +17,7 @@ constexpr float kHorizontalPadding = 22.0F;
 constexpr float kRowVerticalPadding = 12.0F;
 constexpr float kLabelHeight = 17.0F;
 constexpr float kTextGap = 5.0F;
+constexpr std::int32_t kCollapsedReasoningHeight = 42;
 constexpr float kUserWidthRatio = 0.78F;
 constexpr std::int64_t kEstimatedLineScroll = 54;
 constexpr std::int64_t kOverscan = 360;
@@ -201,6 +202,7 @@ void NativeTranscriptView::Clear() {
 	layout_cache_.clear();
 	media_cache_.clear();
 	requested_media_.clear();
+	expanded_reasoning_.clear();
 	ClearSelection();
 	scroll_offset_ = 0;
 	history_remaining_ = 0;
@@ -223,6 +225,13 @@ void NativeTranscriptView::Clear() {
 void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows) {
 	const bool keep_tail = stick_to_bottom_ || scroll_offset_ >= MaximumScroll() - 2;
 	model_.ReplaceSnapshot(std::move(rows));
+	for (auto it = expanded_reasoning_.begin(); it != expanded_reasoning_.end();) {
+		if (model_.IndexOf(*it)) {
+			++it;
+		} else {
+			it = expanded_reasoning_.erase(it);
+		}
+	}
 	if ((selection_anchor_ && !model_.IndexOf(selection_anchor_->row_id)) ||
 		(selection_focus_ && !model_.IndexOf(selection_focus_->row_id))) {
 		ClearSelection();
@@ -485,6 +494,10 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			scrollbar_drag_anchor_offset_ = scroll_offset_;
 			return 0;
 		}
+		if (const auto reasoning_id = HitTestReasoningHeader(point)) {
+			ToggleReasoning(*reasoning_id);
+			return 0;
+		}
 		SetCapture(window_);
 		selecting_ = true;
 		if (const auto hit = HitTestText(point)) {
@@ -594,6 +607,10 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 					SetCursor(LoadCursorW(nullptr, IDC_ARROW));
 					return TRUE;
 				}
+				if (HitTestReasoningHeader(point)) {
+					SetCursor(LoadCursorW(nullptr, IDC_HAND));
+					return TRUE;
+				}
 			}
 			SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
 			return TRUE;
@@ -601,6 +618,9 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		break;
 	case WM_LBUTTONDBLCLK: {
 		const POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+		if (HitTestReasoningHeader(point)) {
+			return 0;
+		}
 		if (const auto hit = HitTestText(point)) {
 			SelectRow(*hit);
 		}
@@ -764,17 +784,20 @@ void NativeTranscriptView::Paint() {
 void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 	const NativeTranscriptRow& row = model_.RowAt(index);
 	const bool user = row.kind == NativeTranscriptRowKind::User;
+	const bool collapsed_reasoning = IsCollapsedReasoning(row);
 	const float available_width = std::max(80.0F, viewport_width - 2.0F * kHorizontalPadding);
 	const float content_width = user ? std::max(80.0F, available_width * kUserWidthRatio) : available_width;
-	TextLayout* cached = GetTextLayout(row, content_width);
-	if (cached == nullptr) {
+	TextLayout* cached = collapsed_reasoning ? nullptr : GetTextLayout(row, content_width);
+	if (!collapsed_reasoning && cached == nullptr) {
 		return;
 	}
 
 	const std::int32_t measured_height = static_cast<std::int32_t>(
-		std::ceil(
-			cached->measured_height + 2.0F * kRowVerticalPadding + kLabelHeight + kTextGap +
-			static_cast<float>(row.media_ids.size()) * (kThumbnailHeight + kMediaGap)));
+		collapsed_reasoning
+			? kCollapsedReasoningHeight
+			: std::ceil(
+				  cached->measured_height + 2.0F * kRowVerticalPadding + kLabelHeight + kTextGap +
+				  static_cast<float>(row.media_ids.size()) * (kThumbnailHeight + kMediaGap)));
 	if (row.height != measured_height) {
 		static_cast<void>(model_.UpdateHeight(row.id, measured_height));
 		layout_changed_during_paint_ = true;
@@ -795,7 +818,15 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 		render_target_->FillRoundedRectangle(bubble, user_brush_.Get());
 	}
 
-	const std::wstring_view label = RowLabel(row.kind);
+	const std::wstring_view row_label = RowLabel(row.kind);
+	std::wstring expandable_label;
+	std::wstring_view label = row_label;
+	if (row.kind == NativeTranscriptRowKind::Reasoning &&
+		HasFlag(row.flags, NativeTranscriptRowFlags::Expandable)) {
+		expandable_label = collapsed_reasoning ? L"▸ " : L"▾ ";
+		expandable_label.append(row_label);
+		label = expandable_label;
+	}
 	const D2D1_RECT_F label_rect = D2D1::RectF(
 		content_left,
 		row_top + kRowVerticalPadding,
@@ -809,11 +840,13 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 		row.kind == NativeTranscriptRowKind::Error ? primary_brush_.Get() : muted_brush_.Get(),
 		D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-	const D2D1_POINT_2F origin = D2D1::Point2F(
-		content_left, row_top + kRowVerticalPadding + kLabelHeight + kTextGap);
-	DrawSelection(index, *cached, origin.x, origin.y);
-	render_target_->DrawTextLayout(origin, cached->layout.Get(), primary_brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-	DrawMedia(row, content_left, origin.y + cached->measured_height + kMediaGap, content_width);
+	if (cached != nullptr) {
+		const D2D1_POINT_2F origin = D2D1::Point2F(
+			content_left, row_top + kRowVerticalPadding + kLabelHeight + kTextGap);
+		DrawSelection(index, *cached, origin.x, origin.y);
+		render_target_->DrawTextLayout(origin, cached->layout.Get(), primary_brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+		DrawMedia(row, content_left, origin.y + cached->measured_height + kMediaGap, content_width);
+	}
 	if (!user) {
 		render_target_->DrawLine(
 			D2D1::Point2F(kHorizontalPadding, row_top + row_height - 1.0F),
@@ -1040,6 +1073,77 @@ void NativeTranscriptView::DrawSelection(
 	}
 }
 
+bool NativeTranscriptView::IsCollapsedReasoning(const NativeTranscriptRow& row) const {
+	return row.kind == NativeTranscriptRowKind::Reasoning &&
+		HasFlag(row.flags, NativeTranscriptRowFlags::Expandable) &&
+		!HasFlag(row.flags, NativeTranscriptRowFlags::Expanded) && !expanded_reasoning_.contains(row.id);
+}
+
+std::optional<std::string> NativeTranscriptView::HitTestReasoningHeader(POINT point) const {
+	if (model_.Empty() || window_ == nullptr) {
+		return std::nullopt;
+	}
+	RECT client{};
+	GetClientRect(window_, &client);
+	if (client.right <= client.left || client.bottom <= client.top) {
+		return std::nullopt;
+	}
+	const float scale = std::max(0.01F, DpiScale());
+	const float x = static_cast<float>(point.x) / scale;
+	const float y = static_cast<float>(point.y) / scale;
+	const float viewport_width = static_cast<float>(client.right - client.left) / scale;
+	if (x < kHorizontalPadding || x > viewport_width - kHorizontalPadding) {
+		return std::nullopt;
+	}
+	const std::int64_t content_y = scroll_offset_ + static_cast<std::int64_t>(std::floor(y));
+	const NativeTranscriptVisibleRange range = model_.VisibleRange(content_y, 1);
+	if (range.Empty() || range.first >= model_.Size()) {
+		return std::nullopt;
+	}
+	const NativeTranscriptRow& row = model_.RowAt(range.first);
+	if (row.kind != NativeTranscriptRowKind::Reasoning ||
+		!HasFlag(row.flags, NativeTranscriptRowFlags::Expandable)) {
+		return std::nullopt;
+	}
+	const float row_top = static_cast<float>(model_.RowTop(range.first) - scroll_offset_);
+	const float label_top = row_top + kRowVerticalPadding;
+	if (y < label_top || y > label_top + kLabelHeight) {
+		return std::nullopt;
+	}
+	return row.id;
+}
+
+void NativeTranscriptView::ToggleReasoning(std::string_view row_id) {
+	const auto index = model_.IndexOf(row_id);
+	if (!index) {
+		return;
+	}
+	const NativeTranscriptRow& row = model_.RowAt(*index);
+	if (row.kind != NativeTranscriptRowKind::Reasoning ||
+		!HasFlag(row.flags, NativeTranscriptRowFlags::Expandable)) {
+		return;
+	}
+	const std::string id(row_id);
+	if (expanded_reasoning_.contains(id)) {
+		expanded_reasoning_.erase(id);
+	} else {
+		expanded_reasoning_.insert(id);
+	}
+	if ((selection_anchor_ && selection_anchor_->row_id == id) ||
+		(selection_focus_ && selection_focus_->row_id == id)) {
+		ClearSelection();
+	}
+	static_cast<void>(model_.UpdateHeight(id, kCollapsedReasoningHeight));
+	if (stick_to_bottom_) {
+		ScrollToBottom();
+	} else {
+		ScrollTo(scroll_offset_, false);
+	}
+	if (window_ != nullptr) {
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
 std::optional<NativeTranscriptView::SelectionPoint> NativeTranscriptView::HitTestText(POINT point) {
 	if (model_.Empty() || window_ == nullptr) {
 		return std::nullopt;
@@ -1063,6 +1167,9 @@ std::optional<NativeTranscriptView::SelectionPoint> NativeTranscriptView::HitTes
 
 	const std::size_t index = range.first;
 	const NativeTranscriptRow& row = model_.RowAt(index);
+	if (IsCollapsedReasoning(row)) {
+		return std::nullopt;
+	}
 	const bool user = row.kind == NativeTranscriptRowKind::User;
 	const float available_width = std::max(80.0F, viewport_width - 2.0F * kHorizontalPadding);
 	const float content_width = user ? std::max(80.0F, available_width * kUserWidthRatio) : available_width;

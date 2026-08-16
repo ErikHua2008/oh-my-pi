@@ -39,18 +39,38 @@ function contentMediaIds(content: string | readonly (TextContent | ImageContent)
 	return [...ids];
 }
 
-function assistantText(message: AssistantMessage): string {
+function assistantResponseText(message: AssistantMessage): string {
 	const parts: string[] = [];
 	for (const block of message.content) {
 		switch (block.type) {
 			case "text":
 				if (block.text.length > 0) parts.push(block.text);
 				break;
+			case "toolCall":
+				parts.push(`工具 · ${block.name}${block.intent ? `\n${block.intent}` : ""}`);
+				break;
+			default:
+				break;
+		}
+	}
+	if (message.errorMessage) parts.push(message.errorMessage);
+	return parts.join("\n\n");
+}
+
+function assistantStreamText(message: AssistantMessage, collapseThinking: boolean): string {
+	const parts: string[] = [];
+	for (const block of message.content) {
+		switch (block.type) {
 			case "thinking":
-				if (block.thinking.length > 0) parts.push(`思考\n${block.thinking}`);
+				if (block.thinking.length > 0) {
+					parts.push(collapseThinking ? "思考过程（已折叠）" : `思考过程\n${block.thinking}`);
+				}
 				break;
 			case "redactedThinking":
 				parts.push("[思考内容已由模型隐藏]");
+				break;
+			case "text":
+				if (block.text.length > 0) parts.push(block.text);
 				break;
 			case "toolCall":
 				parts.push(`工具 · ${block.name}${block.intent ? `\n${block.intent}` : ""}`);
@@ -82,7 +102,10 @@ function row(
 		kind,
 		text: bounded,
 		flags,
-		estimatedHeight: estimatedHeight(bounded, kind) + mediaIds.length * 176,
+		estimatedHeight:
+			kind === "reasoning" && (flags & NativeRowFlag.Expandable) !== 0
+				? 42
+				: estimatedHeight(bounded, kind) + mediaIds.length * 176,
 		mediaIds,
 	};
 }
@@ -109,14 +132,29 @@ export function projectNativeTranscript(entries: readonly SessionEntry[]): Deskt
 						break;
 					case "assistant": {
 						const failed = message.stopReason === "error" || message.stopReason === "aborted";
-						rows.push(
-							row(
-								entry.id,
-								failed ? "error" : "assistant",
-								assistantText(message),
-								failed ? NativeRowFlag.Failed : 0,
-							),
-						);
+						let reasoningCount = 0;
+						message.content.forEach((block, index) => {
+							if (block.type === "thinking" && block.thinking.length > 0) {
+								reasoningCount++;
+								rows.push(
+									row(`${entry.id}:reasoning:${index}`, "reasoning", block.thinking, NativeRowFlag.Expandable),
+								);
+							} else if (block.type === "redactedThinking") {
+								reasoningCount++;
+								rows.push(row(`${entry.id}:reasoning:${index}`, "reasoning", "思考内容已由模型隐藏"));
+							}
+						});
+						const response = assistantResponseText(message);
+						if (response.length > 0 || reasoningCount === 0) {
+							rows.push(
+								row(
+									entry.id,
+									failed ? "error" : "assistant",
+									response || "…",
+									failed ? NativeRowFlag.Failed : 0,
+								),
+							);
+						}
 						break;
 					}
 					case "developer":
@@ -195,10 +233,14 @@ export function projectNativeStream(
 	const id = nativeStreamRowId(sessionId);
 	if (stream !== null) {
 		const failed = streamDone && (stream.stopReason === "error" || stream.stopReason === "aborted");
+		const reasoningOnly =
+			!streamDone &&
+			stream.content.some(block => block.type === "thinking") &&
+			!stream.content.some(block => block.type === "text" || block.type === "toolCall");
 		return row(
 			id,
-			failed ? "error" : "assistant",
-			assistantText(stream),
+			failed ? "error" : reasoningOnly ? "reasoning" : "assistant",
+			assistantStreamText(stream, streamDone),
 			(streamDone ? 0 : NativeRowFlag.Streaming) | (failed ? NativeRowFlag.Failed : 0),
 		);
 	}

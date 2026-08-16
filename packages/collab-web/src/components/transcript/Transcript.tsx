@@ -9,7 +9,7 @@ import {
 } from "@oh-my-pi/pi-wire";
 import { Check, ChevronRight, Copy, File, Pencil } from "lucide-react";
 import type { ReactNode } from "react";
-import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ActiveTool } from "../../lib/client";
 import {
 	copyText,
@@ -18,7 +18,13 @@ import {
 	desktopBridge as defaultDesktopBridge,
 } from "../../lib/desktop-bridge";
 import { fmtTokens } from "../../lib/format";
+import { nativeSurfacesBlocked, subscribeNativeSurfaceVisibility } from "../../lib/native-surface-visibility";
 import { nativeStreamRowId, projectNativeStream, projectNativeTranscript } from "../../lib/native-transcript";
+import {
+	INITIAL_STREAM_BATCH_DELAY_MS,
+	STREAM_BATCH_MAX_DELAY_MS,
+	shouldFlushAssistantStreamBatch,
+} from "../../lib/stream-presentation";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
@@ -64,9 +70,12 @@ function Row({
 	);
 }
 
-function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean }): ReactNode {
-	const [open, setOpen] = useState(false);
+function ThinkingBlock({ text, redacted, pending }: { text: string; redacted?: boolean; pending: boolean }): ReactNode {
+	const [open, setOpen] = useState(pending && !redacted);
 	const contentId = useId();
+	useEffect(() => {
+		if (!pending) setOpen(false);
+	}, [pending]);
 	return (
 		<div className="tr-think">
 			<button
@@ -86,6 +95,69 @@ function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean })
 			)}
 		</div>
 	);
+}
+
+function usePresentedAssistantStream(
+	stream: AssistantMessage | null,
+	streamDone: boolean,
+	sessionId?: string | null,
+): AssistantMessage | null {
+	const [presented, setPresented] = useState(stream);
+	const presentedRef = useRef(stream);
+	const latestRef = useRef(stream);
+	const timerRef = useRef<number | undefined>(undefined);
+	const lastFlushRef = useRef(0);
+	const sessionRef = useRef(sessionId);
+
+	useEffect(() => {
+		const clearTimer = (): void => {
+			if (timerRef.current === undefined) return;
+			window.clearTimeout(timerRef.current);
+			timerRef.current = undefined;
+		};
+		const flush = (): void => {
+			clearTimer();
+			const latest = latestRef.current;
+			presentedRef.current = latest;
+			lastFlushRef.current = performance.now();
+			setPresented(latest);
+		};
+
+		latestRef.current = stream;
+		if (sessionRef.current !== sessionId) {
+			sessionRef.current = sessionId;
+			flush();
+			return;
+		}
+		if (stream === null || streamDone) {
+			flush();
+			return;
+		}
+
+		const now = performance.now();
+		const current = presentedRef.current;
+		if (current !== null && shouldFlushAssistantStreamBatch(current, stream, now - lastFlushRef.current)) {
+			flush();
+			return;
+		}
+
+		if (timerRef.current === undefined) {
+			const delay =
+				current === null
+					? INITIAL_STREAM_BATCH_DELAY_MS
+					: Math.max(0, STREAM_BATCH_MAX_DELAY_MS - (now - lastFlushRef.current));
+			timerRef.current = window.setTimeout(flush, delay);
+		}
+	}, [sessionId, stream, streamDone]);
+
+	useEffect(
+		() => () => {
+			if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
+		},
+		[],
+	);
+
+	return streamDone ? stream : presented;
 }
 
 function StreamStatus({ label }: { label: string }): ReactNode {
@@ -407,9 +479,9 @@ function AssistantBody({
 	const blocks = message.content.map((block, i) => {
 		switch (block.type) {
 			case "thinking":
-				return <ThinkingBlock key={i} text={block.thinking} />;
+				return <ThinkingBlock key={i} text={block.thinking} pending={pending} />;
 			case "redactedThinking":
-				return <ThinkingBlock key={i} text="" redacted />;
+				return <ThinkingBlock key={i} text="" redacted pending={pending} />;
 			case "text":
 				return <Markdown key={i} text={block.text} />;
 			case "toolCall": {
@@ -597,6 +669,12 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		historyLoading = false,
 		onLoadEarlier,
 	} = props;
+	const presentedStream = usePresentedAssistantStream(stream, streamDone, sessionId);
+	const nativeSurfaceBlocked = useSyncExternalStore(
+		subscribeNativeSurfaceVisibility,
+		nativeSurfacesBlocked,
+		() => false,
+	);
 	const nativeEligible = compact !== true && desktop.nativeTranscriptAvailable;
 	const [nativeEnabled, setNativeEnabled] = useState(false);
 	const [nativeRevision, setNativeRevision] = useState(0);
@@ -631,7 +709,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 
 	useEffect(() => {
 		if (!nativeEnabled) return;
-		const projected = projectNativeStream(stream, streamDone, working, sessionId);
+		const projected = projectNativeStream(presentedStream, streamDone, working, sessionId);
 		if (projected !== null) {
 			void desktop.upsertNativeTranscript(projected).then(enabled => {
 				if (!enabled) setNativeEnabled(false);
@@ -639,7 +717,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		} else {
 			void desktop.removeNativeTranscript(nativeStreamRowId(sessionId));
 		}
-	}, [desktop, nativeEnabled, sessionId, stream, streamDone, working]);
+	}, [desktop, nativeEnabled, presentedStream, sessionId, streamDone, working]);
 
 	useEffect(() => {
 		if (!nativeEligible) return;
@@ -734,6 +812,10 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	useLayoutEffect(() => {
 		const element = rootRef.current;
 		if (!nativeEnabled || element === null) return;
+		if (nativeSurfaceBlocked) {
+			void desktop.hideNativeTranscript();
+			return;
+		}
 		let disposed = false;
 		let frame = 0;
 		const syncBounds = (): void => {
@@ -767,7 +849,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			window.visualViewport?.removeEventListener("resize", syncBounds);
 			void desktop.hideNativeTranscript();
 		};
-	}, [desktop, nativeEnabled]);
+	}, [desktop, nativeEnabled, nativeSurfaceBlocked]);
 
 	useLayoutEffect(() => {
 		const restore = restoreScrollRef.current;
@@ -781,7 +863,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	useEffect(() => {
 		const el = rootRef.current;
 		if (el !== null && lockRef.current) el.scrollTop = el.scrollHeight;
-	}, [entries, stream, activeTools, working]);
+	}, [entries, presentedStream, activeTools, working]);
 
 	// Active tools not already represented as toolCall blocks in committed rows or the stream ghost.
 	const renderedToolIds = new Set<string>();
@@ -791,8 +873,8 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			if (block.type === "toolCall") renderedToolIds.add(block.id);
 		}
 	}
-	if (stream !== null) {
-		for (const block of stream.content) {
+	if (presentedStream !== null) {
+		for (const block of presentedStream.content) {
 			if (block.type === "toolCall") renderedToolIds.add(block.id);
 		}
 	}
@@ -817,7 +899,9 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				<div className="tr-native-placeholder" />
 			) : (
 				<>
-					{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
+					{entries.length === 0 && presentedStream === null && !working && (
+						<div className="tr-empty">no activity yet</div>
+					)}
 					{visibleStart + historyRemaining > 0 && (
 						<div className="tr-history-gate">
 							<button
@@ -852,10 +936,10 @@ export function Transcript(props: TranscriptProps): ReactNode {
 							host={host}
 						/>
 					))}
-					{stream !== null && (
+					{presentedStream !== null && (
 						<Row kind="assistant" speaker="agent">
 							<AssistantBody
-								message={stream}
+								message={presentedStream}
 								results={results}
 								active={activeTools}
 								pending={!streamDone}
@@ -880,7 +964,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 							))}
 						</Row>
 					)}
-					{working && stream === null && activeTools.size === 0 && (
+					{working && presentedStream === null && activeTools.size === 0 && (
 						<Row kind="assistant" speaker="agent">
 							<StreamStatus label="thinking…" />
 						</Row>
