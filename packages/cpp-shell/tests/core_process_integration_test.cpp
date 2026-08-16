@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -69,6 +70,27 @@ omp::shell::CoreLaunch FixtureLaunch(std::wstring mode, std::chrono::millisecond
 	return launch;
 }
 
+class BatchShim final {
+public:
+	BatchShim() {
+		path_ = std::filesystem::path(CurrentExecutable()).parent_path() / L"omp core fixture.cmd";
+		std::ofstream output(path_, std::ios::binary | std::ios::trunc);
+		output << "@echo off\r\n\"%~dp0omp_shell_tests.exe\" --fake-core success\r\n";
+	}
+
+	~BatchShim() {
+		std::error_code ignored;
+		std::filesystem::remove(path_, ignored);
+	}
+
+	[[nodiscard]] const std::filesystem::path& path() const noexcept {
+		return path_;
+	}
+
+private:
+	std::filesystem::path path_;
+};
+
 void WriteFixtureLinks() {
 	std::cout << "ctrl: http://127.0.0.1:43210/#ws://127.0.0.1:43210/r/ctrl-fixture\n"
 				  << "session: http://127.0.0.1:43210/#ws://127.0.0.1:43210/r/session-fixture\n"
@@ -118,6 +140,24 @@ OMP_TEST("CoreProcess reports ready and synchronously reaps a stopped child tree
 	process.Stop();
 	OMP_CHECK(!process.running());
 	OMP_CHECK(std::chrono::steady_clock::now() - stop_started < 2s);
+}
+
+OMP_TEST("CoreProcess launches a cmd shim whose path contains spaces") {
+	const BatchShim shim;
+	OMP_CHECK(std::filesystem::exists(shim.path()));
+	omp::shell::CoreLaunch launch;
+	launch.arguments = {shim.path().wstring()};
+	launch.project_directory = std::filesystem::current_path().wstring();
+
+	omp::shell::CoreProcess process;
+	EventCollector events;
+	std::string error;
+	OMP_CHECK(process.Start(std::move(launch),
+		[&events](omp::shell::CoreEvent event) { events.Push(std::move(event)); },
+		error));
+	OMP_CHECK(events.WaitFor(omp::shell::CoreEventKind::Ready, 5s).has_value());
+	process.Stop();
+	OMP_CHECK(!process.running());
 }
 
 OMP_TEST("CoreProcess reports an unexpected post-start exit code") {

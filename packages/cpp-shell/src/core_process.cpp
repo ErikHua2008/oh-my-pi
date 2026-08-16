@@ -40,8 +40,8 @@ std::wstring SearchExecutable(std::wstring_view name) {
 		}
 		std::wstring result(static_cast<std::size_t>(required), L'\0');
 		const DWORD written = SearchPathW(
-			nullptr, value.c_str(), extension, static_cast<DWORD>(result.size() + 1), result.data(), nullptr);
-		if (written != 0 && written < result.size() + 1) {
+			nullptr, value.c_str(), extension, static_cast<DWORD>(result.size()), result.data(), nullptr);
+		if (written != 0 && written < result.size()) {
 			result.resize(written);
 			return result;
 		}
@@ -49,18 +49,23 @@ std::wstring SearchExecutable(std::wstring_view name) {
 	return value;
 }
 
-std::vector<std::wstring> BuildCommandForExecutable(std::wstring executable) {
+bool IsBatchFile(std::wstring_view executable) {
 	const std::wstring extension = std::filesystem::path(executable).extension().wstring();
-	if (_wcsicmp(extension.c_str(), L".cmd") == 0 || _wcsicmp(extension.c_str(), L".bat") == 0) {
-		wchar_t system_directory[MAX_PATH]{};
-		const UINT length = GetSystemDirectoryW(system_directory, static_cast<UINT>(std::size(system_directory)));
-		if (length != 0 && length < std::size(system_directory)) {
-			std::wstring command_interpreter(system_directory, length);
-			command_interpreter.append(L"\\cmd.exe");
-			return {std::move(command_interpreter), L"/d", L"/s", L"/c", std::move(executable)};
-		}
+	return _wcsicmp(extension.c_str(), L".cmd") == 0 || _wcsicmp(extension.c_str(), L".bat") == 0;
+}
+
+std::wstring CommandInterpreter() {
+	if (const auto configured = EnvironmentValue(L"COMSPEC"); configured && !configured->empty()) {
+		return *configured;
 	}
-	return {std::move(executable)};
+	wchar_t system_directory[MAX_PATH]{};
+	const UINT length = GetSystemDirectoryW(system_directory, static_cast<UINT>(std::size(system_directory)));
+	if (length != 0 && length < std::size(system_directory)) {
+		std::wstring command_interpreter(system_directory, length);
+		command_interpreter.append(L"\\cmd.exe");
+		return command_interpreter;
+	}
+	return L"cmd.exe";
 }
 
 bool CreateChildOutputPipe(PipePair& pipe, std::string& error) {
@@ -113,6 +118,23 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 		return false;
 	}
 
+	std::wstring application_name;
+	std::wstring command_line;
+	try {
+		if (IsBatchFile(launch.arguments.front())) {
+			application_name = CommandInterpreter();
+			command_line = BuildWindowsBatchCommandLine(
+				application_name,
+				launch.arguments.front(),
+				std::span<const std::wstring>(launch.arguments).subspan(1));
+		} else {
+			command_line = BuildWindowsCommandLine(launch.arguments);
+		}
+	} catch (const std::exception& exception) {
+		error = "building OMP command failed: " + std::string(exception.what());
+		return false;
+	}
+
 	PipePair stdout_pipe;
 	PipePair stderr_pipe;
 	if (!CreateChildOutputPipe(stdout_pipe, error)) {
@@ -147,7 +169,6 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 	startup.hStdError = stderr_pipe.write;
 
 	PROCESS_INFORMATION process_info{};
-	std::wstring command_line = BuildWindowsCommandLine(launch.arguments);
 	std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
 	mutable_command.push_back(L'\0');
 
@@ -176,7 +197,7 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 	}
 
 	const DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
-	const BOOL created = CreateProcessW(nullptr,
+	const BOOL created = CreateProcessW(application_name.empty() ? nullptr : application_name.c_str(),
 		mutable_command.data(),
 		nullptr,
 		nullptr,
@@ -435,7 +456,7 @@ std::vector<std::wstring> ResolveOmpCommand(std::wstring_view configured_omp_bin
 			coding_agent.pop_back();
 		}
 		coding_agent.append(L"\\packages\\coding-agent");
-		auto command = BuildCommandForExecutable(SearchExecutable(L"bun"));
+		auto command = std::vector<std::wstring>{SearchExecutable(L"bun")};
 		command.push_back(L"--cwd=" + coding_agent);
 		command.push_back(L"src/cli.ts");
 		return command;
@@ -444,7 +465,7 @@ std::vector<std::wstring> ResolveOmpCommand(std::wstring_view configured_omp_bin
 	if (omp_bin.empty()) {
 		omp_bin = configured_omp_bin;
 	}
-	return BuildCommandForExecutable(SearchExecutable(omp_bin.empty() ? L"omp" : omp_bin));
+	return {SearchExecutable(omp_bin.empty() ? L"omp" : omp_bin)};
 }
 
 } // namespace omp::shell
