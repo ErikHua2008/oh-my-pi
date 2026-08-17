@@ -91,7 +91,9 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 	const [importing, setImporting] = useState(false);
 	const surfaceRef = useRef<HTMLDivElement>(null);
 	const onCloseRef = useRef(onClose);
+	const importingRef = useRef(importing);
 	onCloseRef.current = onClose;
+	importingRef.current = importing;
 
 	useEffect(() => {
 		const releaseNativeSurfaces = blockNativeSurfaces();
@@ -99,7 +101,7 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 		document.body.style.overflow = "hidden";
 		surfaceRef.current?.focus();
 		const closeOnEscape = (event: globalThis.KeyboardEvent): void => {
-			if (event.key !== "Escape" || importing) return;
+			if (event.key !== "Escape" || importingRef.current) return;
 			event.preventDefault();
 			onCloseRef.current();
 		};
@@ -109,7 +111,7 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 			document.removeEventListener("keydown", closeOnEscape);
 			document.body.style.overflow = previousOverflow;
 		};
-	}, [importing]);
+	}, []);
 
 	useEffect(() => {
 		let active = true;

@@ -140,6 +140,10 @@ describe("ClaudeSessionStore", () => {
 describe("CodexSessionStore", () => {
 	it("lists current indexed sessions without opening rollout files", async () => {
 		const root = path.join(tempRoot, ".codex");
+		const currentId = "33333333-3333-4333-8333-333333333333";
+		const archivedId = "33333333-3333-4333-8333-333333333334";
+		const currentCwd = path.join(tempRoot, "codex-project");
+		const archivedCwd = path.join(tempRoot, "archived-codex-project");
 		await fs.mkdir(root, { recursive: true });
 		const database = new Database(path.join(root, "state_5.sqlite"));
 		try {
@@ -147,22 +151,22 @@ describe("CodexSessionStore", () => {
 				"CREATE TABLE threads (id TEXT, rollout_path TEXT, created_at INTEGER, updated_at INTEGER, cwd TEXT, title TEXT, name TEXT, first_user_message TEXT, archived INTEGER)",
 			);
 			database.run("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
-				"33333333-3333-4333-8333-333333333333",
+				currentId,
 				"sessions/missing.jsonl",
 				1_767_225_600,
 				1_767_225_660,
-				path.join(tempRoot, "codex-project"),
+				currentCwd,
 				"Indexed Codex",
 				null,
 				"Indexed prompt",
 				0,
 			]);
 			database.run("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
-				"33333333-3333-4333-8333-333333333334",
+				archivedId,
 				"archived_sessions/missing.jsonl",
 				1_767_225_590,
 				1_767_225_670,
-				path.join(tempRoot, "archived-codex-project"),
+				archivedCwd,
 				"Archived Codex",
 				null,
 				"Archived prompt",
@@ -171,18 +175,24 @@ describe("CodexSessionStore", () => {
 		} finally {
 			database.close();
 		}
+		await writeJsonl(path.join(root, "sessions", "missing.jsonl"), [
+			{ type: "session_meta", payload: { id: currentId, cwd: currentCwd } },
+		]);
+		await writeJsonl(path.join(root, "archived_sessions", "missing.jsonl"), [
+			{ type: "session_meta", payload: { id: archivedId, cwd: archivedCwd } },
+		]);
 		await Bun.write(
 			path.join(root, "session_index.jsonl"),
 			[
 				JSON.stringify({
-					id: "33333333-3333-4333-8333-333333333333",
-					thread_name: "Old visible name",
-					updated_at: "2026-01-01T00:00:30.000Z",
-				}),
-				JSON.stringify({
-					id: "33333333-3333-4333-8333-333333333333",
+					id: currentId,
 					thread_name: "Current visible name",
 					updated_at: "2026-01-01T00:01:00.000Z",
+				}),
+				JSON.stringify({
+					id: currentId,
+					thread_name: "Old visible name",
+					updated_at: "2026-01-01T00:00:30.000Z",
 				}),
 			].join("\n"),
 		);
@@ -190,8 +200,16 @@ describe("CodexSessionStore", () => {
 			path.join(root, ".codex-global-state.json"),
 			JSON.stringify({
 				"electron-persisted-atom-state": {
+					"thread-descriptions-v1": "being replaced",
+				},
+			}),
+		);
+		await Bun.write(
+			path.join(root, ".codex-global-state.json.bak"),
+			JSON.stringify({
+				"electron-persisted-atom-state": {
 					"thread-descriptions-v1": {
-						"33333333-3333-4333-8333-333333333333": "Semantic summary for the current chat",
+						[currentId]: "Semantic summary for the current chat",
 					},
 				},
 			}),
@@ -201,7 +219,7 @@ describe("CodexSessionStore", () => {
 
 		expect(sessions).toHaveLength(1);
 		expect(sessions[0]).toMatchObject({
-			id: "33333333-3333-4333-8333-333333333333",
+			id: currentId,
 			title: "Current visible name",
 			description: "Semantic summary for the current chat",
 			archived: false,
@@ -212,10 +230,60 @@ describe("CodexSessionStore", () => {
 		const archived = await new CodexSessionStore(root).list({ archived: true });
 		expect(archived).toHaveLength(1);
 		expect(archived[0]).toMatchObject({
-			id: "33333333-3333-4333-8333-333333333334",
+			id: archivedId,
 			title: "Archived Codex",
 			archived: true,
 		});
+	});
+
+	it("merges legacy rollouts missing from the database and hides stale database rows", async () => {
+		const root = path.join(tempRoot, ".codex");
+		const cwd = path.join(tempRoot, "codex-project");
+		const indexedId = "33333333-3333-4333-8333-333333333335";
+		const staleId = "33333333-3333-4333-8333-333333333336";
+		const legacyId = "33333333-3333-4333-8333-333333333337";
+		await fs.mkdir(root, { recursive: true });
+		const database = new Database(path.join(root, "state_5.sqlite"));
+		try {
+			database.run(
+				"CREATE TABLE threads (id TEXT, rollout_path TEXT, created_at INTEGER, updated_at INTEGER, cwd TEXT, title TEXT, name TEXT, first_user_message TEXT, archived INTEGER)",
+			);
+			database.run("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+				indexedId,
+				"sessions/indexed.jsonl",
+				1_767_225_600,
+				1_767_225_660,
+				cwd,
+				"Indexed",
+				null,
+				"Indexed prompt",
+				0,
+			]);
+			database.run("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+				staleId,
+				"sessions/deleted.jsonl",
+				1_767_225_600,
+				1_767_225_670,
+				cwd,
+				"Deleted",
+				null,
+				"Deleted prompt",
+				0,
+			]);
+		} finally {
+			database.close();
+		}
+		await writeJsonl(path.join(root, "sessions", "indexed.jsonl"), [
+			{ type: "session_meta", payload: { id: indexedId, cwd } },
+		]);
+		await writeJsonl(path.join(root, ".sessions", `rollout-${legacyId}.jsonl`), [
+			{ type: "session_meta", timestamp: "2026-01-01T00:02:00.000Z", payload: { id: legacyId, cwd } },
+		]);
+
+		const sessions = await new CodexSessionStore(root).list();
+
+		expect(new Set(sessions.map(session => session.id))).toEqual(new Set([indexedId, legacyId]));
+		expect(sessions.some(session => session.id === staleId)).toBe(false);
 	});
 
 	it("lists and converts legacy rollouts with complete tool linkage", async () => {

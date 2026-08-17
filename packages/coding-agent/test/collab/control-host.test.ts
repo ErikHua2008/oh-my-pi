@@ -458,6 +458,87 @@ describe("control room + session registry (multi-session core)", () => {
 		expect(resumed.link).toBeString();
 	});
 
+	it("re-resolves a Codex conversation that was archived while the picker was open", async () => {
+		harness = await setupHarness();
+		spyOnCreateAgentSession();
+		const sourceProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-moved-project-"));
+		const oldSourcePath = path.join(harness.sessionDir, "sessions", "codex-moved.jsonl");
+		const archivedSourcePath = path.join(harness.sessionDir, "archived_sessions", "codex-moved.jsonl");
+		await fs.mkdir(path.dirname(archivedSourcePath), { recursive: true });
+		await fs.writeFile(archivedSourcePath, "source stays untouched\n");
+		const source: ForeignSessionInfo = {
+			source: "codex",
+			id: "codex-moved-source-id",
+			path: archivedSourcePath,
+			cwd: sourceProject,
+			title: "Moved to archive",
+			archived: true,
+			created: new Date("2026-08-01T00:00:00.000Z"),
+			modified: new Date("2026-08-02T00:00:00.000Z"),
+		};
+		const listSpy = vi
+			.spyOn(CodexSessionStore.prototype, "list")
+			.mockImplementation(async options => (options?.archived ? [source] : []));
+		vi.spyOn(CodexSessionStore.prototype, "load").mockImplementation(async info => {
+			const manager = SessionManager.inMemory(info.cwd);
+			manager.ingestReplicatedEntry({
+				type: "message",
+				id: "codex-user-moved",
+				parentId: null,
+				timestamp: "2026-08-01T00:00:00.000Z",
+				message: { role: "user", content: "Archive this", timestamp: 1_754_006_400_000 },
+			});
+			await manager.setSessionName(info.title ?? "Moved to archive");
+			return manager;
+		});
+
+		const imported = await harness.registry.importForeignSession("codex", source.id, oldSourcePath, false);
+
+		expect(imported.title).toBe("Moved to archive");
+		expect(listSpy).toHaveBeenCalledWith({ archived: false });
+		expect(listSpy).toHaveBeenCalledWith({ archived: true });
+	});
+
+	it("removes the persisted copy when provisioning an imported chat fails", async () => {
+		harness = await setupHarness();
+		const sourceProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-failed-project-"));
+		const sourcePath = path.join(harness.sessionDir, "codex-failed-rollout.jsonl");
+		await fs.writeFile(sourcePath, "source stays untouched\n");
+		const source: ForeignSessionInfo = {
+			source: "codex",
+			id: "codex-failed-source-id",
+			path: sourcePath,
+			cwd: sourceProject,
+			title: "Provision failure",
+			archived: false,
+			created: new Date("2026-08-01T00:00:00.000Z"),
+			modified: new Date("2026-08-02T00:00:00.000Z"),
+		};
+		vi.spyOn(CodexSessionStore.prototype, "list").mockResolvedValue([source]);
+		vi.spyOn(CodexSessionStore.prototype, "load").mockImplementation(async info => {
+			const manager = SessionManager.inMemory(info.cwd);
+			manager.ingestReplicatedEntry({
+				type: "message",
+				id: "codex-user-failed",
+				parentId: null,
+				timestamp: "2026-08-01T00:00:00.000Z",
+				message: { role: "user", content: "Import me", timestamp: 1_754_006_400_000 },
+			});
+			await manager.setSessionName(info.title ?? "Provision failure");
+			return manager;
+		});
+		vi.spyOn(sdk, "createAgentSession").mockRejectedValue(new Error("provision failed"));
+
+		await expect(harness.registry.importForeignSession("codex", source.id, source.path, false)).rejects.toThrow(
+			"provision failed",
+		);
+
+		const targetDir = SessionManager.getDefaultSessionDir(sourceProject, path.join(harness.sessionDir, "agent"));
+		const targetFiles = await fs.readdir(targetDir).catch(() => []);
+		expect(targetFiles.filter(file => file.endsWith(".jsonl"))).toEqual([]);
+		expect(await fs.readFile(sourcePath, "utf8")).toBe("source stays untouched\n");
+	});
+
 	it("lists and resumes a persisted session from another project without restarting the core", async () => {
 		harness = await setupHarness();
 		const { created } = spyOnCreateAgentSession();

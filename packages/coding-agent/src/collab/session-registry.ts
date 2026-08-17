@@ -156,10 +156,23 @@ export class SessionRegistry {
 		archived = false,
 	): Promise<ImportedForeignSession> {
 		const store = createForeignSessionStore(source);
-		const available = await store.list({ archived });
-		const selected = available.find(
+		const requestedCollection = await store.list({ archived });
+		let selected = requestedCollection.find(
 			session => session.id === sourceId && path.resolve(session.path) === path.resolve(sourcePath),
 		);
+		if (!selected) {
+			const sameId = requestedCollection.filter(session => session.id === sourceId);
+			if (sameId.length === 1) selected = sameId[0];
+		}
+		if (!selected) {
+			// Codex can archive/unarchive a thread while the picker is open. That
+			// moves the rollout and flips its collection, so the path sent by the
+			// already-open dialog is stale even though the stable thread id remains
+			// valid. Re-resolve the id from the opposite authoritative collection.
+			const oppositeCollection = await store.list({ archived: !archived });
+			const sameId = oppositeCollection.filter(session => session.id === sourceId);
+			if (sameId.length === 1) selected = sameId[0];
+		}
 		if (!selected) throw new Error("selected Codex session is no longer available");
 		const imported = await persistForeignSession(store, selected, {
 			sessionDirForCwd: cwd =>
@@ -184,6 +197,22 @@ export class SessionRegistry {
 				requiresProjectSwitch: false,
 			};
 			return result;
+		} catch (error) {
+			// persistForeignSession has already published the fresh OMP copy. If
+			// AgentSession/CollabHost provisioning fails, roll that copy back so an
+			// operation reported as failed cannot reappear later as a ghost chat.
+			const sessionFile = imported.getSessionFile();
+			if (sessionFile) {
+				try {
+					await imported.dropSession(sessionFile);
+				} catch (cleanupError) {
+					logger.warn("failed to remove Codex import after provisioning error", {
+						sessionFile,
+						error: String(cleanupError),
+					});
+				}
+			}
+			throw error;
 		} finally {
 			if (!managed) await imported.close();
 		}

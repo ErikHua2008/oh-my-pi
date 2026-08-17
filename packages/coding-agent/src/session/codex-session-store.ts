@@ -27,12 +27,13 @@ interface CodexThreadRow {
 	title: string | null;
 	name: string | null;
 	first_user_message: string | null;
+	archived: number | null;
 }
 
 interface CodexIndexRow {
 	id: string;
 	thread_name: string;
-	updated_at: string;
+	updated_at?: string;
 }
 
 interface CodexCompaction {
@@ -82,6 +83,24 @@ function timestampMillis(value: unknown, fallback: number): number {
 function dateFromEpoch(value: number | null, fallback: Date): Date {
 	if (value === null || !Number.isFinite(value)) return fallback;
 	return new Date(value < 10_000_000_000 ? value * 1000 : value);
+}
+
+function normalizeCodexPath(value: string): string {
+	if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+	return value.startsWith("\\\\?\\") ? value.slice(4) : value;
+}
+
+function comparableCodexPath(value: string): string {
+	const resolved = path.resolve(normalizeCodexPath(value));
+	return process.platform === "win32" ? resolved.toLocaleLowerCase() : resolved;
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+	try {
+		return (await fs.promises.stat(filePath)).isFile();
+	} catch {
+		return false;
+	}
 }
 
 function imageFromUrl(value: unknown, detail: unknown): ImageContent | undefined {
@@ -230,7 +249,14 @@ async function loadIndex(root: string): Promise<Map<string, CodexIndexRow>> {
 		const id = stringField(record, "id");
 		const threadName = stringField(record, "thread_name");
 		const updatedAt = stringField(record, "updated_at");
-		if (id && threadName && updatedAt) index.set(id, { id, thread_name: threadName, updated_at: updatedAt });
+		if (!id || !threadName) continue;
+		const current = index.get(id);
+		if (current) {
+			const currentTime = current.updated_at ? Date.parse(current.updated_at) : Number.NaN;
+			const nextTime = updatedAt ? Date.parse(updatedAt) : Number.NaN;
+			if (Number.isFinite(currentTime) && (!Number.isFinite(nextTime) || nextTime < currentTime)) continue;
+		}
+		index.set(id, { id, thread_name: threadName, updated_at: updatedAt });
 	}
 	return index;
 }
@@ -243,7 +269,7 @@ async function loadSidebarDescriptions(root: string): Promise<Map<string, string
 			const atomState = parsed["electron-persisted-atom-state"];
 			if (!isRecord(atomState)) continue;
 			const descriptions = atomState["thread-descriptions-v1"];
-			if (!isRecord(descriptions)) return new Map();
+			if (!isRecord(descriptions)) continue;
 			const result = new Map<string, string>();
 			for (const [id, value] of Object.entries(descriptions)) {
 				if (typeof value !== "string") continue;
@@ -489,7 +515,7 @@ export class CodexSessionStore implements ForeignSessionStore {
 		this.#root = path.resolve(rootDirectory);
 	}
 
-	/** Lists Codex sessions from its state index without reading transcript bodies. */
+	/** Lists indexed and legacy Codex sessions without reading transcript bodies. */
 	async list(options: ForeignSessionListOptions = {}): Promise<ForeignSessionInfo[]> {
 		const archived = options.archived === true;
 		const [databasePath, index, sidebarDescriptions] = await Promise.all([
@@ -497,43 +523,16 @@ export class CodexSessionStore implements ForeignSessionStore {
 			loadIndex(this.#root),
 			loadSidebarDescriptions(this.#root),
 		]);
+		let databaseRows: CodexThreadRow[] = [];
 		if (databasePath) {
 			try {
 				const database = new Database(databasePath, { readonly: true });
 				try {
-					const rows = database
-						.query<CodexThreadRow, [number]>(
-							"SELECT id, rollout_path, created_at, updated_at, cwd, title, name, first_user_message FROM threads WHERE COALESCE(archived, 0) = ?",
+					databaseRows = database
+						.query<CodexThreadRow, []>(
+							"SELECT id, rollout_path, created_at, updated_at, cwd, title, name, first_user_message, archived FROM threads",
 						)
-						.all(archived ? 1 : 0);
-					const sessions: ForeignSessionInfo[] = [];
-					for (const row of rows) {
-						if (!row.id || !row.rollout_path || !row.cwd) continue;
-						const rolloutPath = path.isAbsolute(row.rollout_path)
-							? row.rollout_path
-							: path.join(this.#root, row.rollout_path);
-						const modified = dateFromEpoch(row.updated_at, new Date(0));
-						const created = dateFromEpoch(row.created_at, modified);
-						const visibleTitle = row.name?.trim() || index.get(row.id)?.thread_name?.trim();
-						sessions.push({
-							source: "codex",
-							id: row.id,
-							path: rolloutPath,
-							cwd: row.cwd,
-							title: visibleTitle ?? row.title ?? undefined,
-							description: sidebarDescriptions.get(row.id),
-							archived,
-							titleIsAuthoritative: visibleTitle !== undefined,
-							created,
-							modified,
-							firstMessage: row.first_user_message ?? undefined,
-						});
-					}
-					sessions.sort(
-						(left, right) =>
-							right.modified.getTime() - left.modified.getTime() || left.id.localeCompare(right.id),
-					);
-					if (sessions.length > 0) return sessions;
+						.all();
 				} finally {
 					database.close();
 				}
@@ -542,34 +541,97 @@ export class CodexSessionStore implements ForeignSessionStore {
 			}
 		}
 
+		const latestDatabaseRows = new Map<string, CodexThreadRow>();
+		for (const row of databaseRows) {
+			if (!row.id) continue;
+			const current = latestDatabaseRows.get(row.id);
+			if (!current || dateFromEpoch(row.updated_at, new Date(0)) >= dateFromEpoch(current.updated_at, new Date(0))) {
+				latestDatabaseRows.set(row.id, row);
+			}
+		}
+
+		const sessions: ForeignSessionInfo[] = [];
+		const seenIds = new Set<string>();
+		const seenPaths = new Set<string>();
+		const requestedDatabaseRows = [...latestDatabaseRows.values()].filter(
+			row => (row.archived === 1) === archived && row.rollout_path && row.cwd,
+		);
+		const databasePathAvailability = await Promise.all(
+			requestedDatabaseRows.map(async row => {
+				const rolloutPath = normalizeCodexPath(
+					path.isAbsolute(row.rollout_path) ? row.rollout_path : path.join(this.#root, row.rollout_path),
+				);
+				return { row, rolloutPath, available: await fileExists(rolloutPath) };
+			}),
+		);
+		for (const { row, rolloutPath, available } of databasePathAvailability) {
+			// State databases can retain a row after its rollout was deleted or
+			// moved. Do not offer an item that can only fail when selected; the
+			// directory scan below can still recover the same id at a new path.
+			if (!available) continue;
+			const modified = dateFromEpoch(row.updated_at, new Date(0));
+			const created = dateFromEpoch(row.created_at, modified);
+			const visibleTitle = row.name?.trim() || index.get(row.id)?.thread_name?.trim();
+			sessions.push({
+				source: "codex",
+				id: row.id,
+				path: rolloutPath,
+				cwd: normalizeCodexPath(row.cwd),
+				title: visibleTitle ?? row.title ?? undefined,
+				description: sidebarDescriptions.get(row.id),
+				archived,
+				titleIsAuthoritative: visibleTitle !== undefined,
+				created,
+				modified,
+				firstMessage: row.first_user_message ?? undefined,
+			});
+			seenIds.add(row.id);
+			seenPaths.add(comparableCodexPath(rolloutPath));
+		}
+
 		const roots = (archived ? ["archived_sessions"] : ["sessions", ".sessions"]).map(name =>
 			path.join(this.#root, name),
 		);
 		const files = (await Promise.all(roots.map(rolloutFiles))).flat();
-		const sessions: ForeignSessionInfo[] = [];
 		for (const filePath of files) {
+			const normalizedFilePath = normalizeCodexPath(filePath);
+			if (seenPaths.has(comparableCodexPath(normalizedFilePath))) continue;
 			const first = await firstJsonRecord(filePath);
 			if (first?.type !== "session_meta" || !isRecord(first.payload)) continue;
 			const id = stringField(first.payload, "id") ?? rolloutId(filePath);
-			const cwd = stringField(first.payload, "cwd");
+			const databaseRow = latestDatabaseRows.get(id);
+			// The database is authoritative about archive state. A stale copy left
+			// in the other collection must not make one thread appear twice.
+			if (databaseRow && (databaseRow.archived === 1) !== archived) continue;
+			if (seenIds.has(id)) continue;
+			const cwd = normalizeCodexPath(stringField(first.payload, "cwd") ?? databaseRow?.cwd ?? "");
 			if (!cwd) continue;
-			const stat = await fs.promises.stat(filePath);
+			const stat = await fs.promises.stat(filePath).catch(() => undefined);
+			if (!stat?.isFile()) continue;
 			const indexed = index.get(id);
 			const sourceCreated = stringField(first.payload, "timestamp");
-			const created = new Date(timestampMillis(sourceCreated, stat.birthtimeMs));
-			const modified = indexed ? new Date(timestampMillis(indexed.updated_at, stat.mtimeMs)) : stat.mtime;
+			const databaseModified = dateFromEpoch(databaseRow?.updated_at ?? null, stat.mtime);
+			const databaseCreated = dateFromEpoch(databaseRow?.created_at ?? null, databaseModified);
+			const created = new Date(timestampMillis(sourceCreated, databaseCreated.getTime() || stat.birthtimeMs));
+			const modified = indexed?.updated_at
+				? new Date(timestampMillis(indexed.updated_at, databaseModified.getTime()))
+				: databaseModified;
+			const visibleTitle = databaseRow?.name?.trim() || indexed?.thread_name?.trim();
 			sessions.push({
 				source: "codex",
 				id,
-				path: filePath,
+				path: normalizedFilePath,
 				cwd,
-				title: indexed?.thread_name,
+				title: visibleTitle ?? databaseRow?.title ?? undefined,
 				description: sidebarDescriptions.get(id),
 				archived,
-				titleIsAuthoritative: indexed?.thread_name !== undefined,
+				titleIsAuthoritative: visibleTitle !== undefined,
 				created,
 				modified,
+				firstMessage: databaseRow?.first_user_message ?? undefined,
 			});
+			seenIds.add(id);
+			seenPaths.add(comparableCodexPath(normalizedFilePath));
 		}
 		sessions.sort(
 			(left, right) => right.modified.getTime() - left.modified.getTime() || left.id.localeCompare(right.id),
