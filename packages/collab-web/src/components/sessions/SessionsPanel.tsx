@@ -1,5 +1,6 @@
 import type { ForeignSessionSummary, SessionSummary } from "@oh-my-pi/pi-wire";
 import {
+	Archive,
 	Check,
 	ChevronRight,
 	Copy,
@@ -35,6 +36,7 @@ export interface SessionsPanelProps {
 	onImportCodexSession(session: ForeignSessionSummary): Promise<void>;
 	onRenameSession(id: string, title: string): void;
 	onDropSession(id: string): void;
+	onArchiveSession(id: string): Promise<void>;
 	onLeave(): void;
 }
 
@@ -279,6 +281,7 @@ export function SessionsPanel({
 	onImportCodexSession,
 	onRenameSession,
 	onDropSession,
+	onArchiveSession,
 	onLeave,
 }: SessionsPanelProps): ReactNode {
 	const { sessions, readOnly, phase } = snapshot;
@@ -448,7 +451,7 @@ export function SessionsPanel({
 	const openSessionContextMenu = (event: MouseEvent, session: SessionSummary): void => {
 		if (readOnly) return;
 		event.preventDefault();
-		const position = placeContextMenu(event.clientX, event.clientY, 220, 214, window.innerWidth, window.innerHeight);
+		const position = placeContextMenu(event.clientX, event.clientY, 220, 255, window.innerWidth, window.innerHeight);
 		setProjectContextMenu(null);
 		setSessionContextMenu({
 			id: session.id,
@@ -881,6 +884,20 @@ export function SessionsPanel({
 						>
 							<MailCheck size={14} aria-hidden="true" />
 							<span>标记为已读</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							className="sh-context-menu-separated"
+							disabled={pending}
+							onClick={() => {
+								const { id } = sessionContextMenu;
+								setSessionContextMenu(null);
+								void onArchiveSession(id);
+							}}
+						>
+							<Archive size={14} aria-hidden="true" />
+							<span>归档对话</span>
 						</button>
 					</div>,
 					document.body,

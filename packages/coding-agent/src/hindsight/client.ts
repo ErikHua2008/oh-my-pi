@@ -9,7 +9,7 @@
  */
 
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
-import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
+import { armTimeoutSignal, isTimeoutError } from "../utils/fetch-timeout";
 import type { HindsightConfig } from "./config";
 
 const DEFAULT_USER_AGENT = USER_AGENT;
@@ -537,10 +537,11 @@ export class HindsightApi {
 		}
 
 		const timeoutMs = opts?.timeoutMs ?? this.#requestTimeoutMs;
+		using requestTimeout = armTimeoutSignal(timeoutMs, opts?.signal);
 		const init: RequestInit = {
 			method,
 			headers: this.#headers,
-			signal: withTimeoutSignal(timeoutMs, opts?.signal),
+			signal: requestTimeout.signal,
 		};
 		if (opts?.body !== undefined) {
 			init.body = JSON.stringify(pruneUndefined(opts.body));

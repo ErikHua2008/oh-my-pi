@@ -6,7 +6,7 @@
  */
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import { withTimeoutSignal } from "../utils/fetch-timeout";
+import { armTimeoutSignal } from "../utils/fetch-timeout";
 
 /** Per-request abort deadline for each OAuth discovery metadata fetch. */
 const DISCOVERY_FETCH_TIMEOUT_MS = 10_000;
@@ -354,11 +354,12 @@ export async function fetchResourceMetadataScopes(
 ): Promise<string | undefined> {
 	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	try {
+		using requestTimeout = armTimeoutSignal(DISCOVERY_FETCH_TIMEOUT_MS, opts?.signal);
 		const resp = await fetchImpl(resourceMetadataUrl, {
 			method: "GET",
 			headers: { Accept: "application/json" },
 			redirect: "follow",
-			signal: withTimeoutSignal(DISCOVERY_FETCH_TIMEOUT_MS, opts?.signal),
+			signal: requestTimeout.signal,
 		});
 		if (!resp.ok) return undefined;
 		const meta = (await resp.json()) as Record<string, unknown>;
@@ -403,11 +404,12 @@ export async function discoverOAuthEndpoints(
 	if (resourceMetadataUrl && !visitedAuthServers.has(resourceMetadataUrl)) {
 		visitedAuthServers.add(resourceMetadataUrl);
 		try {
+			using requestTimeout = armTimeoutSignal(DISCOVERY_FETCH_TIMEOUT_MS, opts?.signal);
 			const metaResp = await fetchImpl(resourceMetadataUrl, {
 				method: "GET",
 				headers: { Accept: "application/json" },
 				redirect: "follow",
-				signal: withTimeoutSignal(DISCOVERY_FETCH_TIMEOUT_MS, opts?.signal),
+				signal: requestTimeout.signal,
 			});
 			if (metaResp.ok) {
 				const meta = (await metaResp.json()) as Record<string, unknown>;
@@ -488,11 +490,12 @@ export async function discoverOAuthEndpoints(
 			const urlsToTry = buildWellKnownUrls(path, base.url);
 			for (const url of urlsToTry) {
 				try {
+					using requestTimeout = armTimeoutSignal(DISCOVERY_FETCH_TIMEOUT_MS, opts?.signal);
 					const response = await fetchImpl(url.toString(), {
 						method: "GET",
 						headers: { Accept: "application/json" },
 						redirect: "follow",
-						signal: withTimeoutSignal(DISCOVERY_FETCH_TIMEOUT_MS, opts?.signal),
+						signal: requestTimeout.signal,
 					});
 
 					if (response.ok) {

@@ -49,6 +49,7 @@ import {
 import { $env, isRecord, logger, prompt, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { countTokensConservatively } from "../tokenizer";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
+import { armRequestTimeout } from "./request-timeout";
 
 export * from "./compaction-v2-streaming";
 
@@ -203,13 +204,6 @@ export function trimRemoteCompactionInputToContextWindow(
 		estimatedTokensBefore,
 		estimatedTokensAfter,
 	};
-}
-
-/** Race the caller's signal against the request timeout; `timeoutMs <= 0` disables the watchdog. */
-function withRequestTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
-	if (timeoutMs <= 0) return signal;
-	const timeout = AbortSignal.timeout(timeoutMs);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 export type OpenAiRemoteCompactionItem = {
@@ -835,11 +829,12 @@ export async function requestOpenAiRemoteCompaction(
 		}
 	}
 
+	using requestTimeout = armRequestTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS);
 	const response = await (opts?.fetch ?? fetch)(endpoint, {
 		method: "POST",
 		headers,
 		body: stringifyJson(request),
-		signal: withRequestTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
+		signal: requestTimeout.signal,
 	});
 
 	if (!response.ok) {
@@ -934,11 +929,12 @@ export async function requestRemoteCompaction(
 			}
 		: { systemPrompt: request.systemPrompt, prompt: request.prompt, maxTokens: request.maxTokens };
 
+	using requestTimeout = armRequestTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS);
 	const response = await (opts?.fetch ?? fetch)(endpoint, {
 		method: "POST",
 		headers,
 		body: stringifyJson(body),
-		signal: withRequestTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
+		signal: requestTimeout.signal,
 	});
 
 	if (!response.ok) {

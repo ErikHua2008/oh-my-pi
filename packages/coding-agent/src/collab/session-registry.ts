@@ -20,9 +20,9 @@ import { createHeadlessCollabContext } from "../modes/core-mode";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { createForeignSessionStore, persistForeignSession } from "../session/foreign-session-import";
-import { listAllSessions, listSessions, resolveResumableSession } from "../session/session-listing";
+import { listAllSessions, listSessions, resolveResumableSession, type SessionInfo } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
-import { FileSessionStorage } from "../session/session-storage";
+import { FileSessionStorage, moveSessionWithArtifacts } from "../session/session-storage";
 import { EventBus } from "../utils/event-bus";
 import { CollabHost } from "./host";
 import {
@@ -87,6 +87,7 @@ export class SessionRegistry {
 	readonly #baseSessionOptions: CreateAgentSessionOptions;
 	readonly #sessionDir: string;
 	readonly #agentDir: string;
+	readonly #archivedSessionsRoot: string;
 	readonly #cwd: string;
 	/** Active sessions in registration order; entries stay until fully torn down. */
 	readonly #active = new Map<string, ManagedSession>();
@@ -101,6 +102,7 @@ export class SessionRegistry {
 		this.#cwd = options.baseSessionOptions.cwd ?? getProjectDir();
 		this.#agentDir = options.agentDir;
 		this.#sessionDir = options.sessionDir || SessionManager.getDefaultSessionDir(this.#cwd, options.agentDir);
+		this.#archivedSessionsRoot = path.join(path.dirname(getSessionsDir(options.agentDir)), "archived_sessions");
 	}
 
 	/**
@@ -332,6 +334,76 @@ export class SessionRegistry {
 		this.#emitChange();
 	}
 
+	/** Move a stored chat out of the active session tree and tear down its live room if needed. */
+	async archiveSession(id: string): Promise<void> {
+		const storage = new FileSessionStorage();
+		const active = this.#active.get(id);
+		let sourcePath: string;
+		if (active) {
+			if (active.state === "dropping") throw new Error("no such session");
+			if (active.streaming) throw new Error("wait for the current response to finish before archiving this chat");
+			const sessionFile = active.sessionManager.getSessionFile();
+			if (!sessionFile || !(await storage.exists(sessionFile))) {
+				throw new Error("an empty draft cannot be archived");
+			}
+			sourcePath = path.resolve(sessionFile);
+			active.state = "dropping";
+			this.#emitChange();
+			try {
+				await active.collabHost.stop("session archived");
+			} catch (err) {
+				logger.warn("failed to stop collab host while archiving session", { id, error: String(err) });
+			}
+			try {
+				await active.session.dispose();
+			} catch (err) {
+				logger.warn("failed to dispose session while archiving", { id, error: String(err) });
+			}
+			this.#streamingUnsubs.get(id)?.();
+			this.#streamingUnsubs.delete(id);
+		} else {
+			const match = await resolveResumableSession(id, this.#cwd, this.#sessionDir, {
+				allowGlobalFallback: true,
+				sessionsRoot: getSessionsDir(this.#agentDir),
+			});
+			if (!match) throw new Error("no such session");
+			sourcePath = path.resolve(match.session.path);
+		}
+
+		const projectDirectory = path.basename(path.dirname(sourcePath));
+		const targetPath = path.join(this.#archivedSessionsRoot, projectDirectory, path.basename(sourcePath));
+		try {
+			await moveSessionWithArtifacts(sourcePath, targetPath);
+		} finally {
+			if (active) this.#active.delete(id);
+			this.#emitChange();
+		}
+	}
+
+	/** List user-archived chats across projects, newest first. */
+	async listArchivedSessions(): Promise<SessionSummary[]> {
+		const infos = await listAllSessions(new FileSessionStorage(), this.#archivedSessionsRoot);
+		return infos.map(info => this.#summaryFromInfo(info));
+	}
+
+	/** Restore one archived chat to the active session tree without opening it. */
+	async restoreArchivedSession(id: string): Promise<SessionSummary> {
+		if (this.#active.has(id)) throw new Error("this session is already active");
+		const archived = await listAllSessions(new FileSessionStorage(), this.#archivedSessionsRoot);
+		const matches = archived.filter(info => info.id === id);
+		if (matches.length === 0) throw new Error("no such archived session");
+		if (matches.length > 1) throw new Error("more than one archived session has this id");
+		const info = matches[0]!;
+		const targetDirectory =
+			!info.cwd || sameProjectPath(info.cwd, this.#cwd)
+				? this.#sessionDir
+				: SessionManager.getDefaultSessionDir(info.cwd, this.#agentDir);
+		const targetPath = path.join(targetDirectory, path.basename(info.path));
+		await moveSessionWithArtifacts(info.path, targetPath);
+		this.#emitChange();
+		return this.#summaryFromInfo({ ...info, path: targetPath });
+	}
+
 	/** List all sessions (disk + live), newest first by modification time. */
 	async list(): Promise<SessionSummary[]> {
 		const storage = new FileSessionStorage();
@@ -416,6 +488,20 @@ export class SessionRegistry {
 		}
 		summaries.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
 		return summaries;
+	}
+
+	#summaryFromInfo(info: SessionInfo): SessionSummary {
+		return {
+			id: info.id,
+			title: info.title,
+			cwd: info.cwd,
+			createdAt: info.created.toISOString(),
+			modifiedAt: info.modified.toISOString(),
+			messageCount: info.messageCount,
+			status: info.status,
+			running: false,
+			streaming: false,
+		};
 	}
 
 	/** Tear down every session in reverse registration order. Never throws. */

@@ -31,7 +31,9 @@ const SESSIONS_INTERVAL_MS = 2000;
 /** Mutating control frames; only peers with a valid write token may send these. */
 type MutationFrame = Extract<
 	ControlGuestFrame,
-	{ t: "ctrl-create" | "ctrl-resume" | "ctrl-rename" | "ctrl-drop" | "ctrl-import" }
+	{
+		t: "ctrl-create" | "ctrl-resume" | "ctrl-rename" | "ctrl-drop" | "ctrl-archive" | "ctrl-restore" | "ctrl-import";
+	}
 >;
 
 export class ControlHost {
@@ -157,15 +159,36 @@ export class ControlHost {
 			case "ctrl-import-list":
 				if ("archived" in frame) void this.#handleImportList(frame.reqId, frame.source, frame.archived, fromPeer);
 				break;
+			case "ctrl-archived-list":
+				void this.#handleArchivedList(frame.reqId, fromPeer);
+				break;
 			case "ctrl-create":
 			case "ctrl-resume":
 			case "ctrl-rename":
 			case "ctrl-drop":
+			case "ctrl-archive":
+			case "ctrl-restore":
 			case "ctrl-import":
 				void this.#handleMutation(frame, fromPeer);
 				break;
 			default:
 				logger.debug("control host ignoring unexpected frame", { type: frame.t, fromPeer });
+		}
+	}
+
+	async #handleArchivedList(reqId: number, fromPeer: number): Promise<void> {
+		const peer = this.#peers.get(fromPeer);
+		const socket = this.#socket;
+		if (!peer || !socket) return;
+		if (!peer.canWrite) {
+			socket.send({ t: "ctrl-request-error", reqId, message: "read-only" }, fromPeer);
+			return;
+		}
+		try {
+			const sessions = await this.#registry.listArchivedSessions();
+			socket.send({ t: "ctrl-archived-list", reqId, sessions }, fromPeer);
+		} catch (err) {
+			socket.send({ t: "ctrl-request-error", reqId, message: String(err) }, fromPeer);
 		}
 	}
 
@@ -218,7 +241,7 @@ export class ControlHost {
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#socket?.send(
-				frame.t === "ctrl-import"
+				"reqId" in frame
 					? { t: "ctrl-request-error", reqId: frame.reqId, message: "read-only" }
 					: { t: "ctrl-error", message: "read-only" },
 				fromPeer,
@@ -238,6 +261,12 @@ export class ControlHost {
 				// Drop has no link to hand back; the next ctrl-sessions
 				// broadcast reflects the removal.
 				await this.#registry.dropSession(frame.id);
+			} else if (frame.t === "ctrl-archive") {
+				await this.#registry.archiveSession(frame.id);
+				this.#socket?.send({ t: "ctrl-archived", reqId: frame.reqId, id: frame.id }, fromPeer);
+			} else if (frame.t === "ctrl-restore") {
+				const session = await this.#registry.restoreArchivedSession(frame.id);
+				this.#socket?.send({ t: "ctrl-restored", reqId: frame.reqId, session }, fromPeer);
 			} else {
 				const session = await this.#registry.importForeignSession(
 					frame.source,
@@ -248,7 +277,7 @@ export class ControlHost {
 				this.#socket?.send({ t: "ctrl-imported", reqId: frame.reqId, source: frame.source, session }, fromPeer);
 			}
 		} catch (err) {
-			if (frame.t === "ctrl-import") {
+			if ("reqId" in frame) {
 				this.#socket?.send({ t: "ctrl-request-error", reqId: frame.reqId, message: String(err) }, fromPeer);
 			} else {
 				this.#socket?.send({ t: "ctrl-error", message: String(err) }, fromPeer);

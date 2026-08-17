@@ -179,6 +179,37 @@ describe("ControlClient frame apply", () => {
 		}
 	});
 
+	it("round-trips archive listing, archive, and restore requests by request id", async () => {
+		const sent: ControlGuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: ControlGuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const { client, socket } = makeClient(CTRL_WRITE_LINK);
+			const listPromise = client.listArchivedSessions();
+			const listRequest = sent.at(-1);
+			if (listRequest?.t !== "ctrl-archived-list") throw new Error("expected ctrl-archived-list");
+			socket.onFrame?.({ t: "ctrl-archived-list", reqId: listRequest.reqId, sessions: [SESSIONS[0]!] }, 0);
+			expect(await listPromise).toEqual([SESSIONS[0]]);
+
+			const archivePromise = client.archiveSession("s1");
+			const archiveRequest = sent.at(-1);
+			if (archiveRequest?.t !== "ctrl-archive") throw new Error("expected ctrl-archive");
+			expect(archiveRequest.id).toBe("s1");
+			socket.onFrame?.({ t: "ctrl-archived", reqId: archiveRequest.reqId, id: "s1" }, 0);
+			await archivePromise;
+
+			const restorePromise = client.restoreArchivedSession("s1");
+			const restoreRequest = sent.at(-1);
+			if (restoreRequest?.t !== "ctrl-restore") throw new Error("expected ctrl-restore");
+			expect(restoreRequest.id).toBe("s1");
+			socket.onFrame?.({ t: "ctrl-restored", reqId: restoreRequest.reqId, session: SESSIONS[0]! }, 0);
+			expect(await restorePromise).toEqual(SESSIONS[0]);
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
 	it("rejects the matching Codex request when the host returns a correlated error", async () => {
 		const sent: ControlGuestFrame[] = [];
 		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: ControlGuestFrame) => {

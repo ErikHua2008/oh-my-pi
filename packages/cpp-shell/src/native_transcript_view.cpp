@@ -563,6 +563,11 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 		copied_row_id_.clear();
 		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
 	}
+	// A replacement snapshot may retain stable row ids while changing their
+	// text (for example after history reconciliation or an imported transcript
+	// refresh). Text layouts are keyed by row id, so keeping the old cache would
+	// render stale content and preserve the wrong measured height.
+	layout_cache_.clear();
 	if (keep_tail) {
 		ScrollToBottom();
 	} else {

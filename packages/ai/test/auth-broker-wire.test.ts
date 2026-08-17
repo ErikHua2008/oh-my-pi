@@ -52,13 +52,17 @@ function readRawCodexCredentialBlocks(
 	credentialId: number,
 ): Array<{ block_scope: string; blocked_until_ms: number; updated_at: number }> {
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare(
+		"SELECT block_scope, blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' ORDER BY block_scope",
+	);
 	try {
-		return db
-			.prepare(
-				"SELECT block_scope, blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' ORDER BY block_scope",
-			)
-			.all(credentialId) as Array<{ block_scope: string; blocked_until_ms: number; updated_at: number }>;
+		return statement.all(credentialId) as Array<{
+			block_scope: string;
+			blocked_until_ms: number;
+			updated_at: number;
+		}>;
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
@@ -261,13 +265,14 @@ describe("auth-broker wire surface", () => {
 		const sparkUpdatedAtSec = Math.floor(Date.now() / 1000) - 20;
 		const chatUpdatedAtSec = sparkUpdatedAtSec + 10;
 		const db = new Database(path.join(tempDir, "agent.db"));
+		const updateTimestamp = db.prepare(
+			"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
+		);
 		try {
-			const updateTimestamp = db.prepare(
-				"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
-			);
 			updateTimestamp.run(chatUpdatedAtSec, credential.id, "openai-codex:oauth", "chat");
 			updateTimestamp.run(sparkUpdatedAtSec, credential.id, "openai-codex:oauth", "spark");
 		} finally {
+			updateTimestamp.finalize();
 			db.close();
 		}
 		await storage!.pollExternalChanges();
@@ -349,18 +354,18 @@ describe("auth-broker wire surface", () => {
 		});
 		const updatedChatBlockedUntilMs = sparkBlockedUntilMs + 60_000;
 		const legacyWriter = new Database(path.join(tempDir, "agent.db"));
+		const upsertStatement = legacyWriter.prepare(
+			`INSERT INTO auth_credential_blocks (
+				credential_id, provider_key, block_scope, blocked_until_ms, updated_at
+			) VALUES (?, 'openai-codex:oauth', 'shared', ?, ?)
+			ON CONFLICT(credential_id, provider_key, block_scope) DO UPDATE SET
+				blocked_until_ms = MAX(auth_credential_blocks.blocked_until_ms, excluded.blocked_until_ms),
+				updated_at = excluded.updated_at`,
+		);
 		try {
-			legacyWriter
-				.prepare(
-					`INSERT INTO auth_credential_blocks (
-						credential_id, provider_key, block_scope, blocked_until_ms, updated_at
-					) VALUES (?, 'openai-codex:oauth', 'shared', ?, ?)
-					ON CONFLICT(credential_id, provider_key, block_scope) DO UPDATE SET
-						blocked_until_ms = MAX(auth_credential_blocks.blocked_until_ms, excluded.blocked_until_ms),
-						updated_at = excluded.updated_at`,
-				)
-				.run(credential.id, updatedChatBlockedUntilMs, Math.floor(Date.now() / 1000));
+			upsertStatement.run(credential.id, updatedChatBlockedUntilMs, Math.floor(Date.now() / 1000));
 		} finally {
+			upsertStatement.finalize();
 			legacyWriter.close();
 		}
 		const changedLegacyResult = await pendingLegacySnapshot;

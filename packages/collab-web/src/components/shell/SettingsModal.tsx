@@ -1,4 +1,6 @@
+import type { SessionSummary } from "@oh-my-pi/pi-wire";
 import {
+	Archive,
 	ArrowLeft,
 	CircleGauge,
 	Folder,
@@ -7,6 +9,7 @@ import {
 	Network,
 	Palette,
 	PanelsTopLeft,
+	RotateCcw,
 	Settings2,
 	ShieldCheck,
 	Sparkles,
@@ -25,9 +28,11 @@ export interface SettingsModalProps {
 	connection?: string | null;
 	model?: string | null;
 	context?: string | null;
+	loadArchivedSessions?(): Promise<readonly SessionSummary[]>;
+	onRestoreArchivedSession?(id: string): Promise<void>;
 }
 
-type SettingsSection = "general" | "appearance";
+type SettingsSection = "general" | "appearance" | "archived";
 
 const THEME_OPTIONS: readonly {
 	preference: ThemePreference;
@@ -42,6 +47,44 @@ const THEME_OPTIONS: readonly {
 
 const UNAVAILABLE = "Not available";
 
+interface ArchivedProjectGroup {
+	path: string;
+	name: string;
+	sessions: readonly SessionSummary[];
+}
+
+function archivedSessionTitle(session: SessionSummary): string {
+	if (session.title?.trim()) return session.title.trim();
+	return (
+		session.cwd
+			.split(/[\\/]+/)
+			.filter(Boolean)
+			.pop() || "Untitled chat"
+	);
+}
+
+export function groupArchivedSessions(sessions: readonly SessionSummary[]): readonly ArchivedProjectGroup[] {
+	const projects = new Map<string, { path: string; sessions: SessionSummary[] }>();
+	for (const session of sessions) {
+		const path = session.cwd.trim() || "Unknown project";
+		const key = /^[A-Za-z]:[\\/]/.test(path) ? path.toLocaleLowerCase() : path;
+		const existing = projects.get(key);
+		if (existing) existing.sessions.push(session);
+		else projects.set(key, { path, sessions: [session] });
+	}
+	return Array.from(projects.values())
+		.map(project => ({
+			...project,
+			name:
+				project.path
+					.split(/[\\/]+/)
+					.filter(Boolean)
+					.pop() || project.path,
+			sessions: project.sessions.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt)),
+		}))
+		.sort((a, b) => (b.sessions[0]?.modifiedAt ?? "").localeCompare(a.sessions[0]?.modifiedAt ?? ""));
+}
+
 /**
  * Settings sheet. Theme is the only writable preference; session facts remain
  * metadata so the surface never implies unsupported controls.
@@ -54,9 +97,15 @@ export function SettingsModal({
 	connection,
 	model,
 	context,
+	loadArchivedSessions,
+	onRestoreArchivedSession,
 }: SettingsModalProps): ReactNode {
 	const { preference, resolved, setPreference } = useThemePreference();
 	const [section, setSection] = useState<SettingsSection>("general");
+	const [archivedSessions, setArchivedSessions] = useState<readonly SessionSummary[]>([]);
+	const [archivedLoading, setArchivedLoading] = useState(false);
+	const [archivedError, setArchivedError] = useState<string | null>(null);
+	const [restoringId, setRestoringId] = useState<string | null>(null);
 	const surfaceRef = useRef<HTMLDivElement>(null);
 	const onCloseRef = useRef(onClose);
 	onCloseRef.current = onClose;
@@ -64,6 +113,42 @@ export function SettingsModal({
 		typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null,
 	);
 	const choose = (pref: ThemePreference): void => setPreference(pref);
+	const canManageArchived = readOnly !== true && loadArchivedSessions !== undefined;
+	const archivedGroups = groupArchivedSessions(archivedSessions);
+
+	useEffect(() => {
+		if (section !== "archived" || !canManageArchived || !loadArchivedSessions) return;
+		let active = true;
+		setArchivedLoading(true);
+		setArchivedError(null);
+		void loadArchivedSessions()
+			.then(sessions => {
+				if (active) setArchivedSessions(sessions);
+			})
+			.catch(error => {
+				if (active) setArchivedError(error instanceof Error ? error.message : String(error));
+			})
+			.finally(() => {
+				if (active) setArchivedLoading(false);
+			});
+		return () => {
+			active = false;
+		};
+	}, [canManageArchived, loadArchivedSessions, section]);
+
+	const restoreArchived = async (id: string): Promise<void> => {
+		if (!onRestoreArchivedSession || restoringId) return;
+		setRestoringId(id);
+		setArchivedError(null);
+		try {
+			await onRestoreArchivedSession(id);
+			setArchivedSessions(current => current.filter(session => session.id !== id));
+		} catch (error) {
+			setArchivedError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setRestoringId(null);
+		}
+	};
 
 	useEffect(() => {
 		const releaseNativeSurfaces = blockNativeSurfaces();
@@ -108,7 +193,7 @@ export function SettingsModal({
 	};
 
 	const access = readOnly == null ? UNAVAILABLE : readOnly ? "Read only" : "Read and write";
-	const activeLabel = section === "general" ? "General" : "Appearance";
+	const activeLabel = section === "general" ? "General" : section === "appearance" ? "Appearance" : "Archived chats";
 
 	return (
 		<div className="sh-settings-backdrop" onClick={closeFromBackdrop}>
@@ -149,6 +234,18 @@ export function SettingsModal({
 							<Palette size={18} aria-hidden="true" />
 							<span>Appearance</span>
 						</button>
+						{canManageArchived && (
+							<button
+								type="button"
+								className={section === "archived" ? "sh-settings-nav-item is-active" : "sh-settings-nav-item"}
+								aria-current={section === "archived" ? "page" : undefined}
+								aria-controls="sh-settings-panel-archived"
+								onClick={() => setSection("archived")}
+							>
+								<Archive size={18} aria-hidden="true" />
+								<span>Archived chats</span>
+							</button>
+						)}
 					</nav>
 				</aside>
 
@@ -157,7 +254,11 @@ export function SettingsModal({
 						<header className="sh-settings-head">
 							<p className="sh-settings-eyebrow">{activeLabel}</p>
 							<h1 className="sh-settings-title">Settings</h1>
-							<p className="sh-settings-description">Manage local appearance and inspect the active session.</p>
+							<p className="sh-settings-description">
+								{section === "archived"
+									? "Archived chats stay on this computer and can be restored at any time."
+									: "Manage local appearance and inspect the active session."}
+							</p>
 						</header>
 
 						{section === "general" && (
@@ -246,6 +347,57 @@ export function SettingsModal({
 										</label>
 									))}
 								</div>
+							</section>
+						)}
+
+						{section === "archived" && (
+							<section
+								className="sh-settings-section"
+								id="sh-settings-panel-archived"
+								aria-labelledby="sh-settings-archived-title"
+							>
+								<div className="sh-settings-section-head">
+									<h2 id="sh-settings-archived-title">已归档对话</h2>
+									<p>恢复后，对话会重新出现在原项目下。</p>
+								</div>
+								{archivedError && (
+									<p className="sh-settings-archived-error" role="alert">
+										{archivedError}
+									</p>
+								)}
+								{archivedLoading ? (
+									<p className="sh-settings-archived-empty">正在加载已归档对话…</p>
+								) : archivedGroups.length === 0 ? (
+									<p className="sh-settings-archived-empty">还没有已归档的对话。</p>
+								) : (
+									<div className="sh-settings-archived-groups">
+										{archivedGroups.map(group => (
+											<section className="sh-settings-archived-group" key={group.path}>
+												<div className="sh-settings-archived-project">
+													<strong>{group.name}</strong>
+													<span title={group.path}>{group.path}</span>
+												</div>
+												{group.sessions.map(item => (
+													<div className="sh-settings-archived-row" key={item.id}>
+														<div className="sh-settings-archived-copy">
+															<strong>{archivedSessionTitle(item)}</strong>
+															<span>{new Date(item.modifiedAt).toLocaleString()}</span>
+														</div>
+														<button
+															type="button"
+															className="sh-settings-restore"
+															disabled={restoringId !== null}
+															onClick={() => void restoreArchived(item.id)}
+														>
+															<RotateCcw size={14} aria-hidden="true" />
+															{restoringId === item.id ? "恢复中…" : "恢复"}
+														</button>
+													</div>
+												))}
+											</section>
+										))}
+									</div>
+								)}
 							</section>
 						)}
 					</div>

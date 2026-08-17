@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { withTimeoutSignal } from "./fetch-timeout";
+import { armTimeoutSignal } from "./fetch-timeout";
 import * as git from "./git";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -90,9 +90,10 @@ function formatCommandFailure(
 }
 
 async function jj(cwd: string, args: readonly string[], options: JjCommandOptions = {}): Promise<JjCommandResult> {
+	using commandTimeout = armTimeoutSignal(options.timeoutMs ?? JJ_COMMAND_TIMEOUT_MS, options.signal);
 	const child = Bun.spawn(["jj", "--no-pager", "--color=never", ...args], {
 		cwd,
-		signal: withTimeoutSignal(options.timeoutMs ?? JJ_COMMAND_TIMEOUT_MS, options.signal),
+		signal: commandTimeout.signal,
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",

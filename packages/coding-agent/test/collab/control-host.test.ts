@@ -369,6 +369,61 @@ describe("control room + session registry (multi-session core)", () => {
 		expect(initial.link).toBe(harness.initialHost.webLink);
 	});
 
+	it("archives a persisted chat with its artifacts and restores it to the active list", async () => {
+		harness = await setupHarness();
+		const sourcePath = path.join(harness.sessionDir, "initial.jsonl");
+		const sourceArtifacts = path.join(harness.sessionDir, "initial");
+		await fs.mkdir(sourceArtifacts);
+		await fs.writeFile(path.join(sourceArtifacts, "attachment.txt"), "kept with chat");
+
+		const guest = await joinRoom(harness.controlHost.webLink, "archiver", { ctrl: true });
+		guestCleanups.push(() => guest.close());
+		await guest.nextFrame(frame => frame.t === "ctrl-welcome");
+
+		guest.socket.send({ t: "ctrl-archive", reqId: 61, id: INITIAL_SESSION_ID });
+		const archivedReply = await guest.nextFrame(frame => frame.t === "ctrl-archived" && frame.reqId === 61);
+		if (archivedReply.t !== "ctrl-archived") throw new Error(`expected ctrl-archived, got ${archivedReply.t}`);
+		expect(archivedReply.id).toBe(INITIAL_SESSION_ID);
+		expect(
+			await fs.stat(sourcePath).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(
+			await fs.stat(sourceArtifacts).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+
+		guest.socket.send({ t: "ctrl-archived-list", reqId: 62 });
+		const archivedList = await guest.nextFrame(frame => frame.t === "ctrl-archived-list" && frame.reqId === 62);
+		if (archivedList.t !== "ctrl-archived-list" || !("sessions" in archivedList)) {
+			throw new Error(`expected ctrl-archived-list, got ${archivedList.t}`);
+		}
+		expect(archivedList.sessions.map(session => session.id)).toEqual([INITIAL_SESSION_ID]);
+		const archivedFiles = await Array.fromAsync(
+			new Bun.Glob("*/*.jsonl").scan(path.join(harness.sessionDir, "agent", "archived_sessions")),
+		);
+		expect(archivedFiles).toHaveLength(1);
+		const archivedPath = path.join(harness.sessionDir, "agent", "archived_sessions", archivedFiles[0]!);
+		expect(await fs.readFile(path.join(archivedPath.slice(0, -6), "attachment.txt"), "utf8")).toBe("kept with chat");
+
+		guest.socket.send({ t: "ctrl-restore", reqId: 63, id: INITIAL_SESSION_ID });
+		const restored = await guest.nextFrame(frame => frame.t === "ctrl-restored" && frame.reqId === 63);
+		if (restored.t !== "ctrl-restored") throw new Error(`expected ctrl-restored, got ${restored.t}`);
+		expect(restored.session).toMatchObject({ id: INITIAL_SESSION_ID, running: false, streaming: false });
+		expect(await harness.registry.listArchivedSessions()).toEqual([]);
+		const active = await harness.registry.list();
+		expect(active.map(session => session.id)).toContain(INITIAL_SESSION_ID);
+		const restoredFiles = await Array.fromAsync(
+			new Bun.Glob("*/*.jsonl").scan(path.join(harness.sessionDir, "agent", "sessions")),
+		);
+		const restoredPath = path.join(harness.sessionDir, "agent", "sessions", restoredFiles[0]!);
+		expect(await fs.readFile(path.join(restoredPath.slice(0, -6), "attachment.txt"), "utf8")).toBe("kept with chat");
+	});
+
 	it("lists and imports a Codex conversation into its original project with a fresh OMP id", async () => {
 		harness = await setupHarness();
 		const { created } = spyOnCreateAgentSession();

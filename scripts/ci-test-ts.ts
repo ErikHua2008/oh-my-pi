@@ -460,6 +460,13 @@ function buildChildEnv(): Record<string, string | undefined> {
 		...Bun.env,
 		GITHUB_ACTIONS: "",
 		PI_TEST_RUNTIME: "1",
+		// UI assertions use the English source strings unless a test explicitly
+		// pins another locale. Windows otherwise falls back to the host ICU locale
+		// when LANG is absent, making the same suite pass on an English CI runner
+		// but render Chinese on a Chinese developer machine.
+		LANG: "en_US.UTF-8",
+		LC_ALL: undefined,
+		LC_MESSAGES: undefined,
 		BUN_JSC_useConcurrentGC: "0",
 		BUN_JSC_numberOfGCMarkers: "1",
 	};

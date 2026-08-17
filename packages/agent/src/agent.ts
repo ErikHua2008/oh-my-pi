@@ -1204,22 +1204,34 @@ export class Agent {
 	/**
 	 * Continue from current context (used for retries and resuming queued messages).
 	 */
-	#continuationDequeueSignal(signal?: AbortSignal): AbortSignal | undefined {
+	#continuationDequeueSignal(signal?: AbortSignal): {
+		signal: AbortSignal | undefined;
+		dispose: () => void;
+	} {
 		const signals: AbortSignal[] = [];
+		let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
 		if (this.#abortController) signals.push(this.#abortController.signal);
 		if (signal) signals.push(signal);
 		if (this.#deadline !== undefined) {
 			const delay = this.#deadline - Date.now();
+			const controller = new AbortController();
+			const reason = new DOMException("Deadline exceeded", "TimeoutError");
 			if (delay <= 0) {
-				const controller = new AbortController();
-				controller.abort(new DOMException("Deadline exceeded", "TimeoutError"));
-				signals.push(controller.signal);
+				controller.abort(reason);
 			} else {
-				signals.push(AbortSignal.timeout(delay));
+				// AbortSignal.timeout() is not reliable while a dequeue hook is the only
+				// outstanding work on Bun/Windows. Keep an explicit timer alive instead,
+				// matching the deadline handling in agent-loop.ts.
+				deadlineTimer = setTimeout(() => controller.abort(reason), delay);
 			}
+			signals.push(controller.signal);
 		}
-		if (signals.length === 0) return undefined;
-		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+		return {
+			signal: signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals),
+			dispose: () => {
+				if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+			},
+		};
 	}
 
 	async continue(signal?: AbortSignal) {
@@ -1235,9 +1247,10 @@ export class Agent {
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
+		const continuationDequeue = this.#continuationDequeueSignal(signal);
 
 		try {
-			const dequeueSignal = this.#continuationDequeueSignal(signal);
+			const dequeueSignal = continuationDequeue.signal;
 			const messages = this.#state.messages;
 			if (messages.length === 0) {
 				// An empty transcript has nothing to resume, but a queued steer/follow-up
@@ -1276,6 +1289,7 @@ export class Agent {
 
 			await this.#runLoop(undefined, undefined, signal, true);
 		} finally {
+			continuationDequeue.dispose();
 			resolve();
 			if (this.#abortController === continuationAbortController) {
 				this.#state.isStreaming = false;

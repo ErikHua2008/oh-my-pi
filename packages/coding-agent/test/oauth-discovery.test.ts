@@ -7,6 +7,7 @@ import {
 	extractOAuthChallengeScopes,
 	fetchResourceMetadataScopes,
 } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
+import { armTimeoutSignal } from "@oh-my-pi/pi-coding-agent/utils/fetch-timeout";
 import { type FetchInput, mockFetch } from "./helpers/fetch-mock";
 
 describe("mcp oauth discovery", () => {
@@ -656,17 +657,19 @@ describe("bounded discovery fetches", () => {
 	};
 
 	it("aborts hanging well-known discovery fetches instead of stalling", async () => {
+		using timeout = armTimeoutSignal(50);
 		const oauth = await discoverOAuthEndpoints("https://mcp.example.test/mcp", undefined, undefined, {
 			fetch: hangingFetch,
-			signal: AbortSignal.timeout(50),
+			signal: timeout.signal,
 		});
 		expect(oauth).toBeNull();
 	});
 
 	it("aborts a hanging resource_metadata fetch and returns undefined", async () => {
+		using timeout = armTimeoutSignal(50);
 		const scopes = await fetchResourceMetadataScopes(
 			"https://mcp.example.test/.well-known/oauth-protected-resource",
-			{ fetch: hangingFetch, signal: AbortSignal.timeout(50) },
+			{ fetch: hangingFetch, signal: timeout.signal },
 		);
 		expect(scopes).toBeUndefined();
 	});

@@ -24,11 +24,11 @@ const STALE_BLOCK_GUARD_MS = 5 * 60_000 + 1;
 
 function ageCredentialBlockRows(dbPath: string): void {
 	const db = new Database(dbPath);
+	const statement = db.prepare("UPDATE auth_credential_blocks SET updated_at = ?");
 	try {
-		db.prepare("UPDATE auth_credential_blocks SET updated_at = ?").run(
-			Math.floor((Date.now() - STALE_BLOCK_GUARD_MS) / 1000),
-		);
+		statement.run(Math.floor((Date.now() - STALE_BLOCK_GUARD_MS) / 1000));
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
@@ -40,25 +40,27 @@ function insertLegacyCodexSharedBlock(
 	updatedAtSec = Math.floor(Date.now() / 1000),
 ): void {
 	const db = new Database(dbPath);
+	const statement = db.prepare(
+		"INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at) VALUES (?, ?, 'shared', ?, ?)",
+	);
 	try {
-		db.prepare(
-			"INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at) VALUES (?, ?, 'shared', ?, ?)",
-		).run(credentialId, "openai-codex:oauth", blockedUntilMs, updatedAtSec);
+		statement.run(credentialId, "openai-codex:oauth", blockedUntilMs, updatedAtSec);
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
 
 function readLegacyCodexSharedBlock(dbPath: string, credentialId: number): number | undefined {
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare(
+		"SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' AND block_scope = 'shared' AND blocked_until_ms > ?",
+	);
 	try {
-		const row = db
-			.prepare(
-				"SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' AND block_scope = 'shared' AND blocked_until_ms > ?",
-			)
-			.get(credentialId, Date.now()) as { blocked_until_ms?: number } | undefined;
+		const row = statement.get(credentialId, Date.now()) as { blocked_until_ms?: number } | undefined;
 		return row?.blocked_until_ms;
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
@@ -1094,17 +1096,21 @@ describe("AuthStorage codex oauth ranking", () => {
 
 			const initialUpdatedAtSec = Math.floor(Date.now() / 1000) - 1;
 			const db = new Database(dbPath);
+			const updateStatement = db.prepare(
+				"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
+			);
+			const selectStatement = db.prepare(
+				"SELECT updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
+			);
 			try {
-				db.prepare(
-					"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
-				).run(initialUpdatedAtSec, blockedRow.id, "openai-codex:oauth", "chat");
-				const updated = db
-					.prepare(
-						"SELECT updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
-					)
-					.get(blockedRow.id, "openai-codex:oauth", "chat") as { updated_at?: number } | undefined;
+				updateStatement.run(initialUpdatedAtSec, blockedRow.id, "openai-codex:oauth", "chat");
+				const updated = selectStatement.get(blockedRow.id, "openai-codex:oauth", "chat") as
+					| { updated_at?: number }
+					| undefined;
 				expect(updated?.updated_at).toBe(initialUpdatedAtSec);
 			} finally {
+				updateStatement.finalize();
+				selectStatement.finalize();
 				db.close();
 			}
 

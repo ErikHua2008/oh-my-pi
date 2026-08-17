@@ -14,12 +14,12 @@ import { removeWithRetries } from "../../utils/src/temp";
 
 function countCredentialRows(dbPath: string, provider: string): number {
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare("SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ?");
 	try {
-		const row = db.prepare("SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ?").get(provider) as
-			| { count?: number }
-			| undefined;
+		const row = statement.get(provider) as { count?: number } | undefined;
 		return row?.count ?? 0;
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
@@ -27,14 +27,14 @@ function countCredentialRows(dbPath: string, provider: string): number {
 function countCredentialRowsByDisabledState(dbPath: string, provider: string, disabled: boolean): number {
 	const disabledClause = disabled ? "IS NOT NULL" : "IS NULL";
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare(
+		`SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ? AND disabled_cause ${disabledClause}`,
+	);
 	try {
-		const row = db
-			.prepare(
-				`SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ? AND disabled_cause ${disabledClause}`,
-			)
-			.get(provider) as { count?: number } | undefined;
+		const row = statement.get(provider) as { count?: number } | undefined;
 		return row?.count ?? 0;
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }

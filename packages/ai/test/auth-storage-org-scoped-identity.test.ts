@@ -57,13 +57,13 @@ function orgCredential(args: {
 
 function readIdentityRows(dbPath: string): Array<{ identity_key: string | null; disabled_cause: string | null }> {
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare(
+		"SELECT identity_key, disabled_cause FROM auth_credentials WHERE provider = 'anthropic' ORDER BY id ASC",
+	);
 	try {
-		return db
-			.prepare(
-				"SELECT identity_key, disabled_cause FROM auth_credentials WHERE provider = 'anthropic' ORDER BY id ASC",
-			)
-			.all() as Array<{ identity_key: string | null; disabled_cause: string | null }>;
+		return statement.all() as Array<{ identity_key: string | null; disabled_cause: string | null }>;
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }

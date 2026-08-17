@@ -39,6 +39,7 @@ export interface ControlSessionInfo {
 
 /** Mirrors the session guest's WELCOME_TIMEOUT_MS. */
 const WELCOME_TIMEOUT_MS = 30_000;
+const ARCHIVE_REQUEST_TIMEOUT_MS = 120_000;
 const IMPORT_LIST_TIMEOUT_MS = 30_000;
 const IMPORT_TIMEOUT_MS = 120_000;
 
@@ -64,6 +65,9 @@ export class ControlClient {
 	#sessions: readonly SessionSummary[] = [];
 	#snapshot: ControlSnapshot;
 	#nextRequestId = 1;
+	readonly #pendingArchivedLists = new Map<number, PendingRequest<readonly SessionSummary[]>>();
+	readonly #pendingArchives = new Map<number, PendingRequest<void>>();
+	readonly #pendingRestores = new Map<number, PendingRequest<SessionSummary>>();
 	readonly #pendingImportLists = new Map<number, PendingRequest<readonly ForeignSessionSummary[]>>();
 	readonly #pendingImports = new Map<number, PendingRequest<ImportedForeignSession>>();
 
@@ -144,6 +148,42 @@ export class ControlClient {
 		this.#socket.send({ t: "ctrl-rename", id, title });
 	}
 
+	listArchivedSessions(): Promise<readonly SessionSummary[]> {
+		const reqId = this.#nextRequestId++;
+		const { promise, resolve, reject } = Promise.withResolvers<readonly SessionSummary[]>();
+		const timeout = setTimeout(() => {
+			this.#pendingArchivedLists.delete(reqId);
+			reject(new Error("timed out while loading archived chats"));
+		}, ARCHIVE_REQUEST_TIMEOUT_MS);
+		this.#pendingArchivedLists.set(reqId, { resolve, reject, timeout });
+		this.#socket.send({ t: "ctrl-archived-list", reqId });
+		return promise;
+	}
+
+	archiveSession(id: string): Promise<void> {
+		const reqId = this.#nextRequestId++;
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		const timeout = setTimeout(() => {
+			this.#pendingArchives.delete(reqId);
+			reject(new Error("timed out while archiving the chat"));
+		}, ARCHIVE_REQUEST_TIMEOUT_MS);
+		this.#pendingArchives.set(reqId, { resolve, reject, timeout });
+		this.#socket.send({ t: "ctrl-archive", reqId, id });
+		return promise;
+	}
+
+	restoreArchivedSession(id: string): Promise<SessionSummary> {
+		const reqId = this.#nextRequestId++;
+		const { promise, resolve, reject } = Promise.withResolvers<SessionSummary>();
+		const timeout = setTimeout(() => {
+			this.#pendingRestores.delete(reqId);
+			reject(new Error("timed out while restoring the chat"));
+		}, ARCHIVE_REQUEST_TIMEOUT_MS);
+		this.#pendingRestores.set(reqId, { resolve, reject, timeout });
+		this.#socket.send({ t: "ctrl-restore", reqId, id });
+		return promise;
+	}
+
 	listCodexSessions(archived = false): Promise<readonly ForeignSessionSummary[]> {
 		const reqId = this.#nextRequestId++;
 		const { promise, resolve, reject } = Promise.withResolvers<readonly ForeignSessionSummary[]>();
@@ -213,6 +253,18 @@ export class ControlClient {
 	}
 
 	#rejectPendingRequests(error: Error): void {
+		for (const request of this.#pendingArchivedLists.values()) {
+			clearTimeout(request.timeout);
+			request.reject(error);
+		}
+		for (const request of this.#pendingArchives.values()) {
+			clearTimeout(request.timeout);
+			request.reject(error);
+		}
+		for (const request of this.#pendingRestores.values()) {
+			clearTimeout(request.timeout);
+			request.reject(error);
+		}
 		for (const request of this.#pendingImportLists.values()) {
 			clearTimeout(request.timeout);
 			request.reject(error);
@@ -221,11 +273,35 @@ export class ControlClient {
 			clearTimeout(request.timeout);
 			request.reject(error);
 		}
+		this.#pendingArchivedLists.clear();
+		this.#pendingArchives.clear();
+		this.#pendingRestores.clear();
 		this.#pendingImportLists.clear();
 		this.#pendingImports.clear();
 	}
 
 	#rejectRequest(reqId: number, message: string): void {
+		const archivedList = this.#pendingArchivedLists.get(reqId);
+		if (archivedList) {
+			this.#pendingArchivedLists.delete(reqId);
+			clearTimeout(archivedList.timeout);
+			archivedList.reject(new Error(message));
+			return;
+		}
+		const archive = this.#pendingArchives.get(reqId);
+		if (archive) {
+			this.#pendingArchives.delete(reqId);
+			clearTimeout(archive.timeout);
+			archive.reject(new Error(message));
+			return;
+		}
+		const restore = this.#pendingRestores.get(reqId);
+		if (restore) {
+			this.#pendingRestores.delete(reqId);
+			clearTimeout(restore.timeout);
+			restore.reject(new Error(message));
+			return;
+		}
 		const list = this.#pendingImportLists.get(reqId);
 		if (list) {
 			this.#pendingImportLists.delete(reqId);
@@ -270,6 +346,30 @@ export class ControlClient {
 				// snapshot intentionally does not change for these frames.
 				this.onSession?.(frame);
 				return;
+			case "ctrl-archived-list": {
+				const pending = this.#pendingArchivedLists.get(frame.reqId);
+				if (!pending) return;
+				this.#pendingArchivedLists.delete(frame.reqId);
+				clearTimeout(pending.timeout);
+				pending.resolve(frame.sessions);
+				return;
+			}
+			case "ctrl-archived": {
+				const pending = this.#pendingArchives.get(frame.reqId);
+				if (!pending) return;
+				this.#pendingArchives.delete(frame.reqId);
+				clearTimeout(pending.timeout);
+				pending.resolve();
+				return;
+			}
+			case "ctrl-restored": {
+				const pending = this.#pendingRestores.get(frame.reqId);
+				if (!pending) return;
+				this.#pendingRestores.delete(frame.reqId);
+				clearTimeout(pending.timeout);
+				pending.resolve(frame.session);
+				return;
+			}
 			case "ctrl-import-list": {
 				const pending = this.#pendingImportLists.get(frame.reqId);
 				if (!pending) return;

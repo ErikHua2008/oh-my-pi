@@ -31,6 +31,7 @@ import {
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, logger, stringifyJson } from "@oh-my-pi/pi-utils";
+import { armRequestTimeout } from "./request-timeout";
 
 // ============================================================================
 // Types & Configuration
@@ -219,13 +220,6 @@ export function buildCompactionV2Request(
 // Streaming Request Handler
 // ============================================================================
 
-/** Race the caller's signal against the V2 request timeout. */
-function withRequestTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
-	if (timeoutMs <= 0) return signal;
-	const timeout = AbortSignal.timeout(timeoutMs);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
 /** Request V2 compaction over the normal OpenAI Responses streaming endpoint. */
 export async function requestCompactionV2Streaming(
 	model: Model,
@@ -264,15 +258,16 @@ export async function requestCompactionV2Streaming(
 	let lastError: Error | undefined;
 
 	for (let attempt = 0; attempt <= V2_COMPACTION_MAX_RETRIES; attempt++) {
-		const timeoutSignal = withRequestTimeout(signal, options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS);
+		using requestTimeout = armRequestTimeout(signal, options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS);
 		try {
-			return await attemptCompactionV2Streaming(endpoint, apiKey, model, request, fetchImpl, timeoutSignal, {
+			return await attemptCompactionV2Streaming(endpoint, apiKey, model, request, fetchImpl, requestTimeout.signal, {
 				codexMetadata,
 				providerSessionState: options?.providerSessionState,
 				codexCompaction: options?.codexCompaction,
 				preferWebsockets: options?.preferWebsockets,
 			});
 		} catch (err) {
+			requestTimeout.clear();
 			const error = err instanceof Error ? err : new Error(String(err));
 			if (signal?.aborted) throw error;
 

@@ -76,14 +76,13 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		// Mock mirrors Anthropic: only the stale refresh token is rejected, because
 		// real rotation invalidates the previous refresh token on use.
-		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, creds) => {
-			const credential = creds[provider];
-			if (credential?.refresh === "stale-refresh") {
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async (_provider, credential) => {
+			if (credential.refresh === "stale-refresh") {
 				throw new Error(
 					'HTTP 400 invalid_grant {"error":"invalid_grant","error_description":"Refresh token not found or invalid"}',
 				);
 			}
-			return { newCredentials: credential!, apiKey: credential!.access };
+			return credential;
 		});
 
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
@@ -126,14 +125,13 @@ describe("AuthStorage OAuth refresh race", () => {
 		// refresh token to our snapshot will therefore see the SAME stale token
 		// and fall through to the disable. We then race a peer rotation into the
 		// window between the pre-check and the CAS, which the CAS must detect.
-		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, creds) => {
-			const credential = creds[provider];
-			if (credential?.refresh === "stale-refresh") {
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async (_provider, credential) => {
+			if (credential.refresh === "stale-refresh") {
 				throw new Error(
 					'HTTP 400 invalid_grant {"error":"invalid_grant","error_description":"Refresh token not found or invalid"}',
 				);
 			}
-			return { newCredentials: credential!, apiKey: credential!.access };
+			return credential;
 		});
 
 		const sharedStore = store;
@@ -187,7 +185,7 @@ describe("AuthStorage OAuth refresh race", () => {
 			},
 		]);
 
-		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async () => {
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async () => {
 			throw new Error('invalid_grant {"error":"invalid_grant"}');
 		});
 

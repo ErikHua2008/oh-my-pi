@@ -75,65 +75,6 @@ using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
 using ShouldAppsUseDarkModeFn = bool(WINAPI*)();
 using RefreshImmersiveColorPolicyStateFn = void(WINAPI*)();
 
-enum class AccentState : int {
-	Disabled = 0,
-	EnableAcrylicBlurBehind = 4,
-};
-
-struct AccentPolicy final {
-	AccentState state = AccentState::Disabled;
-	DWORD flags = 0;
-	DWORD gradient_color = 0;
-	DWORD animation_id = 0;
-};
-
-enum class WindowCompositionAttribute : int {
-	AccentPolicy = 19,
-};
-
-struct WindowCompositionAttributeData final {
-	WindowCompositionAttribute attribute;
-	void* data;
-	SIZE_T size;
-};
-
-using SetWindowCompositionAttributeFn = BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
-
-[[nodiscard]] bool ApplyWindowBackdrop(HWND window, bool dark) noexcept {
-	if (window == nullptr) return false;
-	// DWMWA_SYSTEMBACKDROP_TYPE / DWMSBT_TRANSIENTWINDOW provide the Windows 11
-	// Acrylic material. Numeric constants keep the binary compatible with older
-	// Windows SDKs; unsupported systems fall through to the Win10 composition API.
-	constexpr DWORD kDwmSystemBackdropType = 38;
-	constexpr int kTransientWindowBackdrop = 3;
-	const MARGINS frame{-1, -1, -1, -1};
-	static_cast<void>(DwmExtendFrameIntoClientArea(window, &frame));
-	if (SUCCEEDED(DwmSetWindowAttribute(window,
-			kDwmSystemBackdropType,
-			&kTransientWindowBackdrop,
-			sizeof(kTransientWindowBackdrop)))) {
-		return true;
-	}
-
-	const HMODULE user32 = GetModuleHandleW(L"user32.dll");
-	const auto set_composition = user32 == nullptr
-		? nullptr
-		: reinterpret_cast<SetWindowCompositionAttributeFn>(
-			GetProcAddress(user32, "SetWindowCompositionAttribute"));
-	if (set_composition == nullptr) return false;
-	AccentPolicy policy;
-	policy.state = AccentState::EnableAcrylicBlurBehind;
-	// ABGR tint with only a light native veil; the Web sidebar applies the
-	// deliberate 88% theme tint above this blurred system material.
-	policy.gradient_color = dark ? 0x221B1B1CU : 0x22FBFAF9U;
-	WindowCompositionAttributeData data{
-		WindowCompositionAttribute::AccentPolicy,
-		&policy,
-		sizeof(policy),
-	};
-	return set_composition(window, &data) != FALSE;
-}
-
 [[nodiscard]] HMODULE LoadUxTheme() noexcept {
 	return LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 }
@@ -540,7 +481,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 		}
 		return 0;
 	case WM_ERASEBKGND: {
-		if (backdrop_enabled_) return 1;
 		RECT client{};
 		GetClientRect(window_, &client);
 		HBRUSH background = CreateSolidBrush(dark_theme_ ? RGB(21, 21, 23) : RGB(255, 255, 255));
@@ -925,19 +865,16 @@ void App::ApplyTheme(bool dark) {
 		SaveConfigFile();
 	}
 	if (window_ == nullptr) {
-		webview_.SetBackdropEnabled(false);
 		webview_.SetDarkTheme(dark);
 		return;
 	}
 	const BOOL dark_mode = dark ? TRUE : FALSE;
 	DwmSetWindowAttribute(window_, 20, &dark_mode, sizeof(dark_mode));
-	// Windows 11 draws a one-pixel DWM border even after the client area is
-	// extended. DWMWA_COLOR_NONE suppresses it without disabling the shadow.
+	// The custom client-drawn title bar does not need the one-pixel Windows 11
+	// frame border. Suppress it without disabling the native window shadow.
 	constexpr DWORD kDwmBorderColorAttribute = 34;
 	constexpr COLORREF kDwmColorNone = 0xFFFFFFFE;
 	DwmSetWindowAttribute(window_, kDwmBorderColorAttribute, &kDwmColorNone, sizeof(kDwmColorNone));
-	backdrop_enabled_ = ApplyWindowBackdrop(window_, dark);
-	webview_.SetBackdropEnabled(backdrop_enabled_);
 	webview_.SetDarkTheme(dark);
 	ApplyWindowThemeMode(window_, dark);
 	ApplyWindowThemeMode(native_transcript_.Window(), dark);

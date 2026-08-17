@@ -291,6 +291,19 @@ export function App(): ReactNode {
 		client.sendDrop(id);
 	}, []);
 
+	const startArchive = useCallback(
+		async (client: ControlClient, id: string, isActive: boolean): Promise<void> => {
+			try {
+				await client.archiveSession(id);
+				if (isActive && controlFlow.activeClient === client) backToSessions();
+				pushNotice("info", "对话已归档，可在 Settings 的 Archived chats 中恢复。");
+			} catch (error) {
+				pushNotice("error", error instanceof Error ? error.message : String(error));
+			}
+		},
+		[backToSessions, controlFlow, pushNotice],
+	);
+
 	const openImportedSession = useCallback(
 		async (client: ControlClient, session: ImportedForeignSession): Promise<void> => {
 			if (controlFlow.activeClient !== client) throw new Error("the control room changed during import");
@@ -363,6 +376,7 @@ export function App(): ReactNode {
 					appState.session ? (
 						<Session
 							client={appState.session}
+							controlClient={appState.client}
 							onLeave={backToSessions}
 							onRejoin={backToSessions}
 							onBack={backToSessions}
@@ -374,6 +388,7 @@ export function App(): ReactNode {
 				onOpenImportedSession={session => openImportedSession(appState.client, session)}
 				onRenameSession={(id, title) => appState.client.sendRename(id, title)}
 				onDropSession={id => startDrop(appState.client, id)}
+				onArchiveSession={id => startArchive(appState.client, id, appState.sessionId === id)}
 				onLeave={leave}
 			/>
 			<Toasts notices={controlNotices} />
@@ -383,13 +398,14 @@ export function App(): ReactNode {
 
 interface SessionProps {
 	client: GuestClient;
+	controlClient?: ControlClient;
 	onLeave(): void;
 	onRejoin(): void;
 	/** Control mode: back entry shown in the header; also the post-end auto-return. */
 	onBack?: () => void;
 }
 
-function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode {
+function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionProps): ReactNode {
 	const snap = useGuestSnapshot(client);
 	const [composerPrefill, setComposerPrefill] = useState<string | undefined>(undefined);
 	const [railOpen, setRailOpen] = useState(false);
@@ -409,6 +425,17 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 		setRailOpen(false);
 		requestAnimationFrame(() => agentsButtonRef.current?.focus());
 	}, []);
+	const listArchivedSessions = useCallback(
+		() => controlClient?.listArchivedSessions() ?? Promise.resolve([]),
+		[controlClient],
+	);
+	const restoreArchivedSession = useCallback(
+		async (id: string): Promise<void> => {
+			if (!controlClient) throw new Error("archived chats are available from the project window");
+			await controlClient.restoreArchivedSession(id);
+		},
+		[controlClient],
+	);
 	const toggleRail = useCallback((): void => {
 		if (railOpen) closeRail();
 		else {
@@ -541,6 +568,8 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 					connection={snap.phase}
 					model={snap.state?.model?.name}
 					context={contextLabel(snap)}
+					loadArchivedSessions={controlClient ? listArchivedSessions : undefined}
+					onRestoreArchivedSession={controlClient ? restoreArchivedSession : undefined}
 				/>
 			)}
 			<main className="sh-main">

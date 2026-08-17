@@ -42,26 +42,26 @@ function createJwtOnlyCredential(args: { suffix: string; accountId: string; emai
 
 function countCredentialRows(dbPath: string, provider: string): number {
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare("SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ?");
 	try {
-		const row = db.prepare("SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ?").get(provider) as
-			| { count?: number }
-			| undefined;
+		const row = statement.get(provider) as { count?: number } | undefined;
 		return row?.count ?? 0;
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
 
 function readDisabledCauses(dbPath: string, provider: string): string[] {
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare(
+		"SELECT disabled_cause FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL ORDER BY id ASC",
+	);
 	try {
-		const rows = db
-			.prepare(
-				"SELECT disabled_cause FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL ORDER BY id ASC",
-			)
-			.all(provider) as Array<{ disabled_cause?: string | null }>;
+		const rows = statement.all(provider) as Array<{ disabled_cause?: string | null }>;
 		return rows.flatMap(row => (typeof row.disabled_cause === "string" ? [row.disabled_cause] : []));
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
@@ -71,35 +71,37 @@ function readStoredIdentityRows(
 	provider: string,
 ): Array<{ identity_key: string | null; disabled_cause: string | null }> {
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare(
+		"SELECT identity_key, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC",
+	);
 	try {
-		return db
-			.prepare("SELECT identity_key, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC")
-			.all(provider) as Array<{ identity_key: string | null; disabled_cause: string | null }>;
+		return statement.all(provider) as Array<{ identity_key: string | null; disabled_cause: string | null }>;
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
 
 function readAuthSchemaVersion(dbPath: string): number | null {
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare("SELECT version FROM auth_schema_version WHERE id = 1");
 	try {
-		const row = db.prepare("SELECT version FROM auth_schema_version WHERE id = 1").get() as
-			| { version?: number }
-			| undefined;
+		const row = statement.get() as { version?: number } | undefined;
 		return typeof row?.version === "number" ? row.version : null;
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
 
 function readTableSql(dbPath: string, tableName: string): string | null {
 	const db = new Database(dbPath, { readonly: true });
+	const statement = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?");
 	try {
-		const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName) as
-			| { sql?: string | null }
-			| undefined;
+		const row = statement.get(tableName) as { sql?: string | null } | undefined;
 		return row?.sql ?? null;
 	} finally {
+		statement.finalize();
 		db.close();
 	}
 }
@@ -378,11 +380,11 @@ describe("AuthStorage openai-codex email dedupe", () => {
 					updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 				);
 			`);
-			legacyDb
-				.prepare(
-					"INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-				)
-				.run(
+			const insertStatement = legacyDb.prepare(
+				"INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+			);
+			try {
+				insertStatement.run(
 					"anthropic",
 					"oauth",
 					JSON.stringify(
@@ -396,6 +398,9 @@ describe("AuthStorage openai-codex email dedupe", () => {
 					LEGACY_TIMESTAMP,
 					LEGACY_TIMESTAMP,
 				);
+			} finally {
+				insertStatement.finalize();
+			}
 			legacyDb.close();
 
 			const migratedStore = await SqliteAuthCredentialStore.open(legacyDbPath);
@@ -486,8 +491,9 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		// (already-WAL pragmas, IF NOT EXISTS DDL, current version row, and an
 		// underivable NULL identity_key row) must not move it.
 		const observer = new Database(reopenDbPath, { readonly: true });
+		const dataVersionStatement = observer.prepare("PRAGMA data_version");
 		try {
-			const before = (observer.prepare("PRAGMA data_version").get() as { data_version: number }).data_version;
+			const before = (dataVersionStatement.get() as { data_version: number }).data_version;
 			const reopened = await SqliteAuthCredentialStore.open(reopenDbPath);
 			try {
 				expect(reopened.listAuthCredentials("openai")).toHaveLength(1);
@@ -495,9 +501,10 @@ describe("AuthStorage openai-codex email dedupe", () => {
 			} finally {
 				reopened.close();
 			}
-			const after = (observer.prepare("PRAGMA data_version").get() as { data_version: number }).data_version;
+			const after = (dataVersionStatement.get() as { data_version: number }).data_version;
 			expect(after).toBe(before);
 		} finally {
+			dataVersionStatement.finalize();
 			observer.close();
 		}
 	});
@@ -524,11 +531,11 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 			);
 		`);
-		legacyDb
-			.prepare(
-				"INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			)
-			.run(
+		const insertStatement = legacyDb.prepare(
+			"INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		);
+		try {
+			insertStatement.run(
 				"openai-codex",
 				"oauth",
 				JSON.stringify(
@@ -543,6 +550,9 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				LEGACY_TIMESTAMP,
 				LEGACY_TIMESTAMP,
 			);
+		} finally {
+			insertStatement.finalize();
+		}
 		legacyDb.close();
 
 		const migratedStore = await SqliteAuthCredentialStore.open(legacyDbPath);
@@ -579,11 +589,11 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 			);
 		`);
-		legacyDb
-			.prepare(
-				"INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-			)
-			.run(
+		const insertStatement = legacyDb.prepare(
+			"INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+		);
+		try {
+			insertStatement.run(
 				"openai-codex",
 				"oauth",
 				JSON.stringify(
@@ -597,6 +607,9 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				LEGACY_TIMESTAMP,
 				LEGACY_TIMESTAMP,
 			);
+		} finally {
+			insertStatement.finalize();
+		}
 		legacyDb.close();
 
 		const migratedStore = await SqliteAuthCredentialStore.open(legacyDbPath);
@@ -625,11 +638,11 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 			);
 		`);
-		legacyDb
-			.prepare(
-				"INSERT INTO auth_credentials (provider, credential_type, data, disabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-			)
-			.run(
+		const insertStatement = legacyDb.prepare(
+			"INSERT INTO auth_credentials (provider, credential_type, data, disabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+		);
+		try {
+			insertStatement.run(
 				"openai-codex",
 				"oauth",
 				JSON.stringify(
@@ -639,6 +652,9 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				LEGACY_TIMESTAMP,
 				LEGACY_TIMESTAMP,
 			);
+		} finally {
+			insertStatement.finalize();
+		}
 		legacyDb.close();
 
 		const migratedStore = await SqliteAuthCredentialStore.open(legacyDbPath);

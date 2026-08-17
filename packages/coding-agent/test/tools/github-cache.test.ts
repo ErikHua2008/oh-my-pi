@@ -111,8 +111,13 @@ describe("github-cache db layer", () => {
 		expect(got?.fetchedAt).toBe(2000);
 
 		const db = openDb();
-		const rows = db?.prepare("SELECT COUNT(*) AS c FROM github_view_cache").all() as Array<{ c: number }>;
-		expect(rows[0].c).toBe(1);
+		const statement = db?.prepare("SELECT COUNT(*) AS c FROM github_view_cache");
+		try {
+			const rows = statement?.all() as Array<{ c: number }>;
+			expect(rows[0].c).toBe(1);
+		} finally {
+			statement?.finalize();
+		}
 	});
 
 	it("keys comments-on and comments-off as separate rows", () => {

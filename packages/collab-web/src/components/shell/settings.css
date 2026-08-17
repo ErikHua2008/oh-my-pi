@@ -248,6 +248,109 @@
 	accent-color: var(--accent);
 }
 
+.sh-settings-archived-groups {
+	display: flex;
+	flex-direction: column;
+	gap: 20px;
+}
+
+.sh-settings-archived-group {
+	overflow: hidden;
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+}
+
+.sh-settings-archived-project {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	padding: 12px 16px;
+	background: var(--bg-sidebar);
+	border-bottom: 1px solid var(--border);
+}
+
+.sh-settings-archived-project strong,
+.sh-settings-archived-copy strong {
+	font-size: 13px;
+	font-weight: 650;
+}
+
+.sh-settings-archived-project span,
+.sh-settings-archived-copy span {
+	overflow: hidden;
+	font-size: 11px;
+	color: var(--fg-muted);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sh-settings-archived-row {
+	min-height: 62px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 10px 12px 10px 16px;
+	border-bottom: 1px solid var(--border);
+}
+
+.sh-settings-archived-row:last-child {
+	border-bottom: 0;
+}
+
+.sh-settings-archived-copy {
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.sh-settings-archived-copy strong {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sh-settings-restore {
+	min-height: 32px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 0 11px;
+	color: var(--fg);
+	background: var(--bg);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	font-size: 12px;
+	font-weight: 550;
+}
+
+.sh-settings-restore:hover:not(:disabled) {
+	background: var(--bg-hover);
+}
+
+.sh-settings-restore:disabled {
+	opacity: 0.55;
+}
+
+.sh-settings-archived-empty,
+.sh-settings-archived-error {
+	padding: 20px;
+	color: var(--fg-muted);
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	font-size: 12px;
+	text-align: center;
+}
+
+.sh-settings-archived-error {
+	margin-bottom: 12px;
+	color: var(--err);
+	border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+}
+
 @media (max-width: 720px) {
 	.sh-settings-backdrop {
 		display: grid;
@@ -292,6 +395,10 @@
 		min-height: 44px;
 		flex: 1;
 		justify-content: center;
+	}
+
+	.sh-settings-nav-item span {
+		display: none;
 	}
 
 	.sh-settings-content {

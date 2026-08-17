@@ -7,7 +7,7 @@ import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProce
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint } from "./paths";
+import { canonicalDaemonProjectDir, daemonBrokerEndpoint } from "./paths";
 import { hasLiveDaemonProjectPresence } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -1349,15 +1349,19 @@ class DaemonBroker {
 
 /** Start the detached project or global daemon broker selected by the CLI worker host. */
 export async function startDaemonBrokerFromEnvironment(): Promise<void> {
-	const projectDir = process.env[DAEMON_PROJECT_DIR_ENV];
+	const rawProjectDir = process.env[DAEMON_PROJECT_DIR_ENV];
 	const runtimeDir = process.env[DAEMON_RUNTIME_DIR_ENV];
-	if (!projectDir || !runtimeDir) throw new Error("Daemon broker environment is incomplete");
+	if (!rawProjectDir || !runtimeDir) throw new Error("Daemon broker environment is incomplete");
 	delete process.env[DAEMON_PROJECT_DIR_ENV];
 	delete process.env[DAEMON_RUNTIME_DIR_ENV];
 	const rawGrace = process.env[DAEMON_IDLE_GRACE_ENV];
 	delete process.env[DAEMON_IDLE_GRACE_ENV];
 	const parsedGrace = rawGrace === undefined ? DEFAULT_IDLE_GRACE_MS : Number.parseInt(rawGrace, 10);
 	const idleGraceMs = Number.isFinite(parsedGrace) && parsedGrace >= 0 ? parsedGrace : DEFAULT_IDLE_GRACE_MS;
+	// The client canonicalizes project paths before hashing the Windows named-pipe
+	// endpoint. Do the same at the worker boundary so an 8.3/long-path alias cannot
+	// start an unreachable broker under a different pipe name.
+	const projectDir = await canonicalDaemonProjectDir(rawProjectDir);
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const lease = await acquireBrokerLease(runtimeDir);
 	if (!lease) return;

@@ -1,5 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
+import { armTimeoutSignal, isTimeoutError } from "../utils/fetch-timeout";
 import type { MCPServerConfig } from "./types";
 
 const SMITHERY_REGISTRY_BASE_URL = "https://registry.smithery.ai";
@@ -318,9 +318,10 @@ async function fetchServerDetails(
 	if (options?.apiKey) {
 		headers.set("Authorization", `Bearer ${options.apiKey}`);
 	}
+	using requestTimeout = armTimeoutSignal(SMITHERY_REGISTRY_TIMEOUT_MS, options?.signal);
 	const response = await fetch(`${SMITHERY_REGISTRY_BASE_URL}/servers/${path}`, {
 		headers,
-		signal: withTimeoutSignal(SMITHERY_REGISTRY_TIMEOUT_MS, options?.signal),
+		signal: requestTimeout.signal,
 	});
 	if (!response.ok) return null;
 	return (await response.json()) as SmitheryServerDetails;
@@ -419,11 +420,12 @@ export async function searchSmitheryRegistry(
 		url.searchParams.set("q", query);
 		url.searchParams.set("pageSize", String(pageSize));
 		if (page > 1) url.searchParams.set("page", String(page));
+		using requestTimeout = armTimeoutSignal(SMITHERY_REGISTRY_TIMEOUT_MS, options?.signal);
 		let response: Response;
 		try {
 			response = await fetch(url.toString(), {
 				headers,
-				signal: withTimeoutSignal(SMITHERY_REGISTRY_TIMEOUT_MS, options?.signal),
+				signal: requestTimeout.signal,
 			});
 		} catch (err) {
 			if (isTimeoutError(err)) {

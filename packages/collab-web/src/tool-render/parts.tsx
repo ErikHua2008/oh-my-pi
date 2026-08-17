@@ -229,7 +229,7 @@ function ResultImage({ img, index, host }: { img: ToolResultImage; index: number
 					decoding="async"
 				/>
 			) : (
-				<span className="tv-img tv-img--placeholder">loading imageâ€¦</span>
+				<span className="tv-img tv-img--placeholder">loading image…</span>
 			)}
 		</button>
 	);

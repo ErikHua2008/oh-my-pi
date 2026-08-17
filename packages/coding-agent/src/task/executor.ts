@@ -57,6 +57,7 @@ import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
+import { armTimeoutSignal } from "../utils/fetch-timeout";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
@@ -2452,7 +2453,8 @@ export async function finalizeSubagentLifecycle(args: {
 		const disposal = args.session.dispose();
 		const remainingMs = Math.max(0, cleanupDeadlineAt - Date.now());
 		try {
-			await untilAborted(AbortSignal.timeout(remainingMs), () => disposal);
+			using disposalTimeout = armTimeoutSignal(remainingMs);
+			await untilAborted(disposalTimeout.signal, () => disposal);
 		} catch (error) {
 			if (Date.now() >= cleanupDeadlineAt) {
 				args.onCleanupDeferred?.(disposal);
@@ -2625,7 +2627,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		outcome = await driveSessionToYield(session, monitor, message);
 	} finally {
 		try {
-			await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
+			using abortTimeout = armTimeoutSignal(5000);
+			await untilAborted(abortTimeout.signal, () => monitor.waitForActiveSessionAbort());
 		} catch {
 			// Ignore abort cleanup timeouts; the session stays adopted either way.
 		}
@@ -3382,10 +3385,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionAbortController.abort();
 			const activeSessionAbort = monitor.waitForActiveSessionAbort();
 			try {
-				await untilAborted(
-					AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now())),
-					() => activeSessionAbort,
-				);
+				using cleanupTimeout = armTimeoutSignal(Math.max(0, cleanupDeadlineAt - Date.now()));
+				await untilAborted(cleanupTimeout.signal, () => activeSessionAbort);
 			} catch (cleanupError) {
 				if (Date.now() >= cleanupDeadlineAt) {
 					deferCleanup(activeSessionAbort);

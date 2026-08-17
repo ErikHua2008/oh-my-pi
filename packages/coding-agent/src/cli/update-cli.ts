@@ -15,7 +15,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { $ } from "bun";
 import { t } from "../i18n";
 import { theme } from "../modes/theme/theme";
-import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
+import { armTimeoutSignal, isTimeoutError } from "../utils/fetch-timeout";
 
 const REPO = "can1357/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
@@ -244,11 +244,12 @@ async function getReleaseBinaryAsset(
 	};
 	if (githubToken) headers.Authorization = `Bearer ${githubToken}`;
 
+	using requestTimeout = armTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS);
 	let response: Response;
 	try {
 		response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`, {
 			headers,
-			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
+			signal: requestTimeout.signal,
 		});
 	} catch (err) {
 		if (isTimeoutError(err)) {
@@ -285,11 +286,12 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 	const fetchImpl = options.fetchImpl ?? fetch;
 	await unlinkIfExists(options.targetPath);
 
+	using requestTimeout = armTimeoutSignal(BINARY_DOWNLOAD_TIMEOUT_MS);
 	let response: Response;
 	try {
 		response = await fetchImpl(options.url, {
 			redirect: "follow",
-			signal: withTimeoutSignal(BINARY_DOWNLOAD_TIMEOUT_MS),
+			signal: requestTimeout.signal,
 		});
 	} catch (err) {
 		if (isTimeoutError(err)) {
@@ -602,10 +604,11 @@ async function fetchLatestManifest(
 	pkg: string,
 	timeoutMs: number,
 ): Promise<{ version: string; manifest: Record<string, unknown> }> {
+	using requestTimeout = armTimeoutSignal(timeoutMs);
 	let response: Response;
 	try {
 		response = await fetch(`${NPM_REGISTRY}${pkg}/latest`, {
-			signal: withTimeoutSignal(timeoutMs),
+			signal: requestTimeout.signal,
 		});
 	} catch (err) {
 		if (isTimeoutError(err)) {

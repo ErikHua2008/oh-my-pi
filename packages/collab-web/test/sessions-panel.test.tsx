@@ -8,6 +8,7 @@ import {
 	isSessionUnread,
 	placeContextMenu,
 } from "../src/components/sessions/SessionsPanel";
+import { groupArchivedSessions, SettingsModal } from "../src/components/shell/SettingsModal";
 import type { ControlSnapshot } from "../src/lib/control-client";
 
 function session(id: string, cwd: string, modifiedAt: string, title = id): SessionSummary {
@@ -72,6 +73,7 @@ function renderPanel(
 			onImportCodexSession={async () => {}}
 			onRenameSession={() => {}}
 			onDropSession={() => {}}
+			onArchiveSession={async () => {}}
 			onLeave={() => {}}
 		/>,
 	);
@@ -238,5 +240,31 @@ describe("SessionsPanel session actions", () => {
 		expect(html).not.toContain("Import Chat from Codex");
 		expect(html).not.toContain("Drop Read only session");
 		expect(html).not.toContain("Rename session Read only session");
+	});
+});
+
+describe("Settings archived chats", () => {
+	it("shows the Codex-style archived chats destination when a control client is available", () => {
+		const html = renderToStaticMarkup(
+			<SettingsModal
+				onClose={() => {}}
+				loadArchivedSessions={async () => []}
+				onRestoreArchivedSession={async () => {}}
+			/>,
+		);
+
+		expect(html).toContain("Archived chats");
+		expect(html).toContain('aria-controls="sh-settings-panel-archived"');
+	});
+
+	it("groups archived chats under their original project and keeps newest chats first", () => {
+		const groups = groupArchivedSessions([
+			session("old", "C:\\work\\project", "2026-08-01T00:00:00.000Z", "Old chat"),
+			session("new", "C:\\work\\project", "2026-08-03T00:00:00.000Z", "New chat"),
+			session("other", "C:\\work\\other", "2026-08-02T00:00:00.000Z", "Other chat"),
+		]);
+
+		expect(groups.map(group => group.name)).toEqual(["project", "other"]);
+		expect(groups[0]?.sessions.map(item => item.id)).toEqual(["new", "old"]);
 	});
 });

@@ -291,7 +291,7 @@ function MessageImage({ image, host }: { image: ImageContent; host?: ToolRenderH
 				</button>
 			) : (
 				<div className="tr-msg-image-placeholder" role="status">
-					{status === "error" ? "image unavailable" : "loading imageâ€¦"}
+					{status === "error" ? "image unavailable" : "loading image…"}
 				</div>
 			)}
 		</div>

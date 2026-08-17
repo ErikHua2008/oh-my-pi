@@ -1,4 +1,4 @@
-import { withTimeoutSignal } from "../utils/fetch-timeout";
+import { armTimeoutSignal } from "../utils/fetch-timeout";
 
 const SMITHERY_API_BASE_URL = (process.env.SMITHERY_API_URL || "https://api.smithery.ai").replace(/\/+$/, "");
 const SMITHERY_CONNECT_TIMEOUT_MS = 10_000;
@@ -63,9 +63,10 @@ export function getSmitheryApiBaseUrl(): string {
 }
 
 export async function listSmitheryNamespaces(apiKey: string): Promise<SmitheryNamespace[]> {
+	using requestTimeout = armTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS);
 	const response = await fetch(toApiUrl("/namespaces"), {
 		headers: buildAuthHeaders(apiKey),
-		signal: withTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS),
+		signal: requestTimeout.signal,
 	});
 	await expectOk(response, "Failed to list Smithery namespaces");
 	const payload = (await response.json()) as SmitheryNamespacesResponse;
@@ -73,10 +74,11 @@ export async function listSmitheryNamespaces(apiKey: string): Promise<SmitheryNa
 }
 
 export async function createSmitheryNamespace(apiKey: string): Promise<SmitheryNamespace> {
+	using requestTimeout = armTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS);
 	const response = await fetch(toApiUrl("/namespaces"), {
 		method: "POST",
 		headers: buildAuthHeaders(apiKey),
-		signal: withTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS),
+		signal: requestTimeout.signal,
 	});
 	await expectOk(response, "Failed to create Smithery namespace");
 	return (await response.json()) as SmitheryNamespace;
@@ -96,11 +98,12 @@ export async function listSmitheryConnectionsByUrl(
 	namespace: string,
 	mcpUrl: string,
 ): Promise<SmitheryConnection[]> {
+	using requestTimeout = armTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS);
 	const endpoint = new URL(toApiUrl(`/connect/${encodeURIComponent(namespace)}`));
 	endpoint.searchParams.set("mcpUrl", mcpUrl);
 	const response = await fetch(endpoint.toString(), {
 		headers: buildAuthHeaders(apiKey),
-		signal: withTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS),
+		signal: requestTimeout.signal,
 	});
 	await expectOk(response, "Failed to list Smithery connections");
 	const payload = (await response.json()) as SmitheryConnectionsResponse;
@@ -112,10 +115,11 @@ export async function createSmitheryConnection(
 	namespace: string,
 	params: { mcpUrl: string; name?: string },
 ): Promise<SmitheryConnection> {
+	using requestTimeout = armTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS);
 	const response = await fetch(toApiUrl(`/connect/${encodeURIComponent(namespace)}`), {
 		method: "POST",
 		headers: buildAuthHeaders(apiKey),
-		signal: withTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS),
+		signal: requestTimeout.signal,
 		body: JSON.stringify({
 			mcpUrl: params.mcpUrl,
 			name: params.name,
@@ -130,11 +134,12 @@ export async function getSmitheryConnection(
 	namespace: string,
 	connectionId: string,
 ): Promise<SmitheryConnection> {
+	using requestTimeout = armTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS);
 	const response = await fetch(
 		toApiUrl(`/connect/${encodeURIComponent(namespace)}/${encodeURIComponent(connectionId)}`),
 		{
 			headers: buildAuthHeaders(apiKey),
-			signal: withTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS),
+			signal: requestTimeout.signal,
 		},
 	);
 	await expectOk(response, "Failed to get Smithery connection");
@@ -142,12 +147,13 @@ export async function getSmitheryConnection(
 }
 
 export async function deleteSmitheryConnection(apiKey: string, namespace: string, connectionId: string): Promise<void> {
+	using requestTimeout = armTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS);
 	const response = await fetch(
 		toApiUrl(`/connect/${encodeURIComponent(namespace)}/${encodeURIComponent(connectionId)}`),
 		{
 			method: "DELETE",
 			headers: buildAuthHeaders(apiKey),
-			signal: withTimeoutSignal(SMITHERY_CONNECT_TIMEOUT_MS),
+			signal: requestTimeout.signal,
 		},
 	);
 	await expectOk(response, "Failed to delete Smithery connection");

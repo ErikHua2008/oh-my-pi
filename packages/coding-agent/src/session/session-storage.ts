@@ -91,6 +91,65 @@ export interface SessionStorage {
 	drain(): Promise<void>;
 }
 
+function sessionArtifactsPath(sessionPath: string): string {
+	if (!sessionPath.endsWith(".jsonl")) throw new Error(`not a session JSONL path: ${sessionPath}`);
+	return sessionPath.slice(0, -".jsonl".length);
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+	try {
+		await fsp.access(targetPath);
+		return true;
+	} catch (err) {
+		if (isEnoent(err)) return false;
+		throw err;
+	}
+}
+
+/**
+ * Move a persisted session and its sibling artifacts directory as one logical
+ * operation. The artifacts move is rolled back if publishing the JSONL at its
+ * destination fails, so archive/restore never knowingly strand half a chat.
+ */
+export async function moveSessionWithArtifacts(sourcePath: string, targetPath: string): Promise<void> {
+	const sourceSessionPath = path.resolve(sourcePath);
+	const targetSessionPath = path.resolve(targetPath);
+	if (sourceSessionPath === targetSessionPath) throw new Error("session is already at the requested location");
+	if (!(await pathExists(sourceSessionPath))) throw new Error(`session file does not exist: ${sourceSessionPath}`);
+	if (await pathExists(targetSessionPath))
+		throw new Error(`session already exists at destination: ${targetSessionPath}`);
+
+	const sourceArtifactsPath = sessionArtifactsPath(sourceSessionPath);
+	const targetArtifactsPath = sessionArtifactsPath(targetSessionPath);
+	const hasArtifacts = await pathExists(sourceArtifactsPath);
+	if (hasArtifacts && (await pathExists(targetArtifactsPath))) {
+		throw new Error(`session artifacts already exist at destination: ${targetArtifactsPath}`);
+	}
+
+	await fsp.mkdir(path.dirname(targetSessionPath), { recursive: true });
+	let artifactsMoved = false;
+	try {
+		if (hasArtifacts) {
+			await fsp.rename(sourceArtifactsPath, targetArtifactsPath);
+			artifactsMoved = true;
+		}
+		await fsp.rename(sourceSessionPath, targetSessionPath);
+	} catch (err) {
+		const moveError = toError(err);
+		if (artifactsMoved) {
+			try {
+				await fsp.rename(targetArtifactsPath, sourceArtifactsPath);
+			} catch (rollbackErr) {
+				throw new Error(
+					`Failed to move session (${moveError.message}) and restore its artifacts (${toError(rollbackErr).message})`,
+					{ cause: moveError },
+				);
+			}
+		}
+		throw moveError;
+	}
+}
+
 // FinalizationRegistry to clean up leaked file descriptors
 const writerRegistry = new FinalizationRegistry<number>(fd => {
 	try {

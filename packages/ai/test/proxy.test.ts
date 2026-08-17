@@ -4,6 +4,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
 	connectProxiedSocket,
+	__resetProxyCache,
 	getProxyForProvider,
 	getProxyForUrl,
 	isLocalOrMetadataHost,
@@ -101,6 +102,7 @@ function proxyEnvKeys(): Set<string> {
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
+	__resetProxyCache();
 	saved = {};
 	for (const key of proxyEnvKeys()) {
 		saved[key] = Bun.env[key];
@@ -109,6 +111,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	__resetProxyCache();
 	for (const key of proxyEnvKeys()) delete Bun.env[key];
 	for (const key in saved) {
 		const value = saved[key];

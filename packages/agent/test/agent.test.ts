@@ -8,6 +8,20 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { createAssistantMessage } from "./helpers";
 
+function waitForAbort(signal: AbortSignal): Promise<void> {
+	if (signal.aborted) return Promise.resolve();
+	return new Promise(resolve => {
+		const onAbort = () => resolve();
+		signal.addEventListener("abort", onAbort, { once: true });
+		// Abort dispatch is synchronous. Recheck after registration so an abort
+		// between the initial check and addEventListener cannot be missed.
+		if (signal.aborted) {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}
+	});
+}
+
 describe("Agent", () => {
 	it("should support steering message queueing", async () => {
 		const agent = new Agent();
@@ -299,15 +313,15 @@ describe("Agent", () => {
 	});
 	it("keeps follow-up ownership when the deadline expires during a dequeue hook", async () => {
 		const mock = createMockModel({ responses: [{ content: ["done"] }] });
-		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 25 });
+		// Leave enough time for the mocked model turn to finish before the queue hook
+		// starts. A 25 ms deadline could expire during test-runner/CI scheduling, so
+		// the hook was never invoked and this test did not exercise its stated case.
+		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 500 });
 		let hookSignal: AbortSignal | undefined;
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected the active loop signal");
 			hookSignal = signal;
-			if (signal.aborted) return;
-			const { promise, resolve } = Promise.withResolvers<void>();
-			signal.addEventListener("abort", () => resolve(), { once: true });
-			await promise;
+			await waitForAbort(signal);
 		});
 		agent.followUp({ role: "user", content: "stay queued after deadline", timestamp: Date.now() });
 
@@ -321,10 +335,7 @@ describe("Agent", () => {
 		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected the deadline-aware dequeue signal");
-			if (signal.aborted) return;
-			const { promise, resolve } = Promise.withResolvers<void>();
-			signal.addEventListener("abort", () => resolve(), { once: true });
-			await promise;
+			await waitForAbort(signal);
 		});
 		agent.followUp({ role: "user", content: "stay queued before run loop", timestamp: Date.now() });
 
@@ -341,10 +352,7 @@ describe("Agent", () => {
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected continuation dequeue signal");
 			hookStarted.resolve();
-			if (signal.aborted) return;
-			const { promise, resolve } = Promise.withResolvers<void>();
-			signal.addEventListener("abort", () => resolve(), { once: true });
-			await promise;
+			await waitForAbort(signal);
 		});
 
 		const continuing = agent.continue();

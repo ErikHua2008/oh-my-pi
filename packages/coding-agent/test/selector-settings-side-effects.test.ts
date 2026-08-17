@@ -17,6 +17,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { AgentStorage } from "../src/session/agent-storage";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 let settingsState: SettingsTestState | undefined;
@@ -28,6 +29,10 @@ beforeEach(async () => {
 
 afterEach(() => {
 	restoreSettingsTestState(settingsState);
+	// Persisted Settings.loadIsolated() instances share AgentStorage's cached
+	// SQLite handle. Close it before Windows temp-directory cleanup in the test
+	// body or the WAL/SHM files can remain locked after the Settings object drops.
+	AgentStorage.resetInstance();
 	settingsState = undefined;
 });
 
@@ -622,6 +627,7 @@ describe("selector setting side effects", () => {
 				hub.dispose();
 			}
 		} finally {
+			AgentStorage.resetInstance();
 			if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
 		}
 	});
@@ -751,6 +757,7 @@ describe("selector setting side effects", () => {
 				hub.dispose();
 			}
 		} finally {
+			AgentStorage.resetInstance();
 			if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
 		}
 	});
@@ -1434,6 +1441,7 @@ describe("selector setting side effects", () => {
 				hub.dispose();
 			}
 		} finally {
+			AgentStorage.resetInstance();
 			if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
 		}
 	});
@@ -1541,6 +1549,7 @@ describe("selector setting side effects", () => {
 				hub.dispose();
 			}
 		} finally {
+			AgentStorage.resetInstance();
 			if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
 		}
 	});

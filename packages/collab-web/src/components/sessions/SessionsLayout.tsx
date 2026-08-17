@@ -22,6 +22,7 @@ export interface SessionsLayoutProps {
 	onOpenImportedSession(session: ImportedForeignSession): Promise<void>;
 	onRenameSession(id: string, title: string): void;
 	onDropSession(id: string): void;
+	onArchiveSession(id: string): Promise<void>;
 	onLeave(): void;
 }
 
@@ -40,6 +41,7 @@ export function SessionsLayout({
 	onOpenImportedSession,
 	onRenameSession,
 	onDropSession,
+	onArchiveSession,
 	onLeave,
 }: SessionsLayoutProps): ReactNode {
 	const snap = useControlSnapshot(client);
@@ -59,6 +61,13 @@ export function SessionsLayout({
 		onNewSession();
 	};
 	const listCodexSessions = useCallback((archived = false) => client.listCodexSessions(archived), [client]);
+	const listArchivedSessions = useCallback(() => client.listArchivedSessions(), [client]);
+	const restoreArchivedSession = useCallback(
+		async (id: string): Promise<void> => {
+			await client.restoreArchivedSession(id);
+		},
+		[client],
+	);
 	const importCodexSession = useCallback(
 		async (source: ForeignSessionSummary): Promise<void> => {
 			const imported = await client.importCodexSession(source);
@@ -127,6 +136,8 @@ export function SessionsLayout({
 					project={snap.sessions[0]?.cwd}
 					readOnly={snap.readOnly}
 					connection={snap.phase}
+					loadArchivedSessions={listArchivedSessions}
+					onRestoreArchivedSession={restoreArchivedSession}
 				/>
 			)}
 			{sidebarOpen && (
@@ -161,6 +172,7 @@ export function SessionsLayout({
 					onImportCodexSession={importCodexSession}
 					onRenameSession={onRenameSession}
 					onDropSession={onDropSession}
+					onArchiveSession={onArchiveSession}
 					onLeave={onLeave}
 				/>
 			</aside>

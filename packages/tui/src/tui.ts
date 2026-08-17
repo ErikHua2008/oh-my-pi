@@ -3094,10 +3094,13 @@ export class TUI extends Container {
 			typeof opt.margin === "number"
 				? { top: opt.margin, right: opt.margin, bottom: opt.margin, left: opt.margin }
 				: (opt.margin ?? {});
-		const marginTop = Math.max(0, margin.top ?? 0);
-		const marginRight = Math.max(0, margin.right ?? 0);
-		const marginBottom = Math.max(0, margin.bottom ?? 0);
-		const marginLeft = Math.max(0, margin.left ?? 0);
+		// Oversized opposing margins must still leave one drawable cell. Without
+		// normalization an extremely narrow window can place the overlay beyond the
+		// terminal edge and pass a negative tail width into native text slicing.
+		const marginLeft = Math.min(Math.max(0, margin.left ?? 0), Math.max(0, termWidth - 1));
+		const marginRight = Math.min(Math.max(0, margin.right ?? 0), Math.max(0, termWidth - marginLeft - 1));
+		const marginTop = Math.min(Math.max(0, margin.top ?? 0), Math.max(0, termHeight - 1));
+		const marginBottom = Math.min(Math.max(0, margin.bottom ?? 0), Math.max(0, termHeight - marginTop - 1));
 
 		// Available space after margins
 		const availWidth = Math.max(1, termWidth - marginLeft - marginRight);

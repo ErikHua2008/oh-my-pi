@@ -3182,10 +3182,10 @@ export function resolveExpectedOverlayLayout(
 		typeof opt.margin === "number"
 			? { top: opt.margin, right: opt.margin, bottom: opt.margin, left: opt.margin }
 			: (opt.margin ?? {});
-	const marginTop = Math.max(0, margin.top ?? 0);
-	const marginRight = Math.max(0, margin.right ?? 0);
-	const marginBottom = Math.max(0, margin.bottom ?? 0);
-	const marginLeft = Math.max(0, margin.left ?? 0);
+	const marginLeft = Math.min(Math.max(0, margin.left ?? 0), Math.max(0, termWidth - 1));
+	const marginRight = Math.min(Math.max(0, margin.right ?? 0), Math.max(0, termWidth - marginLeft - 1));
+	const marginTop = Math.min(Math.max(0, margin.top ?? 0), Math.max(0, termHeight - 1));
+	const marginBottom = Math.min(Math.max(0, margin.bottom ?? 0), Math.max(0, termHeight - marginTop - 1));
 	const availWidth = Math.max(1, termWidth - marginLeft - marginRight);
 	const availHeight = Math.max(1, termHeight - marginTop - marginBottom);
 	let width = parseOverlaySizeValue(opt.width, termWidth) ?? Math.min(80, availWidth);

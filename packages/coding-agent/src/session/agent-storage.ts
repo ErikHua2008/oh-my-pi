@@ -1,4 +1,4 @@
-import { Database, type Statement } from "bun:sqlite";
+import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -71,6 +71,34 @@ type ModelPerfInsert = {
 	ttftSamples: 0 | 1;
 	ttftMs: number;
 };
+
+/** Execute a short-lived statement without leaving Database.close() deferred on Windows. */
+function runPrepared(db: Database, sql: string, ...params: SQLQueryBindings[]): { changes: number | bigint } {
+	const statement = db.prepare(sql);
+	try {
+		return statement.run(...params);
+	} finally {
+		statement.finalize();
+	}
+}
+
+function getPrepared<T>(db: Database, sql: string, ...params: SQLQueryBindings[]): T | undefined {
+	const statement = db.prepare(sql);
+	try {
+		return statement.get(...params) as T | undefined;
+	} finally {
+		statement.finalize();
+	}
+}
+
+function allPrepared<T>(db: Database, sql: string, ...params: SQLQueryBindings[]): T[] {
+	const statement = db.prepare(sql);
+	try {
+		return statement.all(...params) as T[];
+	} finally {
+		statement.finalize();
+	}
+}
 
 /** Recency-weighted per-model performance averages. */
 export interface ModelPerfStats {
@@ -230,7 +258,7 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 `);
 
-		const settingsInfo = this.#db.prepare("PRAGMA table_info(settings)").all() as Array<{ name?: string }>;
+		const settingsInfo = allPrepared<{ name?: string }>(this.#db, "PRAGMA table_info(settings)");
 		const hasSettingsTable = settingsInfo.length > 0;
 		const hasKey = settingsInfo.some(column => column.name === "key");
 		const hasValue = settingsInfo.some(column => column.name === "value");
@@ -246,7 +274,7 @@ CREATE TABLE settings (
 		} else if (!hasKey || !hasValue) {
 			// Migrate v1 schema: single JSON blob in `data` column → per-key rows
 			let legacySettings: Record<string, unknown> | null = null;
-			const row = this.#db.prepare("SELECT data FROM settings WHERE id = 1").get() as { data?: string } | undefined;
+			const row = getPrepared<{ data?: string }>(this.#db, "SELECT data FROM settings WHERE id = 1");
 			if (row?.data) {
 				try {
 					const parsed = JSON.parse(row.data);
@@ -273,11 +301,15 @@ CREATE TABLE settings (
 					const insert = this.#db.prepare(
 						`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ${SQLITE_NOW_EPOCH})`,
 					);
-					for (const [key, value] of Object.entries(settings)) {
-						if (value === undefined) continue;
-						const serialized = JSON.stringify(value);
-						if (serialized === undefined) continue;
-						insert.run(key, serialized);
+					try {
+						for (const [key, value] of Object.entries(settings)) {
+							if (value === undefined) continue;
+							const serialized = JSON.stringify(value);
+							if (serialized === undefined) continue;
+							insert.run(key, serialized);
+						}
+					} finally {
+						insert.finalize();
 					}
 				}
 			});
@@ -285,9 +317,10 @@ CREATE TABLE settings (
 			migrate(legacySettings);
 		}
 
-		const versionRow = this.#db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").get() as
-			| { version?: number }
-			| undefined;
+		const versionRow = getPrepared<{ version?: number }>(
+			this.#db,
+			"SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
+		);
 		const schemaVersion = typeof versionRow?.version === "number" ? versionRow.version : 0;
 		if (versionRow?.version !== undefined && versionRow.version !== SCHEMA_VERSION) {
 			logger.warn("AgentStorage schema version mismatch", {
@@ -298,7 +331,7 @@ CREATE TABLE settings (
 		if (schemaVersion < SCHEMA_VERSION) {
 			this.#migrateSchema(schemaVersion);
 		}
-		this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
+		runPrepared(this.#db, "INSERT OR REPLACE INTO schema_version(version) VALUES (?)", SCHEMA_VERSION);
 	}
 
 	#migrateSchema(fromVersion: number): void {
@@ -315,7 +348,7 @@ CREATE TABLE settings (
 			// Purge the old aggregates and re-arm the stats.db backfill so
 			// history is re-imported through the corrected fold.
 			this.#db.run("DELETE FROM model_perf");
-			this.#db.prepare("DELETE FROM meta WHERE key = ?").run(MODEL_PERF_BACKFILL_KEY);
+			runPrepared(this.#db, "DELETE FROM meta WHERE key = ?", MODEL_PERF_BACKFILL_KEY);
 		}
 	}
 
@@ -536,15 +569,18 @@ FROM model_usage_legacy
 		if (!this.#autoPerfBackfill || this.#perfBackfillChecked) return;
 		this.#perfBackfillChecked = true;
 		try {
-			const marker = this.#db.prepare("SELECT value FROM meta WHERE key = ?").get(MODEL_PERF_BACKFILL_KEY);
+			const marker = getPrepared(this.#db, "SELECT value FROM meta WHERE key = ?", MODEL_PERF_BACKFILL_KEY);
 			if (marker) return;
 			const statsDbPath = getStatsDbPath();
 			if (!fs.existsSync(statsDbPath)) return;
 			void this.backfillModelPerfFromStats(statsDbPath)
 				.then(imported => {
-					this.#db
-						.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-						.run(MODEL_PERF_BACKFILL_KEY, "complete");
+					runPrepared(
+						this.#db,
+						"INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+						MODEL_PERF_BACKFILL_KEY,
+						"complete",
+					);
 					logger.info("AgentStorage imported model perf history from stats.db", { imported });
 				})
 				.catch(error => {
@@ -583,48 +619,49 @@ WHERE (timestamp < ?1 OR (timestamp = ?1 AND rowid < ?2))
 ORDER BY timestamp DESC, rowid DESC
 LIMIT ?4`,
 			);
-			const cutoff = Date.now() - MODEL_PERF_BACKFILL_MAX_AGE_MS;
-			const sums = new Map<string, PerfAccum>();
-			let cursorTimestamp = Number.MAX_SAFE_INTEGER;
-			let cursorRowid = Number.MAX_SAFE_INTEGER;
-			let scanned = 0;
-			let imported = 0;
-			while (scanned < MODEL_PERF_BACKFILL_MAX_ROWS) {
-				const chunk = Math.min(MODEL_PERF_BACKFILL_CHUNK, MODEL_PERF_BACKFILL_MAX_ROWS - scanned);
-				const rows = select.all(cursorTimestamp, cursorRowid, cutoff, chunk) as StatsMessageRow[];
-				if (rows.length === 0) break;
-				scanned += rows.length;
-				const last = rows[rows.length - 1];
-				cursorTimestamp = last.timestamp;
-				cursorRowid = last.rowid;
-				for (const row of rows) {
-					const key = `${row.provider}/${row.model}`;
-					let accum = sums.get(key);
-					if (accum && accum.samples >= MODEL_PERF_DECAY_AT) continue;
-					const normalized = normalizeModelPerfSample(key, {
-						outputTokens: row.output_tokens,
-						durationMs: row.duration,
-						ttftMs: row.ttft ?? undefined,
-					});
-					if (!normalized) continue;
-					if (!accum) {
-						accum = { samples: 0, outputTokens: 0, genMs: 0, ttftSamples: 0, ttftMs: 0 };
-						sums.set(key, accum);
+			try {
+				const cutoff = Date.now() - MODEL_PERF_BACKFILL_MAX_AGE_MS;
+				const sums = new Map<string, PerfAccum>();
+				let cursorTimestamp = Number.MAX_SAFE_INTEGER;
+				let cursorRowid = Number.MAX_SAFE_INTEGER;
+				let scanned = 0;
+				let imported = 0;
+				while (scanned < MODEL_PERF_BACKFILL_MAX_ROWS) {
+					const chunk = Math.min(MODEL_PERF_BACKFILL_CHUNK, MODEL_PERF_BACKFILL_MAX_ROWS - scanned);
+					const rows = select.all(cursorTimestamp, cursorRowid, cutoff, chunk) as StatsMessageRow[];
+					if (rows.length === 0) break;
+					scanned += rows.length;
+					const last = rows[rows.length - 1];
+					cursorTimestamp = last.timestamp;
+					cursorRowid = last.rowid;
+					for (const row of rows) {
+						const key = `${row.provider}/${row.model}`;
+						let accum = sums.get(key);
+						if (accum && accum.samples >= MODEL_PERF_DECAY_AT) continue;
+						const normalized = normalizeModelPerfSample(key, {
+							outputTokens: row.output_tokens,
+							durationMs: row.duration,
+							ttftMs: row.ttft ?? undefined,
+						});
+						if (!normalized) continue;
+						if (!accum) {
+							accum = { samples: 0, outputTokens: 0, genMs: 0, ttftSamples: 0, ttftMs: 0 };
+							sums.set(key, accum);
+						}
+						accum.samples += 1;
+						accum.outputTokens += normalized.outputTokens;
+						accum.genMs += normalized.durationMs;
+						accum.ttftSamples += normalized.ttftSamples;
+						accum.ttftMs += normalized.ttftMs;
+						imported++;
 					}
-					accum.samples += 1;
-					accum.outputTokens += normalized.outputTokens;
-					accum.genMs += normalized.durationMs;
-					accum.ttftSamples += normalized.ttftSamples;
-					accum.ttftMs += normalized.ttftMs;
-					imported++;
+					if (rows.length < chunk) break;
+					// Yield so a chunked walk never freezes the TUI (bun:sqlite is sync).
+					await Bun.sleep(0);
 				}
-				if (rows.length < chunk) break;
-				// Yield so a chunked walk never freezes the TUI (bun:sqlite is sync).
-				await Bun.sleep(0);
-			}
-			if (sums.size > 0) {
-				const upsert = this.#db.prepare(
-					`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
+				if (sums.size > 0) {
+					const upsert = this.#db.prepare(
+						`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(model_key) DO UPDATE SET
 	samples = model_perf.samples + excluded.samples,
@@ -633,14 +670,28 @@ ON CONFLICT(model_key) DO UPDATE SET
 	ttft_samples = model_perf.ttft_samples + excluded.ttft_samples,
 	ttft_ms = model_perf.ttft_ms + excluded.ttft_ms,
 	updated_at = ${SQLITE_NOW_EPOCH}`,
-				);
-				this.#db.transaction(() => {
-					for (const [key, accum] of sums) {
-						upsert.run(key, accum.samples, accum.outputTokens, accum.genMs, accum.ttftSamples, accum.ttftMs);
+					);
+					try {
+						this.#db.transaction(() => {
+							for (const [key, accum] of sums) {
+								upsert.run(
+									key,
+									accum.samples,
+									accum.outputTokens,
+									accum.genMs,
+									accum.ttftSamples,
+									accum.ttftMs,
+								);
+							}
+						})();
+					} finally {
+						upsert.finalize();
 					}
-				})();
+				}
+				return imported;
+			} finally {
+				select.finalize();
 			}
-			return imported;
 		} finally {
 			statsDb.close();
 		}
@@ -675,18 +726,19 @@ ON CONFLICT(model_key) DO UPDATE SET
 		const credentials = this.#authStore.listAuthCredentials(provider);
 		if (!includeDisabled) return credentials;
 
-		const stmt = this.#db.prepare(
-			provider
-				? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
-				: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
-		);
-		const rows = (provider ? stmt.all(provider) : stmt.all()) as Array<{
+		const sql = provider
+			? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
+			: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC";
+		type CredentialRow = {
 			id: number;
 			provider: string;
 			credential_type: string;
 			data: string;
 			disabled_cause: string | null;
-		}>;
+		};
+		const rows = provider
+			? allPrepared<CredentialRow>(this.#db, sql, provider)
+			: allPrepared<CredentialRow>(this.#db, sql);
 
 		const results: StoredAuthCredential[] = [];
 		for (const row of rows) {
