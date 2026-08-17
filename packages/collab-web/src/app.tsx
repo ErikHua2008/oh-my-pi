@@ -44,6 +44,8 @@ interface Creds {
 	name: string;
 }
 
+type ControlPendingOperation = "create" | "resume" | null;
+
 function storedName(): string {
 	try {
 		return localStorage.getItem(NAME_KEY) ?? "guest";
@@ -78,7 +80,7 @@ function contextLabel(snapshot: GuestSnapshot): string | null {
 
 export function App(): ReactNode {
 	const [appState, setAppState] = useState<AppState>(null);
-	const [controlPending, setControlPending] = useState(false);
+	const [controlPendingOperation, setControlPendingOperation] = useState<ControlPendingOperation>(null);
 	const [connectError, setConnectError] = useState<string | null>(null);
 	const [controlNotices, setControlNotices] = useState<Notice[]>([]);
 	const credsRef = useRef<Creds | null>(null);
@@ -124,7 +126,7 @@ export function App(): ReactNode {
 		(source: ControlClient, info: ControlSessionInfo): void => {
 			const accepted = controlFlow.accept(source, info);
 			if (!accepted) return;
-			setControlPending(false);
+			setControlPendingOperation(null);
 			openSessionLink(source, accepted.link, accepted.id);
 		},
 		[controlFlow, openSessionLink],
@@ -150,12 +152,12 @@ export function App(): ReactNode {
 				}
 				ctrl.onError = message => {
 					// A failed op ends the pending create/resume round trip.
-					if (controlFlow.fail(ctrl)) setControlPending(false);
+					if (controlFlow.fail(ctrl)) setControlPendingOperation(null);
 					pushNotice("error", message);
 				};
 				ctrl.onEnded = () => {
 					// A terminal room/socket event cannot produce the pending reply.
-					if (controlFlow.fail(ctrl)) setControlPending(false);
+					if (controlFlow.fail(ctrl)) setControlPendingOperation(null);
 				};
 				ctrl.onSession = info => handleCtrlSession(ctrl, info);
 				ctrl.connect();
@@ -167,7 +169,7 @@ export function App(): ReactNode {
 				}
 				window.location.hash = link;
 				controlFlow.activate(ctrl)?.close();
-				setControlPending(false);
+				setControlPendingOperation(null);
 				setAppState(prev => {
 					if (prev?.kind === "session") prev.client.close();
 					if (prev?.kind === "control") prev.session?.close();
@@ -192,7 +194,7 @@ export function App(): ReactNode {
 			window.location.hash = link;
 			// A plain session deep link replaces any active control room.
 			controlFlow.deactivate()?.close();
-			setControlPending(false);
+			setControlPendingOperation(null);
 			setAppState(prev => {
 				if (prev?.kind === "session") prev.client.close();
 				if (prev?.kind === "control") prev.session?.close();
@@ -204,7 +206,7 @@ export function App(): ReactNode {
 
 	const leave = useCallback((): void => {
 		const control = controlFlow.deactivate();
-		setControlPending(false);
+		setControlPendingOperation(null);
 		setAppState(prev => {
 			prev?.client.close();
 			if (prev?.kind === "control") prev.session?.close();
@@ -217,7 +219,7 @@ export function App(): ReactNode {
 	/** Control mode: return from a session view to the sidebar. */
 	const backToSessions = useCallback((): void => {
 		controlFlow.cancelPending();
-		setControlPending(false);
+		setControlPendingOperation(null);
 		const ctrl = controlFlow.activeClient;
 		if (!ctrl) {
 			leave();
@@ -270,7 +272,7 @@ export function App(): ReactNode {
 	const startCreate = useCallback(
 		(client: ControlClient): void => {
 			if (!controlFlow.startCreate(client)) return;
-			setControlPending(true);
+			setControlPendingOperation("create");
 		},
 		[controlFlow],
 	);
@@ -278,7 +280,7 @@ export function App(): ReactNode {
 	const startResume = useCallback(
 		(client: ControlClient, id: string): void => {
 			if (!controlFlow.startResume(client, id)) return;
-			setControlPending(true);
+			setControlPendingOperation("resume");
 		},
 		[controlFlow],
 	);
@@ -308,7 +310,7 @@ export function App(): ReactNode {
 	);
 
 	useEffect(() => {
-		if (appState?.kind !== "control" || appState.session !== null || controlPending) return;
+		if (appState?.kind !== "control" || appState.session !== null || controlPendingOperation !== null) return;
 		const client = appState.client;
 		let checked = false;
 		let active = true;
@@ -325,7 +327,7 @@ export function App(): ReactNode {
 			active = false;
 			unsubscribe();
 		};
-	}, [appState, controlPending, startResume]);
+	}, [appState, controlPendingOperation, startResume]);
 
 	if (!appState) {
 		return (
@@ -355,7 +357,8 @@ export function App(): ReactNode {
 			<SessionsLayout
 				client={appState.client}
 				activeSessionId={appState.sessionId}
-				pending={controlPending}
+				pending={controlPendingOperation !== null}
+				creating={controlPendingOperation === "create"}
 				content={
 					appState.session ? (
 						<Session
@@ -557,6 +560,7 @@ function Session({ client, onLeave, onRejoin, onBack }: SessionProps): ReactNode
 							sessionId={snap.header?.id}
 							historyRemaining={snap.historyRemaining}
 							historyLoading={snap.historyLoading}
+							fileDropEnabled={snap.phase === "live" && !snap.readOnly}
 							onLoadEarlier={() => client.loadEarlierHistory()}
 							host={toolHost}
 							onEditLastUserMessage={setComposerPrefill}

@@ -226,6 +226,21 @@
 	overflow: hidden;
 }
 
+/* Windows counterpart to macOS sidebar vibrancy. The DWM Acrylic layer does
+ * the expensive blur; this restrained tint keeps navigation text fully clear
+ * while allowing a small amount of the desktop/window silhouette through. */
+html[data-omp-host="cpp"] .sh-desktop-frame,
+html[data-omp-host="cpp"] .sh-desktop-content,
+html[data-omp-host="cpp"] .sh-control {
+	background: transparent;
+}
+
+html[data-omp-host="cpp"] .sh-sidebar {
+	background: color-mix(in srgb, var(--bg-sidebar) 88%, transparent);
+	backdrop-filter: blur(28px) saturate(118%);
+	-webkit-backdrop-filter: blur(28px) saturate(118%);
+}
+
 /* ---- app frame ---- */
 .sh-app {
 	width: 100%;
@@ -250,6 +265,7 @@
 }
 
 .sh-content {
+	position: relative;
 	flex: 1;
 	min-width: 0;
 	min-height: 0;

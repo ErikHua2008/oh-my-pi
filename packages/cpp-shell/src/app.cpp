@@ -75,6 +75,65 @@ using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
 using ShouldAppsUseDarkModeFn = bool(WINAPI*)();
 using RefreshImmersiveColorPolicyStateFn = void(WINAPI*)();
 
+enum class AccentState : int {
+	Disabled = 0,
+	EnableAcrylicBlurBehind = 4,
+};
+
+struct AccentPolicy final {
+	AccentState state = AccentState::Disabled;
+	DWORD flags = 0;
+	DWORD gradient_color = 0;
+	DWORD animation_id = 0;
+};
+
+enum class WindowCompositionAttribute : int {
+	AccentPolicy = 19,
+};
+
+struct WindowCompositionAttributeData final {
+	WindowCompositionAttribute attribute;
+	void* data;
+	SIZE_T size;
+};
+
+using SetWindowCompositionAttributeFn = BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
+
+[[nodiscard]] bool ApplyWindowBackdrop(HWND window, bool dark) noexcept {
+	if (window == nullptr) return false;
+	// DWMWA_SYSTEMBACKDROP_TYPE / DWMSBT_TRANSIENTWINDOW provide the Windows 11
+	// Acrylic material. Numeric constants keep the binary compatible with older
+	// Windows SDKs; unsupported systems fall through to the Win10 composition API.
+	constexpr DWORD kDwmSystemBackdropType = 38;
+	constexpr int kTransientWindowBackdrop = 3;
+	const MARGINS frame{-1, -1, -1, -1};
+	static_cast<void>(DwmExtendFrameIntoClientArea(window, &frame));
+	if (SUCCEEDED(DwmSetWindowAttribute(window,
+			kDwmSystemBackdropType,
+			&kTransientWindowBackdrop,
+			sizeof(kTransientWindowBackdrop)))) {
+		return true;
+	}
+
+	const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+	const auto set_composition = user32 == nullptr
+		? nullptr
+		: reinterpret_cast<SetWindowCompositionAttributeFn>(
+			GetProcAddress(user32, "SetWindowCompositionAttribute"));
+	if (set_composition == nullptr) return false;
+	AccentPolicy policy;
+	policy.state = AccentState::EnableAcrylicBlurBehind;
+	// ABGR tint with only a light native veil; the Web sidebar applies the
+	// deliberate 88% theme tint above this blurred system material.
+	policy.gradient_color = dark ? 0x221B1B1CU : 0x22FBFAF9U;
+	WindowCompositionAttributeData data{
+		WindowCompositionAttribute::AccentPolicy,
+		&policy,
+		sizeof(policy),
+	};
+	return set_composition(window, &data) != FALSE;
+}
+
 [[nodiscard]] HMODULE LoadUxTheme() noexcept {
 	return LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 }
@@ -481,6 +540,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 		}
 		return 0;
 	case WM_ERASEBKGND: {
+		if (backdrop_enabled_) return 1;
 		RECT client{};
 		GetClientRect(window_, &client);
 		HBRUSH background = CreateSolidBrush(dark_theme_ ? RGB(21, 21, 23) : RGB(255, 255, 255));
@@ -861,11 +921,12 @@ void App::ApplyTheme(bool dark) {
 	config_.dark_theme = dark;
 	ApplyApplicationThemeMode(dark);
 	native_transcript_.SetDarkTheme(dark);
-	webview_.SetDarkTheme(dark);
 	if (persist_theme) {
 		SaveConfigFile();
 	}
 	if (window_ == nullptr) {
+		webview_.SetBackdropEnabled(false);
+		webview_.SetDarkTheme(dark);
 		return;
 	}
 	const BOOL dark_mode = dark ? TRUE : FALSE;
@@ -875,6 +936,9 @@ void App::ApplyTheme(bool dark) {
 	constexpr DWORD kDwmBorderColorAttribute = 34;
 	constexpr COLORREF kDwmColorNone = 0xFFFFFFFE;
 	DwmSetWindowAttribute(window_, kDwmBorderColorAttribute, &kDwmColorNone, sizeof(kDwmColorNone));
+	backdrop_enabled_ = ApplyWindowBackdrop(window_, dark);
+	webview_.SetBackdropEnabled(backdrop_enabled_);
+	webview_.SetDarkTheme(dark);
 	ApplyWindowThemeMode(window_, dark);
 	ApplyWindowThemeMode(native_transcript_.Window(), dark);
 	const UINT dpi = GetDpiForWindow(window_);
@@ -1181,14 +1245,30 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			if (action == "drag") {
 				reply(true, nullptr);
 				ReleaseCapture();
-				PostMessageW(window_, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+				POINT cursor{};
+				GetCursorPos(&cursor);
+				// Dispatch a real non-client caption press with the current screen
+				// coordinates. Unlike the former zero-coordinate post, this remains
+				// reliable with a borderless Acrylic client area.
+				SendMessageW(window_,
+					WM_NCLBUTTONDOWN,
+					HTCAPTION,
+					MAKELPARAM(static_cast<short>(cursor.x), static_cast<short>(cursor.y)));
 				return;
 			}
 			if (const auto resize_command = WindowSizingCommandForAction(action)) {
 				reply(true, nullptr);
 				if (!IsZoomed(window_) && !IsIconic(window_)) {
 					ReleaseCapture();
-					PostMessageW(window_, WM_SYSCOMMAND, *resize_command, 0);
+					POINT cursor{};
+					GetCursorPos(&cursor);
+					// Enter the sizing loop before the originating WebView pointer-down
+					// unwinds. Posting this command can lose a quick press/release and make
+					// a resize handle appear intermittently dead.
+					SendMessageW(window_,
+						WM_SYSCOMMAND,
+						*resize_command,
+						MAKELPARAM(static_cast<short>(cursor.x), static_cast<short>(cursor.y)));
 				}
 				return;
 			}
@@ -1273,7 +1353,9 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			if (const auto found = snapshot.find("sessionId"); found != snapshot.end() && found->is_string()) {
 				session_id = found->get<std::string>();
 			}
-			const bool preserve_streaming_tail = session_id == native_session_id_;
+			const bool session_changed = session_id != native_session_id_;
+			const bool preserve_streaming_tail = !session_changed;
+			const bool reveal_after_replace = session_changed && native_transcript_.IsVisible();
 			std::vector<NativeTranscriptRow> rows;
 			rows.reserve(encoded_rows.size() + 1);
 			std::unordered_set<std::string> ids;
@@ -1292,11 +1374,15 @@ void App::HandleDesktopRequest(std::string_view payload) {
 					}
 				}
 			}
+			if (session_changed) native_transcript_.SetVisible(false);
 			native_session_id_ = session_id;
-			native_transcript_.ReplaceSnapshot(std::move(rows));
+			native_transcript_.ReplaceSnapshot(std::move(rows), session_changed);
 			const std::size_t history_remaining = snapshot.value("historyRemaining", std::size_t{0});
 			const bool history_loading = snapshot.value("historyLoading", false);
 			native_transcript_.SetHistoryState(history_remaining, history_loading);
+			if (reveal_after_replace && has_native_transcript_bounds_ && native_transcript_preferred_) {
+				native_transcript_.SetVisible(true);
+			}
 			reply(true, Json{{"enabled", native_transcript_preferred_}});
 			return;
 		}
@@ -1348,6 +1434,7 @@ void App::HandleDesktopRequest(std::string_view payload) {
 				return;
 			}
 			const Json& viewport = args.at("viewport");
+			native_transcript_.SetFileDropEnabled(viewport.value("dropEnabled", false));
 			const std::string theme = viewport.at("theme").get<std::string>();
 			if (theme != "light" && theme != "dark") {
 				throw std::invalid_argument("unsupported native transcript theme");

@@ -37,6 +37,15 @@ body {
 	overflow: hidden;
 }
 
+/* The native Windows host supplies the Acrylic material behind WebView2.
+ * Keep the document surface transparent so only explicitly painted app
+ * regions cover it; browser/mobile hosts retain their normal solid canvas. */
+html[data-omp-host="cpp"],
+html[data-omp-host="cpp"] body,
+html[data-omp-host="cpp"] #root {
+	background: transparent;
+}
+
 button,
 input,
 textarea,

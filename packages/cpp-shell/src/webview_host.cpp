@@ -149,6 +149,13 @@ constexpr std::wstring_view kFallbackTitlebar = LR"html(
 constexpr wchar_t kDesktopBridgeScript[] = LR"js(
 (() => {
 	window.__OMP_CPP_SHELL__ = true;
+	const markCppHost = () => {
+		if (document.documentElement) document.documentElement.dataset.ompHost = "cpp";
+	};
+	markCppHost();
+	if (!document.documentElement) {
+		document.addEventListener("DOMContentLoaded", markCppHost, { once: true });
+	}
   if (window.__TAURI_INTERNALS__?.invoke || !window.chrome?.webview) return;
   let nextId = 0;
   const pending = new Map();
@@ -409,8 +416,9 @@ void WebViewHost::SetDarkTheme(bool dark) {
 	if (controller_ != nullptr) {
 		Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
 		if (SUCCEEDED(controller_.As(&controller2))) {
-			const COREWEBVIEW2_COLOR background =
-				dark ? COREWEBVIEW2_COLOR{255, 21, 21, 23} : COREWEBVIEW2_COLOR{255, 255, 255, 255};
+			const COREWEBVIEW2_COLOR background = backdrop_enabled_
+				? COREWEBVIEW2_COLOR{0, 0, 0, 0}
+				: (dark ? COREWEBVIEW2_COLOR{255, 21, 21, 23} : COREWEBVIEW2_COLOR{255, 255, 255, 255});
 			controller2->put_DefaultBackgroundColor(background);
 		}
 	}
@@ -420,6 +428,12 @@ void WebViewHost::SetDarkTheme(bool dark) {
 			: L"document.documentElement.dataset.theme='light'";
 		webview_->ExecuteScript(script, nullptr);
 	}
+}
+
+void WebViewHost::SetBackdropEnabled(bool enabled) {
+	if (backdrop_enabled_ == enabled) return;
+	backdrop_enabled_ = enabled;
+	SetDarkTheme(dark_theme_);
 }
 
 } // namespace omp::shell

@@ -53,11 +53,18 @@ function snapshot(sessions: readonly SessionSummary[], readOnly = false): Contro
 	};
 }
 
-function renderPanel(snap: ControlSnapshot, activeSessionId: string | null = null): string {
+function renderPanel(
+	snap: ControlSnapshot,
+	activeSessionId: string | null = null,
+	pending = false,
+	creating = false,
+): string {
 	return renderToStaticMarkup(
 		<SessionsPanel
 			snapshot={snap}
 			activeSessionId={activeSessionId}
+			pending={pending}
+			creating={creating}
 			onOpenSettings={() => {}}
 			onOpenSession={() => {}}
 			onNewSession={() => {}}
@@ -168,6 +175,17 @@ describe("SessionsPanel session actions", () => {
 		expect(newSessionIndex).toBeGreaterThan(-1);
 		expect(importIndex).toBeGreaterThan(newSessionIndex);
 		expect(html).toContain(">Import Chat from Codex</span>");
+	});
+
+	it("keeps the new-session action visually stable while an existing session resumes", () => {
+		const html = renderPanel(snapshot([]), null, true, false);
+		const newSessionButton = html.match(
+			/<button type="button" class="sh-sessions-action"[^>]*>.*?<span>New session<\/span><\/button>/,
+		)?.[0];
+
+		expect(newSessionButton).toBeDefined();
+		expect(newSessionButton).not.toContain("disabled");
+		expect(html).not.toContain("Starting session");
 	});
 
 	it("keeps context menus inside every viewport edge", () => {

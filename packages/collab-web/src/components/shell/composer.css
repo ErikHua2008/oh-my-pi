@@ -94,24 +94,24 @@
 	box-shadow: var(--shadow-composer), 0 0 0 3px var(--ring);
 }
 
-.sh-composer-drag-active .sh-composer-card {
+.sh-session-drag-active .sh-composer-card {
 	border-color: var(--accent);
 	box-shadow: var(--shadow-composer), 0 0 0 4px var(--ring);
 }
 
-.sh-composer-drag-active .sh-composer-card::after {
+.sh-session-drag-active .sh-content::after {
 	content: "松开以引用本机文件";
 	position: absolute;
-	inset: 8px;
-	z-index: 3;
+	inset: 10px 16px 0;
+	z-index: 20;
 	display: grid;
 	place-items: center;
 	font-size: 13px;
 	font-weight: 600;
 	color: var(--accent);
-	background: color-mix(in srgb, var(--bg-raised) 90%, transparent);
+	background: color-mix(in srgb, var(--bg) 82%, transparent);
 	border: 1px dashed var(--accent);
-	border-radius: calc(var(--radius-xl) - 5px);
+	border-radius: var(--radius-lg);
 	pointer-events: none;
 }
 
@@ -169,6 +169,10 @@
 	background: transparent;
 	border: 0;
 	resize: none;
+}
+
+.sh-composer:not(.sh-composer-ask) .sh-composer-input {
+	min-height: 56px;
 }
 
 .sh-composer-input::placeholder {

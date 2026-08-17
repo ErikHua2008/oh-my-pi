@@ -27,6 +27,7 @@ export interface SessionsPanelProps {
 	snapshot: ControlSnapshot;
 	activeSessionId?: string | null;
 	pending?: boolean;
+	creating?: boolean;
 	onOpenSettings(): void;
 	onOpenSession(id: string): void;
 	onNewSession(): void;
@@ -270,6 +271,7 @@ export function SessionsPanel({
 	snapshot,
 	activeSessionId = null,
 	pending = false,
+	creating = false,
 	onOpenSettings,
 	onOpenSession,
 	onNewSession,
@@ -501,9 +503,9 @@ export function SessionsPanel({
 					)}
 					{!readOnly && (
 						<>
-							<button type="button" className="sh-sessions-action" onClick={onNewSession} disabled={pending}>
+							<button type="button" className="sh-sessions-action" onClick={onNewSession} disabled={creating}>
 								<Plus size={16} aria-hidden="true" />
-								<span>{pending ? "Starting session…" : "New session"}</span>
+								<span>{creating ? "Starting session…" : "New session"}</span>
 							</button>
 							<button
 								type="button"

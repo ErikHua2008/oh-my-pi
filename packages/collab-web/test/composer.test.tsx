@@ -3,7 +3,11 @@ import type { KeyboardEvent } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { GuestSnapshot } from "../src/lib/client";
 import { GuestClient } from "../src/lib/client";
-import { Composer, shouldSubmitOnEnter } from "../src/components/shell/Composer";
+import {
+	Composer,
+	shouldCheckDraftAttachmentPaths,
+	shouldSubmitOnEnter,
+} from "../src/components/shell/Composer";
 import { ModelPicker } from "../src/components/shell/ModelPicker";
 import { createDesktopBridge } from "../src/lib/desktop-bridge";
 import { encodeBase64Url } from "../src/lib/link";
@@ -251,5 +255,13 @@ describe("shouldSubmitOnEnter IME guard", () => {
 
 	it("ignores non-Enter keys", () => {
 		expect(shouldSubmitOnEnter(keydown("a"), false)).toBe(false);
+	});
+});
+
+describe("managed attachment availability", () => {
+	it("stats native paths but trusts media paths already persisted by a remote Core", () => {
+		expect(shouldCheckDraftAttachmentPaths(1, true)).toBe(true);
+		expect(shouldCheckDraftAttachmentPaths(1, false)).toBe(false);
+		expect(shouldCheckDraftAttachmentPaths(0, true)).toBe(false);
 	});
 });

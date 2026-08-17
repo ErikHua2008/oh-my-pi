@@ -1,7 +1,7 @@
 import type { LocalFileReference } from "@oh-my-pi/pi-wire";
 import { MANAGED_IMAGE_MAX_BYTES } from "@oh-my-pi/pi-wire";
 import { ArrowUp, File, FileUp, Folder, ImagePlus, Pencil, Scissors, SendHorizontal, Square, X } from "lucide-react";
-import type { ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from "react";
+import type { ClipboardEvent, KeyboardEvent, ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { GuestClient, GuestSnapshot } from "../../lib/client";
 import { type DesktopBridge, desktopBridge as defaultDesktopBridge } from "../../lib/desktop-bridge";
@@ -23,6 +23,7 @@ export interface ComposerProps {
 /** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with composer.css). */
 const LINE_PX = 20;
 const PAD_Y = 16;
+const COMPOSER_MIN_ROWS = 2;
 const MAX_ROWS = 8;
 
 interface DraftLocalFile extends LocalFileReference {
@@ -83,11 +84,12 @@ function base64Blob(encoded: string, mimeType: string): Blob {
 	return new Blob([bytes], { type: mimeType });
 }
 
-function autosize(el: HTMLTextAreaElement | null): void {
+function autosize(el: HTMLTextAreaElement | null, minimumRows = 1): void {
 	if (!el) return;
 	el.style.height = "0px";
+	const min = Math.max(1, minimumRows) * LINE_PX + PAD_Y;
 	const max = MAX_ROWS * LINE_PX + PAD_Y;
-	el.style.height = `${Math.max(LINE_PX + PAD_Y, Math.min(el.scrollHeight, max))}px`;
+	el.style.height = `${Math.max(min, Math.min(el.scrollHeight, max))}px`;
 	el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
 }
 
@@ -100,6 +102,11 @@ function autosize(el: HTMLTextAreaElement | null): void {
 export function shouldSubmitOnEnter(e: KeyboardEvent<HTMLTextAreaElement>, composing: boolean): boolean {
 	if (e.key !== "Enter" || e.shiftKey) return false;
 	return !(e.nativeEvent.isComposing || composing);
+}
+
+/** Only the native shell can stat host paths; browser-managed media is already validated by Core. */
+export function shouldCheckDraftAttachmentPaths(fileCount: number, localFilesAvailable: boolean): boolean {
+	return fileCount > 0 && localFilesAvailable;
 }
 
 /**
@@ -207,7 +214,6 @@ export function Composer({
 	const [attachmentError, setAttachmentError] = useState<string | null>(null);
 	const [attachmentHint, setAttachmentHint] = useState<string | null>(null);
 	const [attachmentBusy, setAttachmentBusy] = useState(false);
-	const [dragActive, setDragActive] = useState(false);
 	const [annotation, setAnnotation] = useState<PendingAnnotation | null>(null);
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
@@ -232,7 +238,7 @@ export function Composer({
 	}, [client, snapshot.models, snapshot.state]);
 
 	useLayoutEffect(() => {
-		autosize(taRef.current);
+		autosize(taRef.current, COMPOSER_MIN_ROWS);
 	}, [text, uiRequest?.reqId]);
 
 	useEffect(() => {
@@ -363,19 +369,84 @@ export function Composer({
 		void importManagedImage(image, name);
 	};
 
-	const onDrop = (event: DragEvent<HTMLDivElement>): void => {
-		event.preventDefault();
-		setDragActive(false);
-		if (!canPrompt) return;
-		const paths = Array.from(event.dataTransfer.files)
-			.map(file => (file as File & { path?: string }).path)
-			.filter((path): path is string => typeof path === "string" && path.length > 0);
-		if (paths.length === 0) {
-			setAttachmentError("无法取得拖入文件的源路径，请使用上方的图片或文档按钮选择。");
-			return;
-		}
-		addLocalPaths(paths);
-	};
+	const receiveDroppedFiles = useCallback(
+		(dataTransfer: DataTransfer): void => {
+			if (!canPrompt) return;
+			const paths = Array.from(dataTransfer.files)
+				.map(file => (file as File & { path?: string }).path)
+				.filter((path): path is string => typeof path === "string" && path.length > 0);
+			if (paths.length === 0 && !desktop.localFilesAvailable) {
+				setAttachmentError("无法取得拖入文件的源路径，请使用上方的图片或文档按钮选择。");
+				return;
+			}
+			addLocalPaths(paths);
+		},
+		[addLocalPaths, canPrompt, desktop.localFilesAvailable],
+	);
+
+	useEffect(() => {
+		const app = taRef.current?.closest<HTMLElement>(".sh-app");
+		if (!app) return;
+		let dragDepth = 0;
+
+		const isFileDrag = (event: globalThis.DragEvent): boolean => event.dataTransfer?.types.includes("Files") === true;
+		const isDropSurface = (target: EventTarget | null): boolean => {
+			if (!(target instanceof Element)) return false;
+			if (target.closest(".sh-app") !== app) return false;
+			return (
+				target.closest(
+					".sh-header-bar, .sh-rail, .sh-rail-backdrop, .sh-settings-backdrop, .sh-shot-backdrop, .ag-drawer, .ag-drawer-backdrop",
+				) === null
+			);
+		};
+		const showDropSurface = (active: boolean): void => {
+			app.classList.toggle("sh-session-drag-active", active);
+		};
+		const deactivate = (): void => {
+			dragDepth = 0;
+			showDropSurface(false);
+		};
+		const onDragEnter = (event: globalThis.DragEvent): void => {
+			if (!isFileDrag(event)) return;
+			dragDepth += 1;
+			showDropSurface(canPrompt && isDropSurface(event.target));
+		};
+		const onDragOver = (event: globalThis.DragEvent): void => {
+			if (!isFileDrag(event)) return;
+			const accepted = canPrompt && isDropSurface(event.target);
+			showDropSurface(accepted);
+			if (!isDropSurface(event.target)) return;
+			event.preventDefault();
+			if (event.dataTransfer) event.dataTransfer.dropEffect = accepted ? "link" : "none";
+		};
+		const onDragLeave = (event: globalThis.DragEvent): void => {
+			if (!isFileDrag(event)) return;
+			dragDepth = Math.max(0, dragDepth - 1);
+			if (dragDepth === 0) showDropSurface(false);
+		};
+		const onDrop = (event: globalThis.DragEvent): void => {
+			if (!isFileDrag(event)) return;
+			// A drop ends the browser drag session even when it lands on an excluded
+			// header/rail surface. Reset the depth unconditionally so the next OS drag
+			// cannot inherit a stale counter and leave the overlay stuck on screen.
+			deactivate();
+			if (!isDropSurface(event.target)) return;
+			event.preventDefault();
+			if (event.dataTransfer) receiveDroppedFiles(event.dataTransfer);
+		};
+
+		app.addEventListener("dragenter", onDragEnter);
+		app.addEventListener("dragover", onDragOver);
+		app.addEventListener("dragleave", onDragLeave);
+		app.addEventListener("drop", onDrop);
+		return () => {
+			deactivate();
+			app.removeEventListener("dragenter", onDragEnter);
+			app.removeEventListener("dragover", onDragOver);
+			app.removeEventListener("dragleave", onDragLeave);
+			app.removeEventListener("drop", onDrop);
+		};
+	}, [canPrompt, receiveDroppedFiles]);
 
 	const removeAttachment = useCallback((path: string): void => {
 		setLocalFiles(current => current.filter(file => file.path !== path));
@@ -389,7 +460,12 @@ export function Composer({
 		setAttachmentBusy(true);
 		setAttachmentError(null);
 		try {
-			if (localFiles.length > 0) {
+			// Native file references live on the same machine as the C++ shell and
+			// can be checked immediately before send. In a browser, however, pasted
+			// images have already been persisted by Core and the returned path is a
+			// host path; asking the browser fallback to stat it yields an empty result
+			// and used to mark every managed image as missing.
+			if (shouldCheckDraftAttachmentPaths(localFiles.length, desktop.localFilesAvailable)) {
 				const statuses = await desktop.checkAttachments(localFiles.map(file => file.path));
 				const availability = new Map(statuses.map(status => [comparableLocalPath(status.path), status.available]));
 				const checked = localFiles.map(file => ({
@@ -493,21 +569,7 @@ export function Composer({
 
 	return (
 		<>
-			<div
-				className={`sh-composer${dragActive ? " sh-composer-drag-active" : ""}`}
-				onDragEnter={event => {
-					if (event.dataTransfer.types.includes("Files")) setDragActive(true);
-				}}
-				onDragOver={event => {
-					if (!event.dataTransfer.types.includes("Files")) return;
-					event.preventDefault();
-					event.dataTransfer.dropEffect = "link";
-				}}
-				onDragLeave={event => {
-					if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false);
-				}}
-				onDrop={onDrop}
-			>
+			<div className="sh-composer">
 				<div className="sh-composer-card">
 					{desktop.localFilesAvailable && (
 						<div className="sh-composer-tools" aria-label="附件工具">
@@ -607,7 +669,7 @@ export function Composer({
 									: "waiting for session…"
 						}
 						disabled={!canPrompt}
-						rows={1}
+						rows={COMPOSER_MIN_ROWS}
 						spellCheck={false}
 					/>
 					<div className="sh-composer-controls">

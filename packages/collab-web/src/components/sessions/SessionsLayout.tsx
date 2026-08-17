@@ -13,6 +13,8 @@ export interface SessionsLayoutProps {
 	activeSessionId?: string | null;
 	/** A create/resume request is awaiting its directed ctrl-session reply. */
 	pending?: boolean;
+	/** A create request specifically is awaiting its directed ctrl-session reply. */
+	creating?: boolean;
 	/** Active session view, or null for the empty state (no session open). */
 	content: ReactNode;
 	onOpenSession(id: string): void;
@@ -31,6 +33,7 @@ export function SessionsLayout({
 	client,
 	activeSessionId = null,
 	pending = false,
+	creating = false,
 	content,
 	onOpenSession,
 	onNewSession,
@@ -150,6 +153,7 @@ export function SessionsLayout({
 					snapshot={snap}
 					activeSessionId={activeSessionId}
 					pending={pending}
+					creating={creating}
 					onOpenSettings={() => setSettingsOpen(true)}
 					onOpenSession={openSession}
 					onNewSession={newSession}
@@ -171,7 +175,7 @@ export function SessionsLayout({
 					<Menu size={18} aria-hidden="true" />
 				</button>
 				<div className="sh-control-view">
-					{content ?? <SessionsEmpty snap={snap} pending={pending} onNewSession={newSession} />}
+					{content ?? <SessionsEmpty snap={snap} creating={creating} onNewSession={newSession} />}
 				</div>
 			</div>
 		</div>
@@ -180,11 +184,11 @@ export function SessionsLayout({
 
 function SessionsEmpty({
 	snap,
-	pending,
+	creating,
 	onNewSession,
 }: {
 	snap: ControlSnapshot;
-	pending: boolean;
+	creating: boolean;
 	onNewSession(): void;
 }): ReactNode {
 	const { readOnly, phase } = snap;
@@ -216,10 +220,10 @@ function SessionsEmpty({
 							type="button"
 							className="sh-btn sh-sessions-new-button"
 							onClick={onNewSession}
-							disabled={pending}
+							disabled={creating}
 						>
 							<Plus size={15} aria-hidden="true" />
-							{pending ? "Starting…" : "New session"}
+							{creating ? "Starting…" : "New session"}
 						</button>
 					)}
 				</div>

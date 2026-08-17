@@ -9,6 +9,7 @@
 
 #include <d2d1.h>
 #include <dwrite.h>
+#include <oleidl.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -39,11 +40,12 @@ public:
 	void SetOcclusion(std::optional<RECT> occlusion);
 	void SetVisible(bool visible);
 	void SetDarkTheme(bool dark);
+	void SetFileDropEnabled(bool enabled);
 	[[nodiscard]] bool IsVisible() const noexcept { return visible_; }
 	[[nodiscard]] HWND Window() const noexcept { return window_; }
 
 	void Clear();
-	void ReplaceSnapshot(std::vector<NativeTranscriptRow> rows);
+	void ReplaceSnapshot(std::vector<NativeTranscriptRow> rows, bool reset_to_tail = false);
 	void Upsert(NativeTranscriptRow row);
 	void Remove(std::string_view id);
 	void SetHistoryState(std::size_t remaining, bool loading);
@@ -96,8 +98,13 @@ private:
 	void DiscardDeviceResources();
 	void ApplyOcclusion();
 	void Paint();
+	[[nodiscard]] bool MeasureRowHeight(std::size_t index, float viewport_width);
+	void StabilizeVisibleLayout(float viewport_width, float viewport_height);
+	void StabilizeCurrentViewport();
 	void DrawRow(std::size_t index, float viewport_width);
 	void DrawOverlayControls(float viewport_width, float viewport_height);
+	void DrawFileDropOverlay(float viewport_width, float viewport_height);
+	void SetFileDragActive(bool active);
 	void DrawMessageActions(
 		const NativeTranscriptRow& row,
 		const NativeTranscriptBubbleLayout& bubble_layout,
@@ -167,8 +174,12 @@ private:
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> jump_button_hot_brush_;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> jump_button_border_brush_;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> jump_button_shadow_brush_;
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> drop_overlay_brush_;
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> drop_accent_brush_;
 	Microsoft::WRL::ComPtr<IDWriteTextFormat> text_format_;
 	Microsoft::WRL::ComPtr<IDWriteTextFormat> label_format_;
+	Microsoft::WRL::ComPtr<IDWriteTextFormat> drop_hint_format_;
+	Microsoft::WRL::ComPtr<IDropTarget> drop_target_;
 	std::unordered_map<std::string, TextLayout> layout_cache_;
 	std::unordered_map<std::string, MediaEntry> media_cache_;
 	std::unordered_set<std::string> requested_media_;
@@ -198,6 +209,8 @@ private:
 	bool scrollbar_dragging_ = false;
 	bool jump_button_hovered_ = false;
 	bool jump_button_pressed_ = false;
+	bool file_drop_enabled_ = false;
+	bool file_drag_active_ = false;
 	std::uint64_t media_use_clock_ = 0;
 	bool stick_to_bottom_ = true;
 	bool visible_ = false;

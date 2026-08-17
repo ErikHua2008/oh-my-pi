@@ -28,7 +28,7 @@ using Microsoft::WRL::ComPtr;
 constexpr wchar_t kScreenshotWindowClass[] = L"OmpScreenshotOverlayWindow";
 constexpr UINT kCommitTextMessage = WM_APP + 77;
 constexpr LONG kMinimumSelection = 8;
-constexpr int kResizeHandleHitRadius = 12;
+constexpr int kResizeHandleHitRadius = 16;
 constexpr std::size_t kMaximumCapturePixels = 64'000'000;
 
 enum class AnnotationTool {
@@ -253,7 +253,16 @@ public:
 			Height(virtual_bounds_), SWP_SHOWWINDOW);
 		SetForegroundWindow(window_);
 		SetFocus(window_);
-		SetCapture(window_);
+		// The overlay already covers the complete virtual desktop. Capturing the
+		// mouse before a button is pressed can make the first drag arrive as a
+		// click after focus transfers from WebView2 (notably over RDP or mixed
+		// DPI displays), which leaves the auto-detected window as a fixed region.
+		// Capture only from OnLeftDown while a real interaction is active.
+		POINT cursor{};
+		if (GetCursorPos(&cursor)) {
+			last_mouse_ = POINT{cursor.x - virtual_bounds_.left, cursor.y - virtual_bounds_.top};
+			UpdateHoverWindow(last_mouse_);
+		}
 
 		MSG message{};
 		while (running_) {
@@ -579,7 +588,7 @@ private:
 		Rectangle(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
 
 		if (handles) {
-			const LONG radius = Scale(5);
+			const LONG radius = Scale(7);
 			const LONG center_x = bounds.left + Width(bounds) / 2;
 			const LONG center_y = bounds.top + Height(bounds) / 2;
 			const std::array<POINT, 8> points{{
@@ -1154,12 +1163,33 @@ private:
 		std::uint8_t* bits = nullptr;
 		HBITMAP bitmap = CreateDIBSection(capture_dc_, &info, DIB_RGB_COLORS, reinterpret_cast<void**>(&bits), nullptr, 0);
 		if (bitmap == nullptr || bits == nullptr) {
+			if (bitmap != nullptr) DeleteObject(bitmap);
 			DeleteDC(result_dc);
 			output.error = L"无法分配截图内存";
 			return output;
 		}
 		HGDIOBJ previous = SelectObject(result_dc, bitmap);
-		BitBlt(result_dc, 0, 0, output.width, output.height, capture_dc_, selection_.left, selection_.top, SRCCOPY);
+		if (previous == nullptr || previous == HGDI_ERROR) {
+			DeleteObject(bitmap);
+			DeleteDC(result_dc);
+			output.error = L"无法创建截图缓冲区";
+			return output;
+		}
+		if (!BitBlt(result_dc,
+				0,
+				0,
+				output.width,
+				output.height,
+				capture_dc_,
+				selection_.left,
+				selection_.top,
+				SRCCOPY)) {
+			SelectObject(result_dc, previous);
+			DeleteObject(bitmap);
+			DeleteDC(result_dc);
+			output.error = L"无法读取选中的截图区域";
+			return output;
+		}
 		SetViewportOrgEx(result_dc, -selection_.left, -selection_.top, nullptr);
 		DrawAnnotations(result_dc);
 		SetViewportOrgEx(result_dc, 0, 0, nullptr);

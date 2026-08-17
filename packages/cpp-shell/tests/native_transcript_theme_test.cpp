@@ -12,6 +12,7 @@ OMP_TEST("native transcript light palette follows Web semantic colors") {
 	OMP_CHECK(palette.user.rgb == 0xCBE7FF);
 	OMP_CHECK(palette.user_foreground.rgb == 0x0F1115);
 	OMP_CHECK(palette.assistant.rgb == 0xF1F2F4);
+	OMP_CHECK(palette.accent.rgb == 0x4176E6);
 }
 
 OMP_TEST("native transcript dark palette remains distinct and readable") {
@@ -22,6 +23,7 @@ OMP_TEST("native transcript dark palette remains distinct and readable") {
 	OMP_CHECK(dark.user.rgb == 0x65C98F);
 	OMP_CHECK(dark.user_foreground.rgb == 0x102419);
 	OMP_CHECK(dark.assistant.rgb == 0x2C2C2E);
+	OMP_CHECK(dark.accent.rgb == 0x679EFE);
 	OMP_CHECK(dark.background.rgb != light.background.rgb);
 	OMP_CHECK(dark.primary.rgb != light.primary.rgb);
 }

@@ -71,6 +71,7 @@ private:
 	bool native_transcript_preferred_ = true;
 	bool agent_rail_open_ = false;
 	bool agent_rail_docked_ = false;
+	bool backdrop_enabled_ = false;
 	bool dark_theme_ = false;
 	bool screenshot_active_ = false;
 	bool tray_added_ = false;

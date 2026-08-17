@@ -57,6 +57,8 @@ export interface TranscriptProps {
 	historyRemaining?: number;
 	historyLoading?: boolean;
 	onLoadEarlier?: () => void;
+	/** Whether the active session can accept local file references. */
+	fileDropEnabled?: boolean;
 }
 
 function Row({
@@ -888,6 +890,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		historyRemaining = 0,
 		historyLoading = false,
 		onLoadEarlier,
+		fileDropEnabled = false,
 	} = props;
 	const theme = useSystemTheme();
 	const presentedStream = usePresentedAssistantStream(stream, streamDone, sessionId);
@@ -1086,6 +1089,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 						width: Math.round(bounds.width * scale),
 						height: Math.round(bounds.height * scale),
 						theme,
+						dropEnabled: fileDropEnabled,
 					})
 					.then(enabled => {
 						if (!enabled && !disposed) setNativeEnabled(false);
@@ -1105,7 +1109,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			window.visualViewport?.removeEventListener("resize", syncBounds);
 			void desktop.hideNativeTranscript();
 		};
-	}, [desktop, nativeEnabled, nativeSurfaceBlocked, theme]);
+	}, [desktop, fileDropEnabled, nativeEnabled, nativeSurfaceBlocked, theme]);
 
 	useLayoutEffect(() => {
 		const restore = restoreScrollRef.current;

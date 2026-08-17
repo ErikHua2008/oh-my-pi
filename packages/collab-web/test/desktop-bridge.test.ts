@@ -95,9 +95,16 @@ describe("DesktopBridge native transcript capability", () => {
 			}),
 		).toBe(true);
 		expect(await bridge.upsertNativeTranscript(row)).toBe(true);
-		expect(await bridge.setNativeTranscriptViewport({ x: 10, y: 20, width: 700, height: 500, theme: "light" })).toBe(
-			true,
-		);
+		expect(
+			await bridge.setNativeTranscriptViewport({
+				x: 10,
+				y: 20,
+				width: 700,
+				height: 500,
+				theme: "light",
+				dropEnabled: true,
+			}),
+		).toBe(true);
 		expect(await bridge.setNativeTranscriptOcclusion({ x: 20, y: 300, width: 260, height: 180 })).toBe(true);
 		expect(await bridge.setNativeTranscriptOcclusion(null)).toBe(true);
 		await bridge.removeNativeTranscript("entry-1");
@@ -118,6 +125,19 @@ describe("DesktopBridge native transcript capability", () => {
 			"native_transcript_hide",
 			"native_transcript_take_events",
 		]);
+		expect(calls[2]).toEqual({
+			command: "native_transcript_viewport",
+			args: {
+				viewport: {
+					x: 10,
+					y: 20,
+					width: 700,
+					height: 500,
+					theme: "light",
+					dropEnabled: true,
+				},
+			},
+		});
 	});
 
 	it("falls back to Web transcript after the native host rejects a command", async () => {
@@ -130,6 +150,7 @@ describe("DesktopBridge native transcript capability", () => {
 			width: 100,
 			height: 100,
 			theme: "dark",
+			dropEnabled: false,
 		});
 		expect(enabled).toBe(false);
 		expect(bridge.nativeTranscriptAvailable).toBe(false);

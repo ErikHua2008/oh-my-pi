@@ -5,7 +5,11 @@
 #include "omp_shell/native_transcript_reasoning.h"
 #include "omp_shell/text_utils.h"
 
+#include <shellapi.h>
+#include <shlobj.h>
+
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -43,6 +47,145 @@ constexpr UINT kContextCopy = 1;
 constexpr UINT kContextSelectAll = 2;
 constexpr NativeMenuItem kContextCopyItem{L"复制\tCtrl+C", false, false};
 constexpr NativeMenuItem kContextSelectAllItem{L"全选\tCtrl+A", false, false};
+
+class NativeTranscriptDropTarget final : public IDropTarget {
+public:
+	NativeTranscriptDropTarget(
+		HWND target, std::function<bool()> enabled_handler, std::function<void(bool)> state_handler)
+		: target_(target), enabled_handler_(std::move(enabled_handler)), state_handler_(std::move(state_handler)) {}
+
+	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
+		if (value == nullptr) return E_POINTER;
+		*value = nullptr;
+		if (iid == IID_IUnknown || iid == IID_IDropTarget) {
+			*value = static_cast<IDropTarget*>(this);
+			AddRef();
+			return S_OK;
+		}
+		return E_NOINTERFACE;
+	}
+
+	ULONG STDMETHODCALLTYPE AddRef() override { return ++reference_count_; }
+
+	ULONG STDMETHODCALLTYPE Release() override {
+		const ULONG remaining = --reference_count_;
+		if (remaining == 0) delete this;
+		return remaining;
+	}
+
+	HRESULT STDMETHODCALLTYPE DragEnter(
+		IDataObject* data_object, DWORD, POINTL, DWORD* effect) override {
+		has_files_ = enabled_handler_() && HasFileDrop(data_object);
+		state_handler_(has_files_);
+		SetEffect(effect, has_files_ && enabled_handler_());
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* effect) override {
+		SetEffect(effect, has_files_ && enabled_handler_());
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE DragLeave() override {
+		has_files_ = false;
+		state_handler_(false);
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE Drop(IDataObject* data_object, DWORD, POINTL, DWORD* effect) override {
+		const bool forwarded = has_files_ && enabled_handler_() && ForwardFileDrop(data_object);
+		has_files_ = false;
+		state_handler_(false);
+		SetEffect(effect, forwarded);
+		return S_OK;
+	}
+
+private:
+	[[nodiscard]] static FORMATETC FileDropFormat() noexcept {
+		return {static_cast<CLIPFORMAT>(CF_HDROP), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+	}
+
+	[[nodiscard]] static bool HasFileDrop(IDataObject* data_object) noexcept {
+		if (data_object == nullptr) return false;
+		FORMATETC format = FileDropFormat();
+		return data_object->QueryGetData(&format) == S_OK;
+	}
+
+	static void SetEffect(DWORD* effect, bool accepted) noexcept {
+		if (effect == nullptr) return;
+		if (!accepted) {
+			*effect = DROPEFFECT_NONE;
+			return;
+		}
+		const DWORD allowed = *effect;
+		*effect = (allowed & DROPEFFECT_LINK) != 0
+			? DROPEFFECT_LINK
+			: ((allowed & DROPEFFECT_COPY) != 0 ? DROPEFFECT_COPY : DROPEFFECT_NONE);
+	}
+
+	[[nodiscard]] bool ForwardFileDrop(IDataObject* data_object) const {
+		if (data_object == nullptr || !IsWindow(target_)) return false;
+		FORMATETC format = FileDropFormat();
+		STGMEDIUM medium{};
+		if (FAILED(data_object->GetData(&format, &medium))) {
+			return false;
+		}
+		if (medium.tymed != TYMED_HGLOBAL || medium.hGlobal == nullptr) {
+			ReleaseStgMedium(&medium);
+			return false;
+		}
+
+		const HDROP source = reinterpret_cast<HDROP>(medium.hGlobal);
+		const UINT count = std::min<UINT>(DragQueryFileW(source, 0xFFFFFFFFU, nullptr, 0), 32U);
+		std::vector<std::wstring> paths;
+		paths.reserve(count);
+		std::size_t character_count = 1;
+		for (UINT index = 0; index < count; ++index) {
+			const UINT length = DragQueryFileW(source, index, nullptr, 0);
+			if (length == 0) continue;
+			std::wstring path(static_cast<std::size_t>(length) + 1, L'\0');
+			if (DragQueryFileW(source, index, path.data(), length + 1) == 0) continue;
+			path.resize(length);
+			character_count += path.size() + 1;
+			paths.push_back(std::move(path));
+		}
+		ReleaseStgMedium(&medium);
+		if (paths.empty()) return false;
+
+		const std::size_t bytes = sizeof(DROPFILES) + character_count * sizeof(wchar_t);
+		HGLOBAL forwarded = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
+		if (forwarded == nullptr) return false;
+		auto* data = static_cast<std::byte*>(GlobalLock(forwarded));
+		if (data == nullptr) {
+			GlobalFree(forwarded);
+			return false;
+		}
+		auto* descriptor = reinterpret_cast<DROPFILES*>(data);
+		descriptor->pFiles = sizeof(DROPFILES);
+		descriptor->fWide = TRUE;
+		auto* cursor = reinterpret_cast<wchar_t*>(data + sizeof(DROPFILES));
+		for (const std::wstring& path : paths) {
+			std::memcpy(cursor, path.c_str(), (path.size() + 1) * sizeof(wchar_t));
+			cursor += path.size() + 1;
+		}
+		*cursor = L'\0';
+		GlobalUnlock(forwarded);
+
+		const HWND parent = GetParent(target_);
+		if (!IsWindow(parent)) {
+			GlobalFree(forwarded);
+			return false;
+		}
+		SendMessageW(parent, WM_DROPFILES, reinterpret_cast<WPARAM>(forwarded), 0);
+		return true;
+	}
+
+	std::atomic<ULONG> reference_count_{1};
+	HWND target_ = nullptr;
+	std::function<bool()> enabled_handler_;
+	std::function<void(bool)> state_handler_;
+	bool has_files_ = false;
+};
 
 [[nodiscard]] D2D1_COLOR_F Color(std::uint32_t rgb, float alpha = 1.0F) noexcept {
 	return D2D1::ColorF(
@@ -150,7 +293,6 @@ bool NativeTranscriptView::Create(HWND parent, HINSTANCE instance) {
 	if (window_ == nullptr) {
 		return false;
 	}
-
 	HRESULT result = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d_factory_.ReleaseAndGetAddressOf());
 	if (SUCCEEDED(result)) {
 		result = DWriteCreateFactory(
@@ -183,6 +325,17 @@ bool NativeTranscriptView::Create(HWND parent, HINSTANCE instance) {
 			L"zh-CN",
 			label_format_.ReleaseAndGetAddressOf());
 	}
+	if (SUCCEEDED(result)) {
+		result = dwrite_factory_->CreateTextFormat(
+			L"Segoe UI",
+			nullptr,
+			DWRITE_FONT_WEIGHT_SEMI_BOLD,
+			DWRITE_FONT_STYLE_NORMAL,
+			DWRITE_FONT_STRETCH_NORMAL,
+			13.0F,
+			L"zh-CN",
+			drop_hint_format_.ReleaseAndGetAddressOf());
+	}
 	if (FAILED(result)) {
 		Destroy();
 		return false;
@@ -201,10 +354,25 @@ bool NativeTranscriptView::Create(HWND parent, HINSTANCE instance) {
 	}
 	text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
 	text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+	drop_hint_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+	drop_hint_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+	auto* target = new NativeTranscriptDropTarget(
+		window_, [this] { return file_drop_enabled_; }, [this](bool active) { SetFileDragActive(active); });
+	if (SUCCEEDED(RegisterDragDrop(window_, target))) {
+		drop_target_.Attach(target);
+	} else {
+		target->Release();
+		DragAcceptFiles(window_, TRUE);
+	}
 	return true;
 }
 
 void NativeTranscriptView::Destroy() {
+	SetFileDragActive(false);
+	if (window_ != nullptr && drop_target_ != nullptr) {
+		static_cast<void>(RevokeDragDrop(window_));
+	}
+	drop_target_.Reset();
 	if (window_ != nullptr) {
 		KillTimer(window_, kScrollbarHideTimer);
 		KillTimer(window_, kMessageCopyFeedbackTimer);
@@ -215,6 +383,7 @@ void NativeTranscriptView::Destroy() {
 	requested_media_.clear();
 	text_format_.Reset();
 	label_format_.Reset();
+	drop_hint_format_.Reset();
 	dwrite_factory_.Reset();
 	wic_factory_.Reset();
 	d2d_factory_.Reset();
@@ -236,7 +405,12 @@ void NativeTranscriptView::SetBounds(const RECT& bounds) {
 	SetWindowPos(
 		window_, HWND_TOP, bounds.left, bounds.top, width, height, SWP_NOACTIVATE | (visible_ ? SWP_SHOWWINDOW : 0));
 	ApplyOcclusion();
-	ScrollTo(scroll_offset_, false);
+	if (stick_to_bottom_) {
+		StabilizeCurrentViewport();
+		ScrollToBottom();
+	} else {
+		ScrollTo(scroll_offset_, false);
+	}
 }
 
 void NativeTranscriptView::SetOcclusion(std::optional<RECT> occlusion) {
@@ -302,6 +476,11 @@ void NativeTranscriptView::SetDarkTheme(bool dark) {
 	}
 }
 
+void NativeTranscriptView::SetFileDropEnabled(bool enabled) {
+	file_drop_enabled_ = enabled;
+	if (!enabled) SetFileDragActive(false);
+}
+
 void NativeTranscriptView::Clear() {
 	if (window_ != nullptr) {
 		KillTimer(window_, kScrollbarHideTimer);
@@ -337,8 +516,19 @@ void NativeTranscriptView::Clear() {
 	}
 }
 
-void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows) {
-	const bool keep_tail = stick_to_bottom_ || scroll_offset_ >= MaximumScroll() - 2;
+void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows, bool reset_to_tail) {
+	const bool keep_tail = reset_to_tail || stick_to_bottom_ || scroll_offset_ >= MaximumScroll() - 2;
+	if (reset_to_tail) {
+		stick_to_bottom_ = true;
+		scroll_offset_ = 0;
+		expanded_rows_.clear();
+		expanded_process_items_.clear();
+		process_detail_scroll_offsets_.clear();
+		ClearSelection();
+		hovered_message_action_.reset();
+		copied_row_id_.clear();
+		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
+	}
 	model_.ReplaceSnapshot(std::move(rows));
 	for (auto it = expanded_rows_.begin(); it != expanded_rows_.end();) {
 		if (model_.IndexOf(*it)) {
@@ -373,12 +563,12 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 		copied_row_id_.clear();
 		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
 	}
-	layout_cache_.clear();
 	if (keep_tail) {
 		ScrollToBottom();
 	} else {
 		ScrollTo(scroll_offset_, false);
 	}
+	if (keep_tail) StabilizeCurrentViewport();
 	UpdateScrollInfo();
 	if (window_ != nullptr) {
 		InvalidateRect(window_, nullptr, FALSE);
@@ -511,6 +701,16 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		return 0;
 	case WM_ERASEBKGND:
 		return 1;
+	case WM_DROPFILES:
+		// The native transcript is a child HWND layered over the WebView. Forward
+		// its HDROP to App so dropping anywhere in the conversation surface uses
+		// the same path-reference flow as the composer.
+		if (!file_drop_enabled_) {
+			DragFinish(reinterpret_cast<HDROP>(wparam));
+			return 0;
+		}
+		SendMessageW(GetParent(window_), WM_DROPFILES, wparam, lparam);
+		return 0;
 	case WM_MEASUREITEM:
 		if (MeasureNativeMenuItem(window_, reinterpret_cast<MEASUREITEMSTRUCT*>(lparam))) {
 			return TRUE;
@@ -928,6 +1128,14 @@ HRESULT NativeTranscriptView::EnsureDeviceResources() {
 		result = render_target_->CreateSolidColorBrush(
 			Color(palette.jump_button_shadow), jump_button_shadow_brush_.ReleaseAndGetAddressOf());
 	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(
+			Color(palette.background.rgb, 0.88F), drop_overlay_brush_.ReleaseAndGetAddressOf());
+	}
+	if (SUCCEEDED(result)) {
+		result = render_target_->CreateSolidColorBrush(
+			Color(palette.accent), drop_accent_brush_.ReleaseAndGetAddressOf());
+	}
 	if (FAILED(result)) {
 		DiscardDeviceResources();
 	}
@@ -940,6 +1148,8 @@ void NativeTranscriptView::DiscardDeviceResources() {
 		media.bitmap.Reset();
 	}
 	jump_button_shadow_brush_.Reset();
+	drop_accent_brush_.Reset();
+	drop_overlay_brush_.Reset();
 	jump_button_border_brush_.Reset();
 	jump_button_hot_brush_.Reset();
 	jump_button_brush_.Reset();
@@ -960,10 +1170,11 @@ void NativeTranscriptView::Paint() {
 	BeginPaint(window_, &paint);
 	if (SUCCEEDED(EnsureDeviceResources())) {
 		const NativeTranscriptPalette palette = NativeTranscriptPaletteFor(dark_theme_);
+		const D2D1_SIZE_F size = render_target_->GetSize();
+		StabilizeVisibleLayout(size.width, size.height);
 		render_target_->BeginDraw();
 		render_target_->SetTransform(D2D1::Matrix3x2F::Identity());
 		render_target_->Clear(Color(palette.background));
-		const D2D1_SIZE_F size = render_target_->GetSize();
 		layout_changed_during_paint_ = false;
 		const auto range = model_.VisibleRange(
 			scroll_offset_, static_cast<std::int64_t>(std::ceil(size.height)), kOverscan);
@@ -972,6 +1183,7 @@ void NativeTranscriptView::Paint() {
 		}
 		TrimLayoutCache(range);
 		DrawOverlayControls(size.width, size.height);
+		DrawFileDropOverlay(size.width, size.height);
 		const HRESULT result = render_target_->EndDraw();
 		if (result == D2DERR_RECREATE_TARGET) {
 			DiscardDeviceResources();
@@ -986,6 +1198,108 @@ void NativeTranscriptView::Paint() {
 		}
 	}
 	EndPaint(window_, &paint);
+}
+
+bool NativeTranscriptView::MeasureRowHeight(std::size_t index, float viewport_width) {
+	if (index >= model_.Size()) return false;
+	const NativeTranscriptRow& row = model_.RowAt(index);
+	const bool user = row.kind == NativeTranscriptRowKind::User;
+	const bool message = user || row.kind == NativeTranscriptRowKind::Assistant ||
+		row.kind == NativeTranscriptRowKind::Plan;
+	const bool collapsed_expandable = IsCollapsedExpandable(row);
+	const bool structured_process =
+		row.kind == NativeTranscriptRowKind::Reasoning && !row.process_items.empty() && !collapsed_expandable;
+
+	std::int32_t measured_height = row.height;
+	if (collapsed_expandable) {
+		measured_height = kCollapsedExpandableHeight;
+	} else if (structured_process) {
+		float structured_height = 2.0F * kRowVerticalPadding + kLabelHeight + kTextGap;
+		for (const NativeTranscriptProcessItem& item : row.process_items) {
+			structured_height += kProcessItemHeaderHeight + kProcessItemGap;
+			if (expanded_process_items_.contains(ProcessItemKey(row, item))) {
+				structured_height += kProcessDetailGap + kProcessDetailHeight;
+			}
+		}
+		measured_height = static_cast<std::int32_t>(std::ceil(structured_height));
+	} else {
+		const float horizontal_padding = NativeTranscriptOuterHorizontalPadding(viewport_width) + kRowContentInset;
+		const float available_width = std::max(80.0F, viewport_width - 2.0F * horizontal_padding);
+		const float layout_width = message ? NativeTranscriptBubbleMaxContentWidth(viewport_width, user) : available_width;
+		TextLayout* layout = GetTextLayout(row, layout_width);
+		if (layout == nullptr) return false;
+		if (message) {
+			measured_height = static_cast<std::int32_t>(ComputeNativeTranscriptBubbleLayout(viewport_width,
+				user,
+				layout->measured_width,
+				layout->measured_height,
+				row.media_ids.size(),
+				!row.time_label.empty())
+				.row_height);
+		} else {
+			measured_height = static_cast<std::int32_t>(std::ceil(
+				layout->measured_height + 2.0F * kRowVerticalPadding + kLabelHeight + kTextGap +
+				static_cast<float>(row.media_ids.size()) * (kThumbnailHeight + kMediaGap)));
+		}
+	}
+
+	if (row.height == measured_height) return false;
+	static_cast<void>(model_.UpdateHeight(row.id, measured_height));
+	return true;
+}
+
+void NativeTranscriptView::StabilizeVisibleLayout(float viewport_width, float viewport_height) {
+	if (!stick_to_bottom_ || model_.Empty() || viewport_width < 1.0F || viewport_height < 1.0F) return;
+	constexpr int kMaximumLayoutPasses = 12;
+	const std::int64_t height = static_cast<std::int64_t>(std::ceil(viewport_height));
+	for (int pass = 0; pass < kMaximumLayoutPasses; ++pass) {
+		scroll_offset_ = std::max<std::int64_t>(0, model_.TotalHeight() - height);
+		const NativeTranscriptVisibleRange range = model_.VisibleRange(scroll_offset_, height, kOverscan);
+		bool changed = false;
+		for (std::size_t index = range.first; index < range.last; ++index) {
+			changed = MeasureRowHeight(index, viewport_width) || changed;
+		}
+		if (!changed) break;
+	}
+	scroll_offset_ = std::max<std::int64_t>(0, model_.TotalHeight() - height);
+	UpdateScrollInfo();
+}
+
+void NativeTranscriptView::StabilizeCurrentViewport() {
+	if (window_ == nullptr) return;
+	RECT client{};
+	GetClientRect(window_, &client);
+	const float scale = DpiScale();
+	StabilizeVisibleLayout(
+		static_cast<float>(std::max(0L, client.right - client.left)) / scale,
+		static_cast<float>(std::max(0L, client.bottom - client.top)) / scale);
+}
+
+void NativeTranscriptView::SetFileDragActive(bool active) {
+	if (file_drag_active_ == active) return;
+	file_drag_active_ = active;
+	if (window_ != nullptr) InvalidateRect(window_, nullptr, FALSE);
+}
+
+void NativeTranscriptView::DrawFileDropOverlay(float viewport_width, float viewport_height) {
+	if (!file_drag_active_ || drop_overlay_brush_ == nullptr || drop_accent_brush_ == nullptr ||
+		drop_hint_format_ == nullptr || viewport_width < 48.0F || viewport_height < 48.0F) {
+		return;
+	}
+	constexpr float inset = 16.0F;
+	const D2D1_RECT_F bounds =
+		D2D1::RectF(inset, 10.0F, viewport_width - inset, viewport_height - 2.0F);
+	const D2D1_ROUNDED_RECT surface = D2D1::RoundedRect(bounds, 10.0F, 10.0F);
+	render_target_->FillRoundedRectangle(surface, drop_overlay_brush_.Get());
+	render_target_->DrawRoundedRectangle(surface, drop_accent_brush_.Get(), 1.5F);
+	constexpr std::wstring_view hint = L"松开以引用本机文件";
+	render_target_->DrawTextW(
+		hint.data(),
+		static_cast<UINT32>(hint.size()),
+		drop_hint_format_.Get(),
+		D2D1::RectF(bounds.left + 20.0F, bounds.top, bounds.right - 20.0F, bounds.bottom),
+		drop_accent_brush_.Get(),
+		D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {

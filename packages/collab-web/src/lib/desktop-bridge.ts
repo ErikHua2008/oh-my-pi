@@ -78,6 +78,7 @@ export interface DesktopNativeTranscriptViewport {
 	width: number;
 	height: number;
 	theme: DesktopTheme;
+	dropEnabled: boolean;
 }
 
 export interface DesktopNativeTranscriptOcclusion {

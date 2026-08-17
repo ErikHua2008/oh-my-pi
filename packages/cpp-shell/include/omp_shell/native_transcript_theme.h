@@ -18,6 +18,7 @@ struct NativeTranscriptPalette final {
 	NativeTranscriptColor assistant;
 	NativeTranscriptColor line;
 	NativeTranscriptColor selection;
+	NativeTranscriptColor accent;
 	NativeTranscriptColor scrollbar;
 	NativeTranscriptColor scrollbar_hot;
 	NativeTranscriptColor jump_button;
@@ -39,6 +40,7 @@ struct NativeTranscriptPalette final {
 			{0x2C2C2E, 1.0F}, // neutral OMP bubble
 			{0x313133, 1.0F}, // --border composited over --bg
 			{0x679EFE, 0.35F},
+			{0x679EFE, 1.0F}, // --accent
 			{0xADB2B8, 0.50F},
 			{0xCFD3D6, 0.78F},
 			{0x2C2C2E, 0.98F},
@@ -56,6 +58,7 @@ struct NativeTranscriptPalette final {
 		{0xF1F2F4, 1.0F}, // neutral OMP bubble
 		{0xE5E5E5, 1.0F}, // --border composited over --bg
 		{0x4176E6, 0.25F},
+		{0x4176E6, 1.0F}, // --accent
 		{0x81858C, 0.48F},
 		{0x61666B, 0.74F},
 		{0xFFFFFF, 0.98F},

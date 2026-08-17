@@ -44,6 +44,15 @@ OMP_TEST("screenshot selection keeps a forgiving resize target outside the visib
 	OMP_CHECK(HitTestScreenshotSelection(selection, POINT{711, 511}, 12) == ScreenshotResizeHandle::BottomRight);
 }
 
+OMP_TEST("screenshot selection keeps resize edges ahead of the movable interior") {
+	constexpr RECT selection{100, 100, 700, 500};
+	OMP_CHECK(HitTestScreenshotSelection(selection, POINT{115, 300}, 16) == ScreenshotResizeHandle::Left);
+	OMP_CHECK(HitTestScreenshotSelection(selection, POINT{685, 300}, 16) == ScreenshotResizeHandle::Right);
+	OMP_CHECK(HitTestScreenshotSelection(selection, POINT{400, 116}, 16) == ScreenshotResizeHandle::Top);
+	OMP_CHECK(HitTestScreenshotSelection(selection, POINT{400, 484}, 16) == ScreenshotResizeHandle::Bottom);
+	OMP_CHECK(HitTestScreenshotSelection(selection, POINT{117, 300}, 16) == ScreenshotResizeHandle::Move);
+}
+
 OMP_TEST("screenshot selection movement stays on the virtual desktop") {
 	constexpr RECT viewport{-1920, 0, 1920, 1080};
 	RequireRect(MoveScreenshotRect(RECT{-100, 100, 500, 500}, POINT{-2500, 900}, viewport), -1920, 680, -1320, 1080);
