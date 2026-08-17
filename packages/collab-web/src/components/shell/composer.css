@@ -221,6 +221,12 @@
 	padding-left: 5px;
 }
 
+.sh-composer-attachment-preview {
+	width: 84px;
+	padding: 5px;
+	gap: 0;
+}
+
 .sh-composer-attachment-image > img {
 	width: 72px;
 	height: 54px;
@@ -230,8 +236,20 @@
 	border-radius: 6px;
 }
 
-.sh-composer-attachment-image .sh-composer-attachment-name {
-	max-width: 150px;
+.sh-composer-attachment-preview > button {
+	position: absolute;
+	right: 8px;
+	color: rgba(255, 255, 255, 0.92);
+	background: rgba(18, 18, 20, 0.72);
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.24);
+}
+
+.sh-composer-attachment-preview > .sh-composer-attachment-remove {
+	top: 8px;
+}
+
+.sh-composer-attachment-preview > .sh-composer-attachment-edit {
+	bottom: 8px;
 }
 
 .sh-composer-attachment button,

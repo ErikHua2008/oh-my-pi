@@ -14,6 +14,15 @@ export interface DesktopAttachmentStatus {
 	available: boolean;
 }
 
+export interface DesktopScreenshotCapture {
+	mimeType: "image/png";
+	name: string;
+	data: string;
+	width: number;
+	height: number;
+	clipboardWritten: boolean;
+}
+
 export type DesktopAttachmentKind = "image" | "document";
 
 export type DesktopNativeTranscriptKind =
@@ -135,8 +144,8 @@ export interface DesktopBridge {
 	removeProject(path: string): Promise<void>;
 	revealPath(path: string): Promise<void>;
 	pickAttachments(kind?: DesktopAttachmentKind): Promise<readonly string[]>;
-	/** Launch the Windows screen snip overlay; the result remains in the clipboard. */
-	startScreenshot(): Promise<boolean>;
+	/** Run the native QQ/WeCom-style capture overlay and return its annotated PNG. */
+	startScreenshot(): Promise<DesktopScreenshotCapture | null>;
 	/** Receive absolute host paths from native shell drag-and-drop. */
 	subscribeDroppedFiles(handler: (paths: readonly string[]) => void): () => void;
 	checkAttachments(paths: readonly string[]): Promise<readonly DesktopAttachmentStatus[]>;
@@ -180,6 +189,39 @@ function parseNativeTranscriptEvent(value: unknown): DesktopNativeTranscriptEven
 		return { type, rowId: record.rowId };
 	}
 	return null;
+}
+
+function parseScreenshotCapture(value: unknown): DesktopScreenshotCapture | null {
+	if (value === null || typeof value !== "object") return null;
+	const record = value as Record<string, unknown>;
+	if (record.completed !== true) return null;
+	if (
+		record.mimeType !== "image/png" ||
+		typeof record.name !== "string" ||
+		record.name.length === 0 ||
+		record.name.length > 260 ||
+		typeof record.data !== "string" ||
+		record.data.length === 0 ||
+		record.data.length > 34 * 1024 * 1024 ||
+		typeof record.width !== "number" ||
+		!Number.isInteger(record.width) ||
+		record.width <= 0 ||
+		record.width > 100_000 ||
+		typeof record.height !== "number" ||
+		!Number.isInteger(record.height) ||
+		record.height <= 0 ||
+		record.height > 100_000
+	) {
+		throw new Error("native screenshot response is invalid");
+	}
+	return {
+		mimeType: "image/png",
+		name: record.name,
+		data: record.data,
+		width: record.width,
+		height: record.height,
+		clipboardWritten: record.clipboardWritten === true,
+	};
 }
 
 export type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
@@ -257,7 +299,7 @@ function browserBridge(): DesktopBridge {
 			return [];
 		},
 		async startScreenshot() {
-			return false;
+			return null;
 		},
 		subscribeDroppedFiles(_handler: (paths: readonly string[]) => void) {
 			return () => {};
@@ -453,14 +495,10 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 			}
 		},
 		async startScreenshot() {
-			if (localFileAuthorization === "denied") return false;
-			try {
-				await invoke<unknown>("screenshot_start");
-				localFileAuthorization = "authorized";
-				return true;
-			} catch {
-				return false;
-			}
+			if (localFileAuthorization === "denied") return null;
+			const result = parseScreenshotCapture(await invoke<unknown>("screenshot_start"));
+			localFileAuthorization = "authorized";
+			return result;
 		},
 		subscribeDroppedFiles(handler: (paths: readonly string[]) => void) {
 			if (typeof window === "undefined") return () => {};

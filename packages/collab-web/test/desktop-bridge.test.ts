@@ -31,7 +31,7 @@ describe("DesktopBridge browser fallback", () => {
 		await expect(desktopBridge.removeProject("/work/project")).resolves.toBeUndefined();
 		await expect(desktopBridge.revealPath("/work/project")).resolves.toBeUndefined();
 		expect(await desktopBridge.pickAttachments()).toEqual([]);
-		expect(await desktopBridge.startScreenshot()).toBe(false);
+		expect(await desktopBridge.startScreenshot()).toBeNull();
 		expect(desktopBridge.subscribeDroppedFiles(() => {})).toBeFunction();
 		expect(await desktopBridge.checkAttachments(["/work/file.txt"])).toEqual([]);
 		expect(await desktopBridge.loadSessionPreferences()).toBeNull();
@@ -154,7 +154,17 @@ describe("DesktopBridge Tauri capability probe", () => {
 		const invoke: TauriInvoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
 			calls.push({ command, args });
 			if (command === "attachment_pick") return ["C:\\work\\a.txt", "C:\\work\\b.png"] as T;
-			if (command === "screenshot_start") return null as T;
+			if (command === "screenshot_start") {
+				return {
+					completed: true,
+					clipboardWritten: true,
+					mimeType: "image/png",
+					name: "screenshot.png",
+					data: "iVBORw==",
+					width: 640,
+					height: 480,
+				} as T;
+			}
 			if (command === "attachment_status") {
 				const paths = args?.paths as readonly string[];
 				return paths.map(path => ({ path, available: !path.endsWith("64.txt") })) as T;
@@ -165,7 +175,14 @@ describe("DesktopBridge Tauri capability probe", () => {
 
 		expect(bridge.localFilesAvailable).toBe(true);
 		expect(await bridge.pickAttachments("image")).toEqual(["C:\\work\\a.txt", "C:\\work\\b.png"]);
-		expect(await bridge.startScreenshot()).toBe(true);
+		expect(await bridge.startScreenshot()).toEqual({
+			clipboardWritten: true,
+			mimeType: "image/png",
+			name: "screenshot.png",
+			data: "iVBORw==",
+			width: 640,
+			height: 480,
+		});
 		const paths = Array.from({ length: 65 }, (_, index) => `C:\\work\\${index}.txt`);
 		const statuses = await bridge.checkAttachments(paths);
 
@@ -180,6 +197,20 @@ describe("DesktopBridge Tauri capability probe", () => {
 		expect(calls[0]?.args).toEqual({ kind: "image" });
 		expect(calls[2]?.args?.paths).toHaveLength(64);
 		expect(calls[3]?.args?.paths).toHaveLength(1);
+	});
+
+	it("distinguishes a cancelled native capture from a malformed screenshot response", async () => {
+		const cancelled = createDesktopBridge(async <T>(command: string): Promise<T> => {
+			if (command === "screenshot_start") return { completed: false } as T;
+			throw new Error(`unexpected command ${command}`);
+		});
+		expect(await cancelled.startScreenshot()).toBeNull();
+
+		const malformed = createDesktopBridge(async <T>(command: string): Promise<T> => {
+			if (command === "screenshot_start") return { completed: true, mimeType: "image/png", data: "" } as T;
+			throw new Error(`unexpected command ${command}`);
+		});
+		await expect(malformed.startScreenshot()).rejects.toThrow("native screenshot response is invalid");
 	});
 
 	it("disables only local-file commands when an older native host rejects them", async () => {

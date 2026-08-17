@@ -3,6 +3,7 @@
 #include "omp_shell/native_menu.h"
 #include "omp_shell/path_utils.h"
 #include "omp_shell/resource.h"
+#include "omp_shell/screenshot_overlay.h"
 #include "omp_shell/text_utils.h"
 #include "omp_shell/window_layout.h"
 
@@ -326,6 +327,35 @@ std::vector<std::uint8_t> DecodeBase64(std::string_view encoded) {
 	decoded.resize(byte_count);
 	return decoded;
 }
+
+std::string EncodeBase64(const std::vector<std::uint8_t>& bytes) {
+	static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string encoded;
+	encoded.reserve(((bytes.size() + 2) / 3) * 4);
+	for (std::size_t offset = 0; offset < bytes.size(); offset += 3) {
+		const std::uint32_t first = bytes[offset];
+		const std::uint32_t second = offset + 1 < bytes.size() ? bytes[offset + 1] : 0;
+		const std::uint32_t third = offset + 2 < bytes.size() ? bytes[offset + 2] : 0;
+		const std::uint32_t value = (first << 16U) | (second << 8U) | third;
+		encoded.push_back(alphabet[(value >> 18U) & 0x3FU]);
+		encoded.push_back(alphabet[(value >> 12U) & 0x3FU]);
+		encoded.push_back(offset + 1 < bytes.size() ? alphabet[(value >> 6U) & 0x3FU] : '=');
+		encoded.push_back(offset + 2 < bytes.size() ? alphabet[value & 0x3FU] : '=');
+	}
+	return encoded;
+}
+
+class ScopedFlag final {
+public:
+	explicit ScopedFlag(bool& flag) : flag_(flag) { flag_ = true; }
+	~ScopedFlag() { flag_ = false; }
+
+	ScopedFlag(const ScopedFlag&) = delete;
+	ScopedFlag& operator=(const ScopedFlag&) = delete;
+
+private:
+	bool& flag_;
+};
 
 } // namespace
 
@@ -1508,12 +1538,33 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			return;
 		}
 		if (command == "screenshot_start") {
-			const HINSTANCE opened = ShellExecuteW(window_, L"open", L"ms-screenclip:", nullptr, nullptr, SW_SHOWNORMAL);
-			if (reinterpret_cast<INT_PTR>(opened) <= 32) {
-				reply(false, nullptr, "Windows screen snip is unavailable");
+			if (screenshot_active_) {
+				reply(false, nullptr, "a screenshot capture is already active");
 				return;
 			}
-			reply(true, nullptr);
+			ScopedFlag screenshot_guard(screenshot_active_);
+			ScreenshotCaptureResult capture = ScreenshotOverlay::Capture(instance_, window_);
+			if (!capture.error.empty()) {
+				reply(false, nullptr, WideToUtf8(capture.error));
+				return;
+			}
+			if (!capture.completed) {
+				reply(true, Json{{"completed", false}});
+				return;
+			}
+			constexpr std::size_t kMaximumScreenshotBytes = 24 * 1024 * 1024;
+			if (capture.png.empty() || capture.png.size() > kMaximumScreenshotBytes) {
+				reply(false, nullptr, "the selected screenshot exceeds the 24 MB image limit");
+				return;
+			}
+			reply(true,
+				Json{{"completed", true},
+					{"clipboardWritten", capture.clipboard_written},
+					{"mimeType", "image/png"},
+					{"name", "screenshot-" + std::to_string(GetTickCount64()) + ".png"},
+					{"width", capture.width},
+					{"height", capture.height},
+					{"data", EncodeBase64(capture.png)}});
 			return;
 		}
 		if (command == "attachment_status") {

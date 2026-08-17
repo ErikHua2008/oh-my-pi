@@ -79,6 +79,7 @@ add_library(
 	src/native_transcript_controls.cpp
 	src/native_transcript_model.cpp
 	src/path_utils.cpp
+	src/screenshot_geometry.cpp
 	src/text_utils.cpp
 	src/window_layout.cpp
 	src/windows_command_line.cpp
@@ -100,6 +101,7 @@ add_executable(
 	src/main.cpp
 	src/native_menu.cpp
 	src/native_transcript_view.cpp
+	src/screenshot_overlay.cpp
 	src/omp_shell.rc
 	src/webview_host.cpp
 )
@@ -121,6 +123,7 @@ target_link_libraries(
 		d2d1
 		dwmapi
 		dwrite
+		gdi32
 		ole32
 		shell32
 		shlwapi

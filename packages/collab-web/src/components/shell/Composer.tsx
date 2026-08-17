@@ -76,6 +76,13 @@ function blobBase64(image: Blob): Promise<string> {
 	return promise;
 }
 
+function base64Blob(encoded: string, mimeType: string): Blob {
+	const binary = atob(encoded);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+	return new Blob([bytes], { type: mimeType });
+}
+
 function autosize(el: HTMLTextAreaElement | null): void {
 	if (!el) return;
 	el.style.height = "0px";
@@ -201,7 +208,6 @@ export function Composer({
 	const [attachmentHint, setAttachmentHint] = useState<string | null>(null);
 	const [attachmentBusy, setAttachmentBusy] = useState(false);
 	const [dragActive, setDragActive] = useState(false);
-	const [screenshotPending, setScreenshotPending] = useState(false);
 	const [annotation, setAnnotation] = useState<PendingAnnotation | null>(null);
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
@@ -266,15 +272,6 @@ export function Composer({
 		[addLocalPaths, canPrompt, desktop],
 	);
 
-	useEffect(() => {
-		if (!screenshotPending) return;
-		const timer = setTimeout(() => {
-			setScreenshotPending(false);
-			setAttachmentHint(current => (current?.startsWith("截图完成后") ? null : current));
-		}, 120_000);
-		return () => clearTimeout(timer);
-	}, [screenshotPending]);
-
 	const pickAttachments = useCallback(
 		async (kind: "image" | "document"): Promise<void> => {
 			setAttachmentBusy(true);
@@ -338,15 +335,22 @@ export function Composer({
 	);
 
 	const startScreenshot = useCallback(async (): Promise<void> => {
+		if (attachmentBusy) return;
+		setAttachmentBusy(true);
 		setAttachmentError(null);
-		const started = await desktop.startScreenshot();
-		if (!started) {
-			setAttachmentError("Windows 截图工具不可用。");
-			return;
+		setAttachmentHint(null);
+		try {
+			const capture = await desktop.startScreenshot();
+			if (!capture) return;
+			setAttachmentBusy(false);
+			await importManagedImage(base64Blob(capture.data, capture.mimeType), capture.name);
+			if (!capture.clipboardWritten) setAttachmentHint("截图已加入输入框，但系统剪贴板暂时被其他程序占用。");
+		} catch (error) {
+			setAttachmentError(error instanceof Error ? error.message : "截图失败。");
+		} finally {
+			setAttachmentBusy(false);
 		}
-		setScreenshotPending(true);
-		setAttachmentHint("截图完成后按 Ctrl+V 粘贴；粘贴后可画直线或箭头。");
-	}, [desktop]);
+	}, [attachmentBusy, desktop, importManagedImage]);
 
 	const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
 		const item = Array.from(event.clipboardData.items).find(
@@ -356,12 +360,6 @@ export function Composer({
 		if (!image) return;
 		event.preventDefault();
 		const name = image.name || `clipboard-${Date.now()}.png`;
-		if (screenshotPending) {
-			setScreenshotPending(false);
-			setAttachmentHint(null);
-			setAnnotation({ image });
-			return;
-		}
 		void importManagedImage(image, name);
 	};
 
@@ -548,7 +546,7 @@ export function Composer({
 							{localFiles.map(file => (
 								<div
 									key={file.path}
-									className={`sh-composer-attachment sh-composer-attachment-${file.type}${file.available ? "" : " sh-composer-attachment-missing"}`}
+									className={`sh-composer-attachment sh-composer-attachment-${file.type}${file.preview ? " sh-composer-attachment-preview" : ""}${file.available ? "" : " sh-composer-attachment-missing"}`}
 									title={file.path}
 								>
 									{file.preview ? (
@@ -558,7 +556,7 @@ export function Composer({
 									) : (
 										<File size={13} aria-hidden="true" />
 									)}
-									<span className="sh-composer-attachment-name">{file.name}</span>
+									{!file.preview && <span className="sh-composer-attachment-name">{file.name}</span>}
 									{!file.available && <span className="sh-composer-attachment-status">unavailable</span>}
 									{file.editBlob && (
 										<button
@@ -566,6 +564,7 @@ export function Composer({
 											onClick={() => {
 												if (file.editBlob) setAnnotation({ image: file.editBlob, replacePath: file.path });
 											}}
+											className="sh-composer-attachment-edit"
 											title="标注图片"
 											aria-label={`标注 ${file.name}`}
 										>
@@ -575,6 +574,7 @@ export function Composer({
 									<button
 										type="button"
 										onClick={() => removeAttachment(file.path)}
+										className="sh-composer-attachment-remove"
 										title={`remove ${file.name}`}
 										aria-label={`remove ${file.name}`}
 									>

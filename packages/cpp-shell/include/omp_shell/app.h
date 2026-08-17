@@ -72,6 +72,7 @@ private:
 	bool agent_rail_open_ = false;
 	bool agent_rail_docked_ = false;
 	bool dark_theme_ = false;
+	bool screenshot_active_ = false;
 	bool tray_added_ = false;
 	bool exiting_ = false;
 	bool shutting_down_ = false;

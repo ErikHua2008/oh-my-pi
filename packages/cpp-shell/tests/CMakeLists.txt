@@ -10,6 +10,7 @@ add_executable(
 	native_transcript_reasoning_test.cpp
 	native_transcript_theme_test.cpp
 	path_utils_test.cpp
+	screenshot_geometry_test.cpp
 	test_main.cpp
 	text_utils_test.cpp
 	window_layout_test.cpp
