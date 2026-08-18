@@ -48,16 +48,58 @@ import {
 interface ExistingForeignImport {
 	info: SessionInfo;
 	path: string;
+	archived: boolean;
 	managed?: ManagedSession;
 	inspection: ReturnType<typeof inspectForeignSessionImport>;
 }
 
+function entryPayloadFingerprint(entry: SessionEntry): string {
+	const payload = { ...entry } as unknown as Record<string, unknown>;
+	delete payload.id;
+	delete payload.parentId;
+	return JSON.stringify(payload);
+}
+
+function remapEntryReferences(entry: SessionEntry, originalId: string, remappedIds: ReadonlyMap<string, string>): void {
+	const remap = (id: string): string => (id === originalId ? id : (remappedIds.get(id) ?? id));
+	if (entry.parentId) entry.parentId = remap(entry.parentId);
+	if (entry.type === "compaction") entry.firstKeptEntryId = remap(entry.firstKeptEntryId);
+	else if (entry.type === "branch_summary") entry.fromId = remap(entry.fromId);
+	else if (entry.type === "label") entry.targetId = remap(entry.targetId);
+}
+
+function applyCollisionId(entry: SessionEntry, originalId: string, assignedId: string): void {
+	entry.id = assignedId;
+	if (entry.type === "compaction" && entry.firstKeptEntryId === originalId) {
+		entry.firstKeptEntryId = assignedId;
+	}
+}
+
 function chronologicalMergeEntries(entryGroups: readonly (readonly SessionEntry[])[]): SessionEntry[] {
-	const byId = new Map<string, { entry: SessionEntry; ordinal: number }>();
+	const byId = new Map<string, { entry: SessionEntry; fingerprint?: string; ordinal: number }>();
+	const remappedIds = new Map<string, string>();
 	let ordinal = 0;
 	for (const entries of entryGroups) {
-		for (const entry of entries) {
-			if (!byId.has(entry.id)) byId.set(entry.id, { entry: structuredClone(entry), ordinal });
+		for (const sourceEntry of entries) {
+			const originalId = sourceEntry.id;
+			const entry = structuredClone(sourceEntry);
+			remapEntryReferences(entry, originalId, remappedIds);
+			let fingerprint: string | undefined;
+			let assignedId = originalId;
+			let suffix = 2;
+			let existing = byId.get(assignedId);
+			while (existing) {
+				fingerprint ??= entryPayloadFingerprint(entry);
+				existing.fingerprint ??= entryPayloadFingerprint(existing.entry);
+				if (existing.fingerprint === fingerprint) break;
+				assignedId = `${originalId}-import-${suffix++}`;
+				existing = byId.get(assignedId);
+			}
+			if (!existing) {
+				applyCollisionId(entry, originalId, assignedId);
+				byId.set(assignedId, { entry, fingerprint, ordinal });
+			}
+			remappedIds.set(originalId, assignedId);
 			ordinal++;
 		}
 	}
@@ -137,6 +179,8 @@ export class SessionRegistry {
 	readonly #active = new Map<string, ManagedSession>();
 	/** Streaming subscriptions per session id, removed on drop/shutdown. */
 	readonly #streamingUnsubs = new Map<string, () => void>();
+	/** Per-source import tails prevent two control peers from creating or rewriting the same logical chat concurrently. */
+	readonly #foreignImportTails = new Map<string, Promise<void>>();
 	readonly #listeners = new Set<() => void>();
 
 	constructor(options: SessionRegistryOptions) {
@@ -201,9 +245,14 @@ export class SessionRegistry {
 		}));
 	}
 
-	async #findExistingForeignImports(source: "codex", sourceId: string): Promise<ExistingForeignImport[]> {
+	async #collectForeignImports(
+		source: "codex",
+		sourceId: string,
+		root: string,
+		archived: boolean,
+	): Promise<ExistingForeignImport[]> {
 		const storage = new FileSessionStorage();
-		const infos = await listAllSessions(storage, getSessionsDir(this.#agentDir));
+		const infos = await listAllSessions(storage, root);
 		const matches: ExistingForeignImport[] = [];
 		const seenPaths = new Set<string>();
 		for (const info of infos) {
@@ -211,15 +260,29 @@ export class SessionRegistry {
 			const pathKey = comparableFilePath(sessionPath);
 			if (seenPaths.has(pathKey)) continue;
 			seenPaths.add(pathKey);
-			const managed = this.#active.get(info.id);
+			const active = this.#active.get(info.id);
+			const managedPath = active?.sessionManager.getSessionFile();
+			const managed =
+				active && managedPath && comparableFilePath(managedPath) === pathKey && active.state === "running"
+					? active
+					: undefined;
 			const entries = managed
 				? managed.sessionManager.getEntries()
 				: ((await loadEntriesFromFile(sessionPath, storage)).slice(1) as SessionEntry[]);
 			const inspection = inspectForeignSessionImport(entries, source, sourceId);
-			if (inspection.matched) matches.push({ info, path: sessionPath, managed, inspection });
+			if (inspection.matched) matches.push({ info, path: sessionPath, archived, managed, inspection });
 		}
 		matches.sort((left, right) => left.info.created.getTime() - right.info.created.getTime());
 		return matches;
+	}
+
+	async #findExistingForeignImports(source: "codex", sourceId: string): Promise<ExistingForeignImport[]> {
+		const active = await this.#collectForeignImports(source, sourceId, getSessionsDir(this.#agentDir), false);
+		// Superseded copies intentionally remain in Archived chats as recovery
+		// points. Ignore them while an active linked chat exists, but recover the
+		// oldest archived original when the user re-imports after archiving it.
+		if (active.length > 0) return active;
+		return await this.#collectForeignImports(source, sourceId, this.#archivedSessionsRoot, true);
 	}
 
 	async #deactivateImportedSession(candidate: ExistingForeignImport): Promise<void> {
@@ -249,9 +312,33 @@ export class SessionRegistry {
 	}
 
 	async #archiveSupersededImport(candidate: ExistingForeignImport): Promise<void> {
+		if (candidate.archived) return;
 		const projectDirectory = path.basename(path.dirname(candidate.path));
 		const targetPath = path.join(this.#archivedSessionsRoot, projectDirectory, path.basename(candidate.path));
 		await moveSessionWithArtifacts(candidate.path, targetPath);
+	}
+
+	async #reactivateArchivedImport(candidate: ExistingForeignImport, cwd: string): Promise<ExistingForeignImport> {
+		if (!candidate.archived) return candidate;
+		const targetDirectory = sameProjectPath(cwd, this.#cwd)
+			? this.#sessionDir
+			: SessionManager.getDefaultSessionDir(cwd, this.#agentDir);
+		const targetPath = path.join(targetDirectory, path.basename(candidate.path));
+		await moveSessionWithArtifacts(candidate.path, targetPath);
+		return { ...candidate, info: { ...candidate.info, path: targetPath }, path: targetPath, archived: false };
+	}
+
+	async #serializeForeignImport<T>(key: string, operation: () => Promise<T>): Promise<T> {
+		const previous = this.#foreignImportTails.get(key);
+		const gate = Promise.withResolvers<void>();
+		this.#foreignImportTails.set(key, gate.promise);
+		if (previous) await previous;
+		try {
+			return await operation();
+		} finally {
+			gate.resolve();
+			if (this.#foreignImportTails.get(key) === gate.promise) this.#foreignImportTails.delete(key);
+		}
 	}
 
 	async #refreshForeignImport(
@@ -265,29 +352,40 @@ export class SessionRegistry {
 				throw new Error("wait for the current response to finish before updating this imported conversation");
 			}
 		}
-		for (const candidate of candidates) await this.#deactivateImportedSession(candidate);
-
-		const primary = candidates[0]!;
-		const primaryManager = await SessionManager.open(primary.path, undefined, undefined, {
-			initialCwd: selected.cwd,
-			suppressBreadcrumb: true,
-		});
+		const primaryCandidate = candidates[0]!;
 		let provisioned = false;
 		let refreshed: SessionManager | undefined;
+		let primaryManager: SessionManager | undefined;
 		try {
+			// Parse the source completely before stopping a currently usable OMP
+			// session. A truncated or concurrently replaced rollout must leave the
+			// existing chat live and untouched.
 			refreshed = await store.load(selected);
-			appendForeignSessionImportMarker(refreshed, selected);
+			// The rollout header is authoritative. Codex's SQLite/index row can lag
+			// behind a project move while the transcript already records the new cwd.
+			const sourceCwd = refreshed.getCwd();
+			if (!(await directoryExists(sourceCwd))) {
+				throw new Error(`the original Codex project folder is no longer available: ${sourceCwd}`);
+			}
+			appendForeignSessionImportMarker(refreshed, { ...selected, cwd: sourceCwd });
 			const refreshedInspection = inspectForeignSessionImport(refreshed.getEntries(), selected.source, selected.id);
+
+			for (const candidate of candidates) await this.#deactivateImportedSession(candidate);
+			const primary = await this.#reactivateArchivedImport(primaryCandidate, sourceCwd);
+			primaryManager = await SessionManager.open(primary.path, undefined, undefined, {
+				initialCwd: sourceCwd,
+				suppressBreadcrumb: true,
+			});
 			const resolvedInspections: ReturnType<typeof inspectForeignSessionImport>[] = [];
 			for (const candidate of candidates) {
-				if (candidate === primary) {
+				if (candidate === primaryCandidate) {
 					resolvedInspections.push(
 						inspectForeignSessionImport(primaryManager.getEntries(), selected.source, selected.id),
 					);
 					continue;
 				}
 				const manager = await SessionManager.open(candidate.path, undefined, undefined, {
-					initialCwd: selected.cwd,
+					initialCwd: sourceCwd,
 					suppressBreadcrumb: true,
 				});
 				try {
@@ -334,13 +432,13 @@ export class SessionRegistry {
 			const titleSource = keepUserTitle ? currentState.titleSource : sourceState.titleSource;
 			primaryManager.restoreState({
 				...currentState,
-				cwd: selected.cwd,
+				cwd: sourceCwd,
 				sessionName,
 				titleSource,
 				titleUpdatedAt: keepUserTitle ? currentState.titleUpdatedAt : sourceState.titleUpdatedAt,
 				header: {
 					...currentState.header,
-					cwd: selected.cwd,
+					cwd: sourceCwd,
 					title: sessionName,
 					titleSource,
 				},
@@ -362,7 +460,7 @@ export class SessionRegistry {
 			};
 		} finally {
 			await refreshed?.close();
-			if (!provisioned) await primaryManager.close();
+			if (!provisioned) await primaryManager?.close();
 		}
 	}
 
@@ -373,6 +471,18 @@ export class SessionRegistry {
 		sourcePath: string,
 		archived = false,
 		merge = false,
+	): Promise<ImportedForeignSession | ForeignSessionImportConflict> {
+		return await this.#serializeForeignImport(`${source}\0${sourceId}`, async () => {
+			return await this.#importForeignSessionUnlocked(source, sourceId, sourcePath, archived, merge);
+		});
+	}
+
+	async #importForeignSessionUnlocked(
+		source: "codex",
+		sourceId: string,
+		sourcePath: string,
+		archived: boolean,
+		merge: boolean,
 	): Promise<ImportedForeignSession | ForeignSessionImportConflict> {
 		const store = createForeignSessionStore(source);
 		const requestedCollection = await store.list({ archived });

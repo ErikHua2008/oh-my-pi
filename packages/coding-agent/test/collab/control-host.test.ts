@@ -328,6 +328,19 @@ function spyOnCreateAgentSession(): { created: Array<{ id: string; session: Agen
 	return { created };
 }
 
+async function importedCodexManager(info: ForeignSessionInfo, content = "Imported prompt"): Promise<SessionManager> {
+	const manager = SessionManager.inMemory(info.cwd);
+	manager.ingestReplicatedEntry({
+		type: "message",
+		id: "codex-user-audit",
+		parentId: null,
+		timestamp: "2026-08-01T00:00:00.000Z",
+		message: { role: "user", content, timestamp: Date.parse("2026-08-01T00:00:00.000Z") },
+	});
+	await manager.setSessionName(info.title ?? "Imported Codex chat", "auto", "codex-import");
+	return manager;
+}
+
 // ── Suite ──────────────────────────────────────────────────────────────────
 
 describe("control room + session registry (multi-session core)", () => {
@@ -714,15 +727,21 @@ describe("control room + session registry (multi-session core)", () => {
 				timestamp: "2026-08-01T00:00:00.000Z",
 				message: { role: "user", content: "Codex first", timestamp: Date.parse("2026-08-01T00:00:00.000Z") },
 			});
-			if (sourceRevision >= 2) {
-				manager.ingestReplicatedEntry({
-					type: "message",
-					id: "codex-user-2",
-					parentId: "codex-user-1",
-					timestamp: "2026-08-03T00:00:00.000Z",
-					message: { role: "user", content: "Codex later", timestamp: Date.parse("2026-08-03T00:00:00.000Z") },
-				});
-			}
+			const branchTimestamp = sourceRevision >= 2 ? "2026-08-03T00:00:00.000Z" : "2026-08-01T12:00:00.000Z";
+			manager.ingestReplicatedEntry({
+				type: "message",
+				// CodexSessionStore currently derives ids from converted ordinals.
+				// After a rollback, the same id can legitimately identify a new
+				// replacement entry; the merge must retain both branch histories.
+				id: "codex-user-branch",
+				parentId: "codex-user-1",
+				timestamp: branchTimestamp,
+				message: {
+					role: "user",
+					content: sourceRevision >= 2 ? "Codex replacement branch" : "Codex original branch",
+					timestamp: Date.parse(branchTimestamp),
+				},
+			});
 			await manager.setSessionName(info.title ?? "Merged Codex chat");
 			return manager;
 		});
@@ -757,7 +776,12 @@ describe("control room + session registry (multi-session core)", () => {
 				if (entry.type !== "message" || entry.message.role !== "user") return "";
 				return typeof entry.message.content === "string" ? entry.message.content : "";
 			});
-		expect(messages).toEqual(["Codex first", "OMP continuation", "Codex later"]);
+		expect(messages).toEqual([
+			"Codex first",
+			"Codex original branch",
+			"OMP continuation",
+			"Codex replacement branch",
+		]);
 		expect((await harness.registry.list()).filter(session => session.id === first.id)).toHaveLength(1);
 	});
 
@@ -800,6 +824,167 @@ describe("control room + session registry (multi-session core)", () => {
 		expect(imported.title).toBe("Moved to archive");
 		expect(listSpy).toHaveBeenCalledWith({ archived: false });
 		expect(listSpy).toHaveBeenCalledWith({ archived: true });
+	});
+
+	it("serializes concurrent imports of the same Codex conversation under one OMP id", async () => {
+		harness = await setupHarness();
+		spyOnCreateAgentSession();
+		const sourceProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-concurrent-project-"));
+		const sourcePath = path.join(harness.sessionDir, "codex-concurrent-rollout.jsonl");
+		await fs.writeFile(sourcePath, "source stays untouched\n");
+		const source: ForeignSessionInfo = {
+			source: "codex",
+			id: "codex-concurrent-source-id",
+			path: sourcePath,
+			cwd: sourceProject,
+			title: "Concurrent import",
+			archived: false,
+			created: new Date("2026-08-01T00:00:00.000Z"),
+			modified: new Date("2026-08-02T00:00:00.000Z"),
+		};
+		vi.spyOn(CodexSessionStore.prototype, "list").mockResolvedValue([source]);
+		vi.spyOn(CodexSessionStore.prototype, "load").mockImplementation(async info => {
+			await Bun.sleep(25);
+			return await importedCodexManager(info);
+		});
+
+		const [left, right] = await Promise.all([
+			harness.registry.importForeignSession("codex", source.id, source.path, false),
+			harness.registry.importForeignSession("codex", source.id, source.path, false),
+		]);
+		if ("kind" in left || "kind" in right) throw new Error("concurrent imports unexpectedly conflicted");
+
+		expect(right.id).toBe(left.id);
+		expect((await harness.registry.list()).filter(session => session.title === source.title)).toHaveLength(1);
+		const targetDir = SessionManager.getDefaultSessionDir(sourceProject, harness.agentDir);
+		expect((await fs.readdir(targetDir)).filter(file => file.endsWith(".jsonl"))).toHaveLength(1);
+	});
+
+	it("reactivates the original OMP chat when an archived import is imported again", async () => {
+		harness = await setupHarness();
+		spyOnCreateAgentSession();
+		const sourceProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-omp-archived-project-"));
+		const sourcePath = path.join(harness.sessionDir, "codex-omp-archived-rollout.jsonl");
+		await fs.writeFile(sourcePath, "source stays untouched\n");
+		const source: ForeignSessionInfo = {
+			source: "codex",
+			id: "codex-omp-archived-source-id",
+			path: sourcePath,
+			cwd: sourceProject,
+			title: "Archived OMP import",
+			archived: false,
+			created: new Date("2026-08-01T00:00:00.000Z"),
+			modified: new Date("2026-08-02T00:00:00.000Z"),
+		};
+		vi.spyOn(CodexSessionStore.prototype, "list").mockResolvedValue([source]);
+		vi.spyOn(CodexSessionStore.prototype, "load").mockImplementation(info => importedCodexManager(info));
+
+		const first = await harness.registry.importForeignSession("codex", source.id, source.path, false);
+		if ("kind" in first) throw new Error("first import unexpectedly conflicted");
+		await harness.registry.archiveSession(first.id);
+		expect((await harness.registry.listArchivedSessions()).map(session => session.id)).toContain(first.id);
+
+		const importedAgain = await harness.registry.importForeignSession("codex", source.id, source.path, false);
+		if ("kind" in importedAgain) throw new Error("archived re-import unexpectedly conflicted");
+
+		expect(importedAgain.id).toBe(first.id);
+		expect((await harness.registry.listArchivedSessions()).map(session => session.id)).not.toContain(first.id);
+		expect((await harness.registry.list()).filter(session => session.id === first.id)).toHaveLength(1);
+	});
+
+	it("keeps the existing imported chat live when refreshing the Codex rollout fails", async () => {
+		harness = await setupHarness();
+		spyOnCreateAgentSession();
+		const sourceProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-refresh-failure-project-"));
+		const sourcePath = path.join(harness.sessionDir, "codex-refresh-failure-rollout.jsonl");
+		await fs.writeFile(sourcePath, "source stays untouched\n");
+		const source: ForeignSessionInfo = {
+			source: "codex",
+			id: "codex-refresh-failure-source-id",
+			path: sourcePath,
+			cwd: sourceProject,
+			title: "Refresh failure",
+			archived: false,
+			created: new Date("2026-08-01T00:00:00.000Z"),
+			modified: new Date("2026-08-02T00:00:00.000Z"),
+		};
+		let failRefresh = false;
+		vi.spyOn(CodexSessionStore.prototype, "list").mockResolvedValue([source]);
+		vi.spyOn(CodexSessionStore.prototype, "load").mockImplementation(async info => {
+			if (failRefresh) throw new Error("rollout became unreadable");
+			return await importedCodexManager(info);
+		});
+
+		const first = await harness.registry.importForeignSession("codex", source.id, source.path, false);
+		if ("kind" in first) throw new Error("first import unexpectedly conflicted");
+		failRefresh = true;
+
+		await expect(harness.registry.importForeignSession("codex", source.id, source.path, false)).rejects.toThrow(
+			"rollout became unreadable",
+		);
+		expect((await harness.registry.list()).find(session => session.id === first.id)?.running).toBe(true);
+	});
+
+	it("rejects refresh when the original project disappeared without stopping the existing chat", async () => {
+		harness = await setupHarness();
+		spyOnCreateAgentSession();
+		const sourceProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-missing-refresh-project-"));
+		const sourcePath = path.join(harness.sessionDir, "codex-missing-refresh-rollout.jsonl");
+		await fs.writeFile(sourcePath, "source stays untouched\n");
+		const source: ForeignSessionInfo = {
+			source: "codex",
+			id: "codex-missing-refresh-source-id",
+			path: sourcePath,
+			cwd: sourceProject,
+			title: "Missing project refresh",
+			archived: false,
+			created: new Date("2026-08-01T00:00:00.000Z"),
+			modified: new Date("2026-08-02T00:00:00.000Z"),
+		};
+		vi.spyOn(CodexSessionStore.prototype, "list").mockResolvedValue([source]);
+		vi.spyOn(CodexSessionStore.prototype, "load").mockImplementation(info => importedCodexManager(info));
+
+		const first = await harness.registry.importForeignSession("codex", source.id, source.path, false);
+		if ("kind" in first) throw new Error("first import unexpectedly conflicted");
+		await fs.rm(sourceProject, { recursive: true, force: true });
+
+		await expect(harness.registry.importForeignSession("codex", source.id, source.path, false)).rejects.toThrow(
+			"original Codex project folder is no longer available",
+		);
+		expect((await harness.registry.list()).find(session => session.id === first.id)?.running).toBe(true);
+	});
+
+	it("uses the rollout header cwd when the Codex index still points at the previous project", async () => {
+		harness = await setupHarness();
+		spyOnCreateAgentSession();
+		const indexedProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-indexed-project-"));
+		const relocatedProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-relocated-project-"));
+		const sourcePath = path.join(harness.sessionDir, "codex-relocated-rollout.jsonl");
+		await fs.writeFile(sourcePath, "source stays untouched\n");
+		const source: ForeignSessionInfo = {
+			source: "codex",
+			id: "codex-relocated-source-id",
+			path: sourcePath,
+			cwd: indexedProject,
+			title: "Relocated project",
+			archived: false,
+			created: new Date("2026-08-01T00:00:00.000Z"),
+			modified: new Date("2026-08-02T00:00:00.000Z"),
+		};
+		let rolloutCwd = indexedProject;
+		vi.spyOn(CodexSessionStore.prototype, "list").mockResolvedValue([source]);
+		vi.spyOn(CodexSessionStore.prototype, "load").mockImplementation(info =>
+			importedCodexManager({ ...info, cwd: rolloutCwd }),
+		);
+
+		const first = await harness.registry.importForeignSession("codex", source.id, source.path, false);
+		if ("kind" in first) throw new Error("first import unexpectedly conflicted");
+		rolloutCwd = relocatedProject;
+
+		const refreshed = await harness.registry.importForeignSession("codex", source.id, source.path, false);
+		if ("kind" in refreshed) throw new Error("relocated refresh unexpectedly conflicted");
+		expect(refreshed).toMatchObject({ id: first.id, cwd: relocatedProject });
+		expect((await harness.registry.list()).find(session => session.id === first.id)?.cwd).toBe(relocatedProject);
 	});
 
 	it("removes the persisted copy when provisioning an imported chat fails", async () => {
