@@ -501,10 +501,13 @@ private:
 		case WM_CAPTURECHANGED:
 			if (interaction_ != Interaction::Idle && edit_ == nullptr) FinishInteraction(last_mouse_);
 			return 0;
-		case WM_NCDESTROY:
+		case WM_NCDESTROY: {
+			const HWND destroyed_window = window_;
+			SetWindowLongPtrW(destroyed_window, GWLP_USERDATA, 0);
 			window_ = nullptr;
 			running_ = false;
-			return 0;
+			return DefWindowProcW(destroyed_window, message, wparam, lparam);
+		}
 		default:
 			return DefWindowProcW(window_, message, wparam, lparam);
 		}

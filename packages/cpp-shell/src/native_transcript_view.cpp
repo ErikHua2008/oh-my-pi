@@ -499,6 +499,14 @@ void NativeTranscriptView::SetFileDropEnabled(bool enabled) {
 }
 
 void NativeTranscriptView::Clear() {
+	selecting_ = false;
+	scrollbar_dragging_ = false;
+	jump_button_pressed_ = false;
+	wheel_remainder_ = 0;
+	if (window_ != nullptr && GetCapture() == window_) {
+		ReleaseCapture();
+	}
+	SetFileDragActive(false);
 	if (window_ != nullptr) {
 		KillTimer(window_, kScrollbarHideTimer);
 		KillTimer(window_, kMessageCopyFeedbackTimer);
@@ -520,9 +528,7 @@ void NativeTranscriptView::Clear() {
 	history_request_delivered_ = false;
 	overlay_scrollbar_visible_ = false;
 	scrollbar_hovered_ = false;
-	scrollbar_dragging_ = false;
 	jump_button_hovered_ = false;
-	jump_button_pressed_ = false;
 	hovered_message_action_.reset();
 	copied_row_id_.clear();
 	mouse_tracking_ = false;
@@ -549,6 +555,13 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 	if (reset_to_tail) {
 		stick_to_bottom_ = true;
 		scroll_offset_ = 0;
+		selecting_ = false;
+		scrollbar_dragging_ = false;
+		jump_button_pressed_ = false;
+		wheel_remainder_ = 0;
+		if (window_ != nullptr && GetCapture() == window_) {
+			ReleaseCapture();
+		}
 		expanded_rows_.clear();
 		collapsed_rows_.clear();
 		expanded_process_items_.clear();
@@ -556,7 +569,10 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 		ClearSelection();
 		hovered_message_action_.reset();
 		copied_row_id_.clear();
-		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
+		if (window_ != nullptr) {
+			KillTimer(window_, kScrollbarHideTimer);
+			KillTimer(window_, kMessageCopyFeedbackTimer);
+		}
 	}
 	model_.ReplaceSnapshot(std::move(rows));
 	for (auto it = expanded_rows_.begin(); it != expanded_rows_.end();) {
@@ -763,7 +779,11 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			DragFinish(reinterpret_cast<HDROP>(wparam));
 			return 0;
 		}
-		SendMessageW(GetParent(window_), WM_DROPFILES, wparam, lparam);
+		if (const HWND parent = GetParent(window_); IsWindow(parent)) {
+			SendMessageW(parent, WM_DROPFILES, wparam, lparam);
+		} else {
+			DragFinish(reinterpret_cast<HDROP>(wparam));
+		}
 		return 0;
 	case WM_MEASUREITEM:
 		if (MeasureNativeMenuItem(window_, reinterpret_cast<MEASUREITEMSTRUCT*>(lparam))) {
@@ -1101,13 +1121,15 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 	}
 	case WM_GETDLGCODE:
 		return DLGC_WANTARROWS | DLGC_WANTCHARS;
-	case WM_NCDESTROY:
-		KillTimer(window_, kScrollbarHideTimer);
-		KillTimer(window_, kMessageCopyFeedbackTimer);
-		KillTimer(window_, kMediaRetryTimer);
-		SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
+	case WM_NCDESTROY: {
+		const HWND destroyed_window = window_;
+		KillTimer(destroyed_window, kScrollbarHideTimer);
+		KillTimer(destroyed_window, kMessageCopyFeedbackTimer);
+		KillTimer(destroyed_window, kMediaRetryTimer);
+		SetWindowLongPtrW(destroyed_window, GWLP_USERDATA, 0);
 		window_ = nullptr;
-		return 0;
+		return DefWindowProcW(destroyed_window, message, wparam, lparam);
+	}
 	default:
 		break;
 	}

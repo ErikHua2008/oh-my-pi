@@ -5,7 +5,9 @@
 
 #include <WebView2.h>
 
+#include <atomic>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -46,6 +48,10 @@ private:
 	EventRegistrationToken navigation_token_{};
 	EventRegistrationToken new_window_token_{};
 	EventRegistrationToken message_token_{};
+	// WebView2 environment/controller creation completes asynchronously. Keep a
+	// token in every callback so a quick application exit cannot dereference the
+	// host after its owning App has already been destroyed.
+	std::shared_ptr<std::atomic_bool> callback_alive_ = std::make_shared<std::atomic_bool>(true);
 	bool bridge_ready_ = false;
 	bool dark_theme_ = false;
 };

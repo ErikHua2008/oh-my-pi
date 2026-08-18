@@ -295,6 +295,7 @@ constexpr wchar_t kDesktopBridgeScript[] = LR"js(
 } // namespace
 
 WebViewHost::~WebViewHost() {
+	callback_alive_->store(false, std::memory_order_release);
 	if (webview_ && navigation_token_.value != 0) {
 		webview_->remove_NavigationStarting(navigation_token_);
 	}
@@ -307,6 +308,8 @@ WebViewHost::~WebViewHost() {
 	if (controller_) {
 		controller_->Close();
 	}
+	ready_handler_ = {};
+	message_handler_ = {};
 }
 
 void WebViewHost::Initialize(HWND window, ReadyHandler ready_handler, MessageHandler message_handler) {
@@ -315,12 +318,14 @@ void WebViewHost::Initialize(HWND window, ReadyHandler ready_handler, MessageHan
 	message_handler_ = std::move(message_handler);
 	const std::wstring user_data = WebViewDataDirectory();
 	const wchar_t* user_data_path = user_data.empty() ? nullptr : user_data.c_str();
+	const auto callback_alive = callback_alive_;
 
 	const HRESULT started = CreateCoreWebView2EnvironmentWithOptions(nullptr,
 		user_data_path,
 		nullptr,
 		Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-			[this](HRESULT result, ICoreWebView2Environment* environment) -> HRESULT {
+			[this, callback_alive](HRESULT result, ICoreWebView2Environment* environment) -> HRESULT {
+				if (!callback_alive->load(std::memory_order_acquire)) return S_OK;
 				if (FAILED(result) || environment == nullptr) {
 					if (ready_handler_) {
 						ready_handler_(FAILED(result) ? result : E_FAIL);
@@ -330,7 +335,8 @@ void WebViewHost::Initialize(HWND window, ReadyHandler ready_handler, MessageHan
 				environment_ = environment;
 				return environment_->CreateCoreWebView2Controller(window_,
 					Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-						[this](HRESULT controller_result, ICoreWebView2Controller* controller) -> HRESULT {
+						[this, callback_alive](HRESULT controller_result, ICoreWebView2Controller* controller) -> HRESULT {
+							if (!callback_alive->load(std::memory_order_acquire)) return S_OK;
 							if (FAILED(controller_result) || controller == nullptr) {
 								if (ready_handler_) {
 									ready_handler_(FAILED(controller_result) ? controller_result : E_FAIL);
@@ -352,7 +358,8 @@ void WebViewHost::Initialize(HWND window, ReadyHandler ready_handler, MessageHan
 							const HRESULT bridge_result = webview_->AddScriptToExecuteOnDocumentCreated(
 								kDesktopBridgeScript,
 								Microsoft::WRL::Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
-									[this](HRESULT script_result, LPCWSTR) -> HRESULT {
+									[this, callback_alive](HRESULT script_result, LPCWSTR) -> HRESULT {
+										if (!callback_alive->load(std::memory_order_acquire)) return S_OK;
 										bridge_ready_ = SUCCEEDED(script_result);
 										if (ready_handler_) {
 											ready_handler_(script_result);
@@ -464,6 +471,7 @@ bool WebViewHost::ready() const noexcept {
 HRESULT WebViewHost::ConfigureController() {
 	Resize();
 	SetDarkTheme(dark_theme_);
+	const auto callback_alive = callback_alive_;
 
 	Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
 	if (SUCCEEDED(webview_->get_Settings(&settings))) {
@@ -476,7 +484,8 @@ HRESULT WebViewHost::ConfigureController() {
 
 	HRESULT result = webview_->add_NavigationStarting(
 		Microsoft::WRL::Callback<ICoreWebView2NavigationStartingEventHandler>(
-			[this](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* arguments) -> HRESULT {
+			[this, callback_alive](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* arguments) -> HRESULT {
+				if (!callback_alive->load(std::memory_order_acquire)) return S_OK;
 				try {
 				LPWSTR raw_uri = nullptr;
 				if (arguments == nullptr || FAILED(arguments->get_Uri(&raw_uri)) || raw_uri == nullptr) {
@@ -507,7 +516,8 @@ HRESULT WebViewHost::ConfigureController() {
 
 	result = webview_->add_NewWindowRequested(
 		Microsoft::WRL::Callback<ICoreWebView2NewWindowRequestedEventHandler>(
-			[this](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* arguments) -> HRESULT {
+			[this, callback_alive](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* arguments) -> HRESULT {
+				if (!callback_alive->load(std::memory_order_acquire)) return S_OK;
 				try {
 				if (arguments == nullptr) {
 					return S_OK;
@@ -533,7 +543,8 @@ HRESULT WebViewHost::ConfigureController() {
 
 	result = webview_->add_WebMessageReceived(
 		Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
-			[this](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* arguments) -> HRESULT {
+			[this, callback_alive](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* arguments) -> HRESULT {
+				if (!callback_alive->load(std::memory_order_acquire)) return S_OK;
 				try {
 				LPWSTR raw_source = nullptr;
 				if (arguments == nullptr || FAILED(arguments->get_Source(&raw_source)) || raw_source == nullptr) {
