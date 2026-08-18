@@ -4509,12 +4509,12 @@ export const SETTINGS_SCHEMA = {
 
 	"title.refreshOnReplan": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Modes",
 			label: "Refresh Title on Replan",
-			description: "Refresh generated session titles after todo init replans unless the title was set by the user",
+			description: "Optionally refresh generated session titles after todo init replans",
 		},
 	},
 

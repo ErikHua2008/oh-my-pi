@@ -770,7 +770,10 @@ export class CodexSessionStore implements ForeignSessionStore {
 			manager.ingestReplicatedEntry(entry);
 			parentId = id;
 		}
-		if (title) await manager.setSessionName(title, "auto", "codex-import");
+		// The imported display name is authoritative provenance from Codex. Treat
+		// it like an explicit name so continuing the conversation cannot replace
+		// it during OMP's optional todo/replan title refresh.
+		if (title) await manager.setSessionName(title, "user", "codex-import");
 		return manager;
 	}
 }

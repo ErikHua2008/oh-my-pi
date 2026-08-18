@@ -113,7 +113,7 @@ Executables are written to:
 Closing the main window hides it to the notification area by default. Use the
 tray menu or **File > Exit** to stop both the shell and its owned Core process.
 The executable, main window, shortcuts, and notification-area entry all use
-the same embedded OMP icon resource.
+the same embedded Grimoire cosmic-cube icon resource.
 
 ## Development Core resolution
 

@@ -1,4 +1,4 @@
 #include "omp_shell/resource.h"
 
-IDI_GRIMOIRE_ON_LIGHT ICON "../../collab-web/public/grimoire-brain-on-light.ico"
-IDI_GRIMOIRE_ON_DARK ICON "../../collab-web/public/grimoire-brain-on-dark.ico"
+IDI_GRIMOIRE_CUBE_ON_LIGHT ICON "../../collab-web/public/grimoire-cube-on-light.ico"
+IDI_GRIMOIRE_CUBE_ON_DARK ICON "../../collab-web/public/grimoire-cube-on-dark.ico"

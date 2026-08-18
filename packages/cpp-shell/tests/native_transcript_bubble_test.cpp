@@ -52,3 +52,16 @@ OMP_TEST("native message actions preserve the familiar user and assistant order"
 	OMP_CHECK(assistant_actions.copy.left == assistant.bubble.left);
 	OMP_CHECK(assistant_actions.copy.right < assistant_actions.time.left);
 }
+
+OMP_TEST("native assistant file cards reserve bubble height and expose separate actions") {
+	const auto assistant =
+		omp::shell::ComputeNativeTranscriptBubbleLayout(800.0F, false, 120.0F, 24.0F, 0, true, 1);
+	const auto card = omp::shell::ComputeNativeTranscriptFileCardLayout(
+		assistant.content_left, assistant.file_cards_top, assistant.content_width);
+	OMP_CHECK(assistant.content_width == omp::shell::NativeTranscriptBubbleMaxContentWidth(800.0F, false));
+	OMP_CHECK(assistant.row_height == 152.0F);
+	OMP_CHECK(card.card.Height() == omp::shell::kNativeTranscriptFileCardHeight);
+	OMP_CHECK(card.open.right < card.reveal.left);
+	OMP_CHECK(card.title.right <= card.open.left);
+	OMP_CHECK(card.open.Contains((card.open.left + card.open.right) / 2.0F, (card.open.top + card.open.bottom) / 2.0F));
+}

@@ -39,7 +39,10 @@ export function ConnectScreen({ defaultName, error, onConnect, savedControlLink 
 			<main className="sh-connect-card" aria-labelledby="sh-connect-title">
 				<div className="sh-connect-head">
 					<div className="sh-lockup">
-						<span className="sh-lockup-mark" aria-hidden="true" />
+						<span className="sh-lockup-mark" aria-hidden="true">
+							<img className="sh-lockup-mark-on-light" src="./public/grimoire-cube-on-light.svg" alt="" />
+							<img className="sh-lockup-mark-on-dark" src="./public/grimoire-cube-on-dark.svg" alt="" />
+						</span>
 						<span>
 							<span className="sh-lockup-pi">π</span> omp collab
 						</span>

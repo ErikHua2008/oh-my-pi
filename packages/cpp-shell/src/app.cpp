@@ -188,7 +188,7 @@ int ShowThemedMessageBox(HWND owner, const wchar_t* text, const wchar_t* caption
 [[nodiscard]] HICON LoadEmbeddedIcon(HINSTANCE instance, bool dark, int width, int height) noexcept {
 	return reinterpret_cast<HICON>(LoadImageW(
 		instance,
-		MAKEINTRESOURCEW(dark ? IDI_GRIMOIRE_ON_DARK : IDI_GRIMOIRE_ON_LIGHT),
+		MAKEINTRESOURCEW(dark ? IDI_GRIMOIRE_CUBE_ON_DARK : IDI_GRIMOIRE_CUBE_ON_LIGHT),
 		IMAGE_ICON,
 		width,
 		height,
@@ -290,6 +290,26 @@ NativeTranscriptRow ParseNativeRow(const nlohmann::json& value) {
 			row.process_items.push_back(std::move(item));
 		}
 	}
+	if (const auto links = value.find("fileLinks"); links != value.end()) {
+		if (!links->is_array() || links->size() > 4 || (!links->empty() && row.kind != NativeTranscriptRowKind::Assistant)) {
+			throw std::invalid_argument("native transcript file link list is invalid");
+		}
+		std::size_t total_path_bytes = 0;
+		for (const nlohmann::json& encoded_link : *links) {
+			if (!encoded_link.is_object()) {
+				throw std::invalid_argument("native transcript file link must be an object");
+			}
+			NativeTranscriptFileLink link;
+			link.path = encoded_link.at("path").get<std::string>();
+			link.label = encoded_link.at("label").get<std::string>();
+			total_path_bytes += link.path.size();
+			if (link.path.empty() || link.path.size() > 32'768 || total_path_bytes > 64 * 1024 ||
+				!IsNativeTranscriptAbsoluteFilePath(link.path) || link.label.empty() || link.label.size() > 1024) {
+				throw std::invalid_argument("native transcript file link is invalid");
+			}
+			row.file_links.push_back(std::move(link));
+		}
+	}
 	if (const auto media = value.find("mediaIds"); media != value.end()) {
 		if (!media->is_array() || media->size() > 8) {
 			throw std::invalid_argument("native transcript media list is invalid");
@@ -312,6 +332,9 @@ std::size_t NativeRowStorageBytes(const NativeTranscriptRow& row) noexcept {
 	}
 	for (const NativeTranscriptProcessItem& item : row.process_items) {
 		bytes += sizeof(item) + item.id.size() + item.summary.size() + item.detail.size();
+	}
+	for (const NativeTranscriptFileLink& link : row.file_links) {
+		bytes += sizeof(link) + link.path.size() + link.label.size();
 	}
 	return bytes;
 }
@@ -1634,11 +1657,16 @@ void App::HandleDesktopRequest(std::string_view payload) {
 		if (command == "project_rename") {
 			const std::wstring path = Utf8ToWide(args.at("path").get_ref<const std::string&>());
 			const std::wstring name = Utf8ToWide(args.at("name").get_ref<const std::string&>());
+			ShellConfig previous_config = config_;
 			if (!config_.SetProjectName(path, name)) {
 				reply(false, nullptr, "project name must contain 1-120 characters");
 				return;
 			}
-			SaveConfigFile();
+			if (!SaveConfigFile()) {
+				config_ = std::move(previous_config);
+				reply(false, nullptr, "saving the project name failed");
+				return;
+			}
 			if (ComparableProjectPath(path) == ComparableProjectPath(project_directory_)) {
 				UpdateWindowTitle();
 			}
@@ -1818,12 +1846,14 @@ void App::SaveWindowState() {
 	SaveConfigFile();
 }
 
-void App::SaveConfigFile() {
+bool App::SaveConfigFile() {
 	std::string error;
-	if (!SaveConfig(config_path_, config_, error)) {
+	const bool saved = SaveConfig(config_path_, config_, error);
+	if (!saved) {
 		const std::string diagnostic = "OMP cpp-shell config save failed: " + error + "\n";
 		OutputDebugStringA(diagnostic.c_str());
 	}
+	return saved;
 }
 
 } // namespace omp::shell

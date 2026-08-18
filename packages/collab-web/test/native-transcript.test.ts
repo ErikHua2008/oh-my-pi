@@ -1,12 +1,56 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
-import { nativeStreamRowId, projectNativeStream, projectNativeTranscript } from "../src/lib/native-transcript";
+import {
+	nativeAssistantFileLinks,
+	nativeStreamRowId,
+	projectNativeStream,
+	projectNativeTranscript,
+} from "../src/lib/native-transcript";
 
 function usage(): AssistantMessage["usage"] {
 	return { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { total: 0 } };
 }
 
 describe("native transcript projection", () => {
+	it("extracts bounded local report links without exposing URLs or relative paths", () => {
+		const links = nativeAssistantFileLinks(`
+[打开项目分析报告](C:\\huazy\\Project\\Gureat\\report.html)
+[重复链接](c:/huazy/Project/Gureat/report.html)
+[带空格报告](<D:\\Reports\\daily report.pdf:42>)
+\`\\\\server\\share\\result.xlsx\`
+[网络页面](https://example.com/report.html)
+[相对文件](reports/report.html)
+[设备路径](\\\\.\\PhysicalDrive0)
+		`);
+		expect(links).toEqual([
+			{ path: "C:\\huazy\\Project\\Gureat\\report.html", label: "打开项目分析报告" },
+			{ path: "D:\\Reports\\daily report.pdf", label: "带空格报告" },
+			{ path: "\\\\server\\share\\result.xlsx", label: "result.xlsx" },
+		]);
+	});
+
+	it("projects assistant report links into native file cards", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "assistant-report",
+				parentId: null,
+				timestamp: "2026-08-18T12:00:00Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "报告已生成：[打开报告](C:\\work\\report.html)" }],
+					model: "test/model",
+					usage: usage(),
+					stopReason: "stop",
+					timestamp: 1,
+				},
+			},
+		];
+		const projected = projectNativeTranscript(entries);
+		expect(projected[0]?.fileLinks).toEqual([{ path: "C:\\work\\report.html", label: "打开报告" }]);
+		expect(projected[0]?.estimatedHeight).toBeGreaterThan(100);
+	});
+
 	it("keeps stable entry ids and excludes inline image bytes", () => {
 		const entries: SessionEntry[] = [
 			{

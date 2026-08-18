@@ -50,7 +50,7 @@ private:
 	void ApplyTheme(bool dark);
 	void UpdateWindowTitle() const;
 	void SaveWindowState();
-	void SaveConfigFile();
+	bool SaveConfigFile();
 
 	HINSTANCE instance_ = nullptr;
 	HWND window_ = nullptr;

@@ -16,6 +16,7 @@ namespace omp::shell {
 namespace {
 
 constexpr std::size_t kStderrTailBytes = 4096;
+constexpr wchar_t kNativeGuiHostEnvironment[] = L"OMP_NATIVE_GUI_HOST";
 
 [[nodiscard]] bool IsDevelopmentRepository(const std::filesystem::path& directory) {
 	std::error_code error;
@@ -202,7 +203,10 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 
 	STARTUPINFOEXW startup{};
 	startup.StartupInfo.cb = sizeof(startup);
-	startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+	// CREATE_NO_WINDOW is the primary guard, while STARTF_USESHOWWINDOW also
+	// keeps wrappers such as cmd.exe hidden if Windows ignores the console flag.
+	startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+	startup.StartupInfo.wShowWindow = SW_HIDE;
 	startup.StartupInfo.hStdInput = null_input;
 	startup.StartupInfo.hStdOutput = stdout_pipe.write;
 	startup.StartupInfo.hStdError = stderr_pipe.write;
@@ -271,6 +275,23 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 		return false;
 	}
 
+	// Core launches nested PowerShell, daemon-broker, MCP, and eval processes.
+	// Mark the complete descendant tree as GUI-hosted so Bun launch helpers do
+	// not mistake an RDP/ConPTY console probe for permission to show a console.
+	const std::optional<std::wstring> previous_gui_host = EnvironmentValue(kNativeGuiHostEnvironment);
+	if (!SetEnvironmentVariableW(kNativeGuiHostEnvironment, L"1")) {
+		error = "setting native GUI host environment failed: " +
+			std::system_category().message(static_cast<int>(GetLastError()));
+		DeleteProcThreadAttributeList(startup.lpAttributeList);
+		CloseIfValid(job);
+		CloseIfValid(null_input);
+		CloseIfValid(stdout_pipe.read);
+		CloseIfValid(stdout_pipe.write);
+		CloseIfValid(stderr_pipe.read);
+		CloseIfValid(stderr_pipe.write);
+		return false;
+	}
+
 	const DWORD flags =
 		CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
 	const BOOL created = CreateProcessW(application_name.empty() ? nullptr : application_name.c_str(),
@@ -284,6 +305,10 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 		&startup.StartupInfo,
 		&process_info);
 	const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+	// CreateProcess snapshots the environment synchronously; do not leak the
+	// descendant-only marker into unrelated programs opened later by the shell.
+	static_cast<void>(SetEnvironmentVariableW(
+		kNativeGuiHostEnvironment, previous_gui_host ? previous_gui_host->c_str() : nullptr));
 	DeleteProcThreadAttributeList(startup.lpAttributeList);
 	CloseIfValid(null_input);
 	CloseIfValid(stdout_pipe.write);

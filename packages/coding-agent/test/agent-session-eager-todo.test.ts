@@ -8,6 +8,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -481,6 +482,8 @@ describe("AgentSession eager todo enforcement", () => {
 	});
 
 	it("does not refresh todo-init titles when title refresh on replan is disabled", async () => {
+		expect(SETTINGS_SCHEMA["title.refreshOnReplan"].default).toBe(false);
+		expect(Settings.isolated().get("title.refreshOnReplan")).toBe(false);
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
 		await session.setSessionName("Old auto title", "auto");
 		scriptedResponses = [

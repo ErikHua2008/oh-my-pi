@@ -417,6 +417,140 @@
 	background: var(--bg-raised);
 }
 
+/* Project aliases use a centered dialog: the narrow sidebar row is not a
+ * suitable editing surface and made the old inline controls easy to misclick. */
+.sh-project-rename-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 1400;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	background: var(--backdrop);
+	animation: sh-fade-in var(--dur-fast) var(--ease);
+}
+
+.sh-project-rename-dialog {
+	width: min(440px, 100%);
+	padding: 22px;
+	color: var(--fg);
+	background: var(--bg-raised);
+	border: 1px solid var(--border-strong);
+	border-radius: 14px;
+	box-shadow: var(--shadow-overlay);
+	outline: none;
+}
+
+.sh-project-rename-copy h2 {
+	margin: 0 0 8px;
+	font-size: 17px;
+	font-weight: 650;
+	line-height: 24px;
+	letter-spacing: -0.01em;
+}
+
+.sh-project-rename-copy p {
+	margin: 0;
+	font-size: 13px;
+	line-height: 20px;
+	color: var(--fg-muted);
+}
+
+.sh-project-rename-field,
+.sh-project-rename-path {
+	display: grid;
+	gap: 7px;
+	margin-top: 18px;
+}
+
+.sh-project-rename-field > span,
+.sh-project-rename-path > span {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--fg-muted);
+}
+
+.sh-project-rename-field input {
+	width: 100%;
+	height: 38px;
+	padding: 0 11px;
+	color: var(--fg);
+	background: var(--bg);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	font: inherit;
+	outline: none;
+}
+
+.sh-project-rename-field input:focus {
+	border-color: var(--accent);
+	box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.sh-project-rename-field input[aria-invalid="true"] {
+	border-color: var(--err);
+}
+
+.sh-project-rename-path code {
+	display: block;
+	min-width: 0;
+	padding: 8px 10px;
+	overflow: hidden;
+	color: var(--fg-faint);
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	font: 400 11px / 16px var(--font-mono);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sh-project-rename-error {
+	margin: 10px 0 0;
+	font-size: 12px;
+	line-height: 18px;
+	color: var(--err);
+}
+
+.sh-project-rename-actions {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 22px;
+}
+
+.sh-project-rename-actions button {
+	min-width: 74px;
+	height: 34px;
+	padding: 0 14px;
+	color: var(--fg);
+	background: var(--bg);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.sh-project-rename-actions button:hover:not(:disabled) {
+	background: var(--bg-hover);
+}
+
+.sh-project-rename-actions .is-primary {
+	color: var(--accent-fg);
+	background: var(--accent);
+	border-color: var(--accent);
+}
+
+.sh-project-rename-actions .is-primary:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--accent) 88%, var(--fg));
+}
+
+.sh-project-rename-actions button:disabled {
+	cursor: default;
+	opacity: 0.58;
+}
+
 .sh-project-name,
 .sh-project-path {
 	white-space: nowrap;

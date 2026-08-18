@@ -321,6 +321,29 @@ describe("DesktopBridge Tauri capability probe", () => {
 		]);
 	});
 
+	it("keeps project controls available after a recoverable rename failure", async () => {
+		const calls: InvokeCall[] = [];
+		const bridge = createDesktopBridge(async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
+			calls.push({ command, args });
+			if (command === "project_list") {
+				return {
+					recent_projects: ["C:\\work\\project"],
+					last_project: "C:\\work\\project",
+					current_project: "C:\\work\\project",
+					project_names: {},
+				} as T;
+			}
+			if (command === "project_rename") throw new Error("saving the project name failed");
+			throw new Error(`unexpected command ${command}`);
+		});
+
+		await bridge.listProjects();
+		await expect(bridge.renameProject("C:\\work\\project", "New name")).rejects.toThrow("saving");
+		expect(bridge.available).toBe(true);
+		expect(await bridge.listProjects()).toHaveLength(1);
+		expect(calls.map(call => call.command)).toEqual(["project_list", "project_rename", "project_list"]);
+	});
+
 	it("falls back after a denied probe and never invokes project mutations", async () => {
 		const calls: InvokeCall[] = [];
 		const deniedInvoke: TauriInvoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {

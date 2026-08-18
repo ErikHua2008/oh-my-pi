@@ -25,6 +25,7 @@ import { onSessionPreferencesRemoved } from "../../lib/session-preference-events
 import { ConfirmDialog } from "../shell/ConfirmDialog";
 import { useNativeTranscriptOcclusion } from "../shell/useNativeTranscriptOcclusion";
 import { CodexImportModal } from "./CodexImportModal";
+import { ProjectRenameDialog } from "./ProjectRenameDialog";
 
 export interface SessionsPanelProps {
 	snapshot: ControlSnapshot;
@@ -63,12 +64,16 @@ interface SessionContextMenu {
 }
 
 interface ProjectContextMenu {
-	key: string;
 	path: string;
 	name: string;
 	current: boolean;
 	x: number;
 	y: number;
+}
+
+interface ProjectRenameTarget {
+	path: string;
+	name: string;
 }
 
 export function placeContextMenu(
@@ -313,7 +318,7 @@ export function SessionsPanel({
 	const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(() => new Set());
 	const [desktopAction, setDesktopAction] = useState<string | null>(null);
 	const [desktopError, setDesktopError] = useState<string | null>(null);
-	const [renamingProject, setRenamingProject] = useState<string | null>(null);
+	const [projectRenameTarget, setProjectRenameTarget] = useState<ProjectRenameTarget | null>(null);
 	const [renamingSession, setRenamingSession] = useState<string | null>(null);
 	const [archivingSessions, setArchivingSessions] = useState<ReadonlySet<string>>(() => new Set());
 	const archivingSessionsRef = useRef(new Set<string>());
@@ -485,10 +490,13 @@ export function SessionsPanel({
 		setDesktopError(null);
 		try {
 			await desktopBridge.renameProject(path, name);
-			setDesktopProjects(await desktopBridge.listProjects());
+			setDesktopProjects(projects =>
+				projects.map(project =>
+					comparableProjectPath(project.path) === comparableProjectPath(path) ? { ...project, name } : project,
+				),
+			);
 		} catch (error) {
 			setDesktopAvailable(desktopBridge.available);
-			setDesktopError("The project name could not be saved.");
 			throw error;
 		} finally {
 			setDesktopAction(null);
@@ -539,7 +547,6 @@ export function SessionsPanel({
 		const position = placeContextMenu(event.clientX, event.clientY, 220, 214, window.innerWidth, window.innerHeight);
 		setSessionContextMenu(null);
 		setProjectContextMenu({
-			key: comparableProjectPath(group.path),
 			path: group.path,
 			name: group.name,
 			current: group.desktopProject?.current ?? groups.length === 1,
@@ -551,8 +558,8 @@ export function SessionsPanel({
 		<nav className="sh-sessions" aria-label="Projects and sessions">
 			<div className="sh-sessions-brand">
 				<span className="sh-sessions-mark" aria-hidden="true">
-					<img className="sh-sessions-mark-on-light" src="./public/grimoire-brain-on-light.svg" alt="" />
-					<img className="sh-sessions-mark-on-dark" src="./public/grimoire-brain-on-dark.svg" alt="" />
+					<img className="sh-sessions-mark-on-light" src="./public/grimoire-cube-on-light.svg" alt="" />
+					<img className="sh-sessions-mark-on-dark" src="./public/grimoire-cube-on-dark.svg" alt="" />
 				</span>
 				<div className="sh-sessions-brand-copy">
 					<span className="sh-sessions-brand-name">Grimoire Router App</span>
@@ -635,27 +642,18 @@ export function SessionsPanel({
 								>
 									<ChevronRight size={15} aria-hidden="true" />
 								</button>
-								{renamingProject === key ? (
-									<InlineRename
-										value={group.name}
-										label={`Rename project ${group.name}`}
-										onSave={name => renameProject(group.path, name)}
-										onCancel={() => setRenamingProject(null)}
-									/>
-								) : (
-									<button
-										type="button"
-										className="sh-project-label sh-project-toggle"
-										aria-expanded={!collapsed}
-										aria-controls={sessionsId}
-										title={collapsed ? `Expand ${group.name}` : `Collapse ${group.name}`}
-										onClick={() => selectAndToggleProject(group.path)}
-									>
-										<span className="sh-project-name">{group.name}</span>
-										<span className="sh-project-path">{group.path}</span>
-									</button>
-								)}
-								{!readOnly && renamingProject !== key && (
+								<button
+									type="button"
+									className="sh-project-label sh-project-toggle"
+									aria-expanded={!collapsed}
+									aria-controls={sessionsId}
+									title={collapsed ? `Expand ${group.name}` : `Collapse ${group.name}`}
+									onClick={() => selectAndToggleProject(group.path)}
+								>
+									<span className="sh-project-name">{group.name}</span>
+									<span className="sh-project-path">{group.path}</span>
+								</button>
+								{!readOnly && (
 									<button
 										type="button"
 										className="sh-project-new"
@@ -667,13 +665,13 @@ export function SessionsPanel({
 										<span className="sh-visually-hidden">在 {group.name} 中新建对话</span>
 									</button>
 								)}
-								{desktopAvailable && !readOnly && renamingProject !== key && (
+								{desktopAvailable && !readOnly && (
 									<button
 										type="button"
 										className="sh-project-rename"
 										title={`Rename project ${group.name}`}
 										disabled={desktopAction !== null}
-										onClick={() => setRenamingProject(key)}
+										onClick={() => setProjectRenameTarget({ path: group.path, name: group.name })}
 									>
 										<Pencil size={13} aria-hidden="true" />
 									</button>
@@ -844,7 +842,7 @@ export function SessionsPanel({
 							role="menuitem"
 							disabled={!desktopAvailable || readOnly || desktopAction !== null}
 							onClick={() => {
-								setRenamingProject(projectContextMenu.key);
+								setProjectRenameTarget({ path: projectContextMenu.path, name: projectContextMenu.name });
 								setProjectContextMenu(null);
 							}}
 						>
@@ -1013,6 +1011,14 @@ export function SessionsPanel({
 							if (success) setArchiveConfirm(current => (current?.id === id ? null : current));
 						});
 					}}
+				/>
+			)}
+			{projectRenameTarget !== null && (
+				<ProjectRenameDialog
+					name={projectRenameTarget.name}
+					path={projectRenameTarget.path}
+					onSave={name => renameProject(projectRenameTarget.path, name)}
+					onCancel={() => setProjectRenameTarget(null)}
 				/>
 			)}
 		</nav>

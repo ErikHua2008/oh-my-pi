@@ -3,6 +3,7 @@ import {
 	__resetWindowsConsoleProbeCache,
 	consoleAttached,
 	hostHasInheritableConsole,
+	nativeGuiHostRequiresHiddenWindows,
 	shouldDetachKernel,
 	shouldHideKernelWindow,
 } from "../../src/eval/py/spawn-options";
@@ -52,6 +53,18 @@ describe("shouldHideKernelWindow", () => {
 		expect(shouldHideKernelWindow({ platform: "linux", hostHasInheritableConsole: false })).toBe(false);
 		expect(shouldHideKernelWindow({ platform: "darwin", hostHasInheritableConsole: true })).toBe(false);
 		expect(shouldHideKernelWindow({ platform: "darwin", hostHasInheritableConsole: false })).toBe(false);
+	});
+});
+
+describe("nativeGuiHostRequiresHiddenWindows", () => {
+	it("forces a Windows GUI-hosted Core tree to stay headless", () => {
+		expect(nativeGuiHostRequiresHiddenWindows({ platform: "win32", environmentValue: "1" })).toBe(true);
+	});
+
+	it("does not affect terminal launches or non-Windows hosts", () => {
+		expect(nativeGuiHostRequiresHiddenWindows({ platform: "win32" })).toBe(false);
+		expect(nativeGuiHostRequiresHiddenWindows({ platform: "win32", environmentValue: "0" })).toBe(false);
+		expect(nativeGuiHostRequiresHiddenWindows({ platform: "linux", environmentValue: "1" })).toBe(false);
 	});
 });
 

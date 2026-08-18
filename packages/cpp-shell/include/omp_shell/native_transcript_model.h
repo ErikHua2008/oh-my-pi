@@ -47,6 +47,51 @@ struct NativeTranscriptProcessItem final {
 	bool failed = false;
 };
 
+struct NativeTranscriptFileLink final {
+	std::string path;
+	std::string label;
+};
+
+[[nodiscard]] constexpr bool IsNativeTranscriptPathSeparator(char value) noexcept {
+	return value == '\\' || value == '/';
+}
+
+[[nodiscard]] constexpr bool IsNativeTranscriptDriveLetter(char value) noexcept {
+	return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+}
+
+// Only filesystem-absolute Windows paths are allowed to reach the native open
+// commands. In particular, drive-relative paths and Win32 device namespaces
+// are rejected; the extended-length drive and UNC forms remain supported.
+[[nodiscard]] constexpr bool IsNativeTranscriptAbsoluteFilePath(std::string_view path) noexcept {
+	if (path.size() >= 3 && IsNativeTranscriptDriveLetter(path[0]) && path[1] == ':' &&
+		IsNativeTranscriptPathSeparator(path[2])) {
+		return true;
+	}
+	if (path.size() < 5 || !IsNativeTranscriptPathSeparator(path[0]) ||
+		!IsNativeTranscriptPathSeparator(path[1])) {
+		return false;
+	}
+	if (path[2] == '.') return false;
+	if (path[2] == '?' && IsNativeTranscriptPathSeparator(path[3])) {
+		if (path.size() >= 7 && IsNativeTranscriptDriveLetter(path[4]) && path[5] == ':' &&
+			IsNativeTranscriptPathSeparator(path[6])) {
+			return true;
+		}
+		constexpr std::string_view kExtendedUnc = "UNC";
+		if (path.size() < 9 || path.substr(4, kExtendedUnc.size()) != kExtendedUnc ||
+			!IsNativeTranscriptPathSeparator(path[7])) {
+			return false;
+		}
+		path.remove_prefix(8);
+	} else {
+		path.remove_prefix(2);
+	}
+	const std::size_t server_end = path.find_first_of("\\/");
+	return server_end != std::string_view::npos && server_end > 0 && server_end + 1 < path.size() &&
+		!IsNativeTranscriptPathSeparator(path[server_end + 1]);
+}
+
 struct NativeTranscriptRow final {
 	std::string id;
 	NativeTranscriptRowKind kind = NativeTranscriptRowKind::System;
@@ -58,6 +103,7 @@ struct NativeTranscriptRow final {
 	std::vector<NativeTranscriptProcessItem> process_items;
 	std::string time_label;
 	bool can_edit = false;
+	std::vector<NativeTranscriptFileLink> file_links;
 };
 
 struct NativeTranscriptVisibleRange final {

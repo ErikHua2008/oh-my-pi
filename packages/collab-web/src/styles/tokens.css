@@ -31,7 +31,6 @@
 	--accent-hover: #679efe;
 	--accent-muted: #e4edfd;
 	--accent-fg: #ffffff;
-	--brand-mark-gradient: linear-gradient(135deg, #4176e6 0%, #679efe 100%);
 
 	/* semantic status */
 	--ok: #22c55e;
@@ -93,7 +92,6 @@
 	--accent-hover: #679efe;
 	--accent-muted: #e4edfd;
 	--accent-fg: #ffffff;
-	--brand-mark-gradient: linear-gradient(135deg, #4176e6 0%, #679efe 100%);
 
 	--ok: #22c55e;
 	--warn: #f59e0b;
@@ -135,7 +133,6 @@
 	--accent-hover: #4176e6;
 	--accent-muted: #34415b;
 	--accent-fg: #0f1115;
-	--brand-mark-gradient: linear-gradient(135deg, #4176e6 0%, #679efe 100%);
 
 	--ok: #22c55e;
 	--warn: #f59e0b;
@@ -178,7 +175,6 @@
 		--accent-hover: #4176e6;
 		--accent-muted: #34415b;
 		--accent-fg: #0f1115;
-		--brand-mark-gradient: linear-gradient(135deg, #4176e6 0%, #679efe 100%);
 
 		--ok: #22c55e;
 		--warn: #f59e0b;

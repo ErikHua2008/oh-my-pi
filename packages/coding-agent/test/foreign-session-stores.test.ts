@@ -377,6 +377,9 @@ describe("CodexSessionStore", () => {
 		expect(info.description).toBe("Semantic summary for this work");
 		expect(manager.getSessionFile()).toBeUndefined();
 		expect(manager.getSessionName()).toBe("Legacy Codex");
+		expect(manager.titleSource).toBe("user");
+		expect(await manager.setSessionName("Unexpected replan title", "auto", "replan")).toBe(false);
+		expect(manager.getSessionName()).toBe("Legacy Codex");
 		const entries = manager.getEntries();
 		expect(entries.some(entry => entry.type === "model_change" && entry.model === "openai-codex/gpt-5.3-codex")).toBe(
 			true,

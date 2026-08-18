@@ -137,6 +137,14 @@ int RunCoreProcessFixtureIfRequested(int argc, char** argv) {
 		Sleep(60'000);
 		return 0;
 	}
+	if (mode == "native-gui-host") {
+		wchar_t value[8]{};
+		const DWORD length = GetEnvironmentVariableW(L"OMP_NATIVE_GUI_HOST", value, static_cast<DWORD>(std::size(value)));
+		if (length != 1 || value[0] != L'1' || GetConsoleWindow() != nullptr) return 8;
+		WriteFixtureLinks();
+		Sleep(60'000);
+		return 0;
+	}
 	if (mode == "slow-success") {
 		Sleep(80);
 		WriteFixtureLinks();
@@ -183,6 +191,23 @@ OMP_TEST("CoreProcess reports ready and synchronously reaps a stopped child tree
 	process.Stop();
 	OMP_CHECK(!process.running());
 	OMP_CHECK(std::chrono::steady_clock::now() - stop_started < 2s);
+}
+
+OMP_TEST("CoreProcess marks its descendant tree as a hidden native GUI host") {
+	ScopedEnvironmentVariable existing_marker(L"OMP_NATIVE_GUI_HOST", L"parent-value");
+	omp::shell::CoreProcess process;
+	EventCollector events;
+	std::string error;
+	OMP_CHECK(process.Start(FixtureLaunch(L"native-gui-host"),
+		[&events](omp::shell::CoreEvent event) { events.Push(std::move(event)); },
+		error));
+	wchar_t parent_value[32]{};
+	const DWORD parent_length =
+		GetEnvironmentVariableW(L"OMP_NATIVE_GUI_HOST", parent_value, static_cast<DWORD>(std::size(parent_value)));
+	OMP_CHECK(parent_length == 12);
+	OMP_CHECK(std::wstring_view(parent_value, parent_length) == L"parent-value");
+	OMP_CHECK(events.WaitFor(omp::shell::CoreEventKind::Ready, 5s).has_value());
+	process.Stop();
 }
 
 OMP_TEST("CoreProcess launches a cmd shim whose path contains spaces") {

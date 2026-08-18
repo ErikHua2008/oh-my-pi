@@ -8,6 +8,16 @@
  */
 import { dlopen, FFIType } from "bun:ffi";
 
+const NATIVE_GUI_HOST_ENV = "OMP_NATIVE_GUI_HOST";
+
+/** A native GUI host has no user-facing console for descendants to inherit. */
+export function nativeGuiHostRequiresHiddenWindows(opts: {
+	platform: NodeJS.Platform;
+	environmentValue?: string;
+}): boolean {
+	return opts.platform === "win32" && opts.environmentValue === "1";
+}
+
 /**
  * Decide whether the long-lived Python kernel subprocess should be spawned
  * with `windowsHide: true`.
@@ -124,6 +134,14 @@ export function __resetWindowsConsoleProbeCache(): void {
  * `windowsHide` is a no-op there.
  */
 export function hostHasInheritableConsole(): boolean {
+	if (
+		nativeGuiHostRequiresHiddenWindows({
+			platform: process.platform,
+			environmentValue: process.env[NATIVE_GUI_HOST_ENV],
+		})
+	) {
+		return false;
+	}
 	const nativeConsole = process.platform === "win32" ? probeWindowsConsoleWindow() : null;
 	return consoleAttached({
 		nativeConsole,

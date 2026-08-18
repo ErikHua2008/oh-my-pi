@@ -92,6 +92,12 @@ private:
 		std::string row_id;
 		MessageActionKind action = MessageActionKind::Copy;
 	};
+	enum class FileActionKind : std::uint8_t { Open, Reveal };
+	struct FileActionHit final {
+		std::string row_id;
+		std::size_t file_index = 0;
+		FileActionKind action = FileActionKind::Open;
+	};
 
 	static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 	LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
@@ -117,6 +123,10 @@ private:
 		float origin_x,
 		float origin_y);
 	void DrawMedia(const NativeTranscriptRow& row, float left, float top, float width);
+	void DrawFileCards(
+		const NativeTranscriptRow& row,
+		const NativeTranscriptBubbleLayout& bubble_layout,
+		float row_top);
 	[[nodiscard]] ID2D1Bitmap* GetMediaBitmap(std::string_view image_id);
 	void RequestMedia(std::string_view image_id);
 	void TrimMediaCache();
@@ -126,6 +136,10 @@ private:
 	[[nodiscard]] std::optional<ProcessItemHit> HitTestProcessItemHeader(POINT point) const;
 	[[nodiscard]] std::optional<MessageActionHit> HitTestMessageAction(POINT point);
 	void UpdateMessageActionHover(POINT point);
+	[[nodiscard]] std::optional<FileActionHit> HitTestFileAction(POINT point);
+	void UpdateFileActionHover(POINT point);
+	void ActivateFileAction(const FileActionHit& hit);
+	void SetFileActionFeedback(const FileActionHit& hit, std::wstring text);
 	void ToggleExpandable(std::string_view row_id);
 	void ToggleProcessItem(const ProcessItemHit& hit);
 	[[nodiscard]] bool ScrollProcessDetailAtPoint(POINT point, int wheel_delta);
@@ -192,6 +206,9 @@ private:
 	std::optional<SelectionPoint> selection_anchor_;
 	std::optional<SelectionPoint> selection_focus_;
 	std::optional<MessageActionHit> hovered_message_action_;
+	std::optional<FileActionHit> hovered_file_action_;
+	std::optional<FileActionHit> file_action_feedback_;
+	std::wstring file_action_feedback_text_;
 	std::string copied_row_id_;
 	std::int64_t scroll_offset_ = 0;
 	std::size_t history_remaining_ = 0;

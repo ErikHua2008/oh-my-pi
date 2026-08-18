@@ -25,9 +25,10 @@ option(OMP_CPP_SHELL_BUILD_TESTS "Build cpp-shell unit tests" ON)
 option(OMP_CPP_SHELL_BUILD_WEB_ASSETS "Rebuild collab-web assets with the native shell" ON)
 option(OMP_CPP_SHELL_BUILD_CORE_BUNDLE "Rebuild the single-file coding-agent Core bundle" ON)
 
+get_filename_component(OMP_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+
 if(OMP_CPP_SHELL_BUILD_WEB_ASSETS OR OMP_CPP_SHELL_BUILD_CORE_BUNDLE)
 	find_program(OMP_BUN_EXECUTABLE NAMES bun bun.exe REQUIRED)
-	get_filename_component(OMP_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 
 	if(OMP_CPP_SHELL_BUILD_WEB_ASSETS)
 		set(OMP_COLLAB_WEB_DIRECTORY "${OMP_REPOSITORY_ROOT}/packages/collab-web")
@@ -69,6 +70,18 @@ if(OMP_CPP_SHELL_BUILD_WEB_ASSETS OR OMP_CPP_SHELL_BUILD_CORE_BUNDLE)
 		add_custom_target(omp_coding_agent_bundle DEPENDS "${OMP_CODING_AGENT_BUNDLE}")
 	endif()
 endif()
+
+# The resource script references these ICO files by path. Resource compilers do
+# not reliably report those indirect dependencies to Visual Studio/MSBuild, so
+# changing only an ICO could otherwise leave the previous icon embedded in the
+# executable. Make the relationship explicit for every generator.
+set(OMP_GRIMOIRE_ICON_LIGHT "${OMP_REPOSITORY_ROOT}/packages/collab-web/public/grimoire-cube-on-light.ico")
+set(OMP_GRIMOIRE_ICON_DARK "${OMP_REPOSITORY_ROOT}/packages/collab-web/public/grimoire-cube-on-dark.ico")
+set_property(
+	SOURCE src/omp_shell.rc
+	APPEND
+	PROPERTY OBJECT_DEPENDS "${OMP_GRIMOIRE_ICON_LIGHT};${OMP_GRIMOIRE_ICON_DARK}"
+)
 
 include(cmake/Dependencies.cmake)
 

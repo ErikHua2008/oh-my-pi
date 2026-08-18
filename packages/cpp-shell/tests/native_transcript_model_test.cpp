@@ -66,6 +66,18 @@ OMP_TEST("native transcript preserves structured second-level process items") {
 	OMP_CHECK(model.RowAt(0).process_items[0].detail.find("line 3") != std::string::npos);
 }
 
+OMP_TEST("native transcript accepts filesystem-absolute report paths and rejects device paths") {
+	using omp::shell::IsNativeTranscriptAbsoluteFilePath;
+	OMP_CHECK(IsNativeTranscriptAbsoluteFilePath(R"(C:\reports\result.html)"));
+	OMP_CHECK(IsNativeTranscriptAbsoluteFilePath(R"(\\server\share\result.pdf)"));
+	OMP_CHECK(IsNativeTranscriptAbsoluteFilePath(R"(\\?\C:\very-long\result.html)"));
+	OMP_CHECK(IsNativeTranscriptAbsoluteFilePath(R"(\\?\UNC\server\share\result.pdf)"));
+	OMP_CHECK(!IsNativeTranscriptAbsoluteFilePath(R"(C:relative.html)"));
+	OMP_CHECK(!IsNativeTranscriptAbsoluteFilePath(R"(..\relative.html)"));
+	OMP_CHECK(!IsNativeTranscriptAbsoluteFilePath("https://example.com/report.html"));
+	OMP_CHECK(!IsNativeTranscriptAbsoluteFilePath(R"(\\.\PhysicalDrive0)"));
+}
+
 OMP_TEST("native transcript visible range handles exact boundaries and overscan") {
 	omp::shell::NativeTranscriptModel model;
 	model.ReplaceSnapshot({Row("a", 10), Row("b", 20), Row("c", 30), Row("d", 40)});

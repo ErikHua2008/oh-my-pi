@@ -324,7 +324,10 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 							</div>
 							<div>
 								<h2>{sessionTitle(selected)}</h2>
-								<p>The conversation will be converted to OMP format and stored under its original project.</p>
+								<p>
+									The conversation will be converted to OMP format and associated with its original project.
+									Chat data is stored in OMP&apos;s app data directory, not inside the project folder.
+								</p>
 							</div>
 							<dl>
 								<div>

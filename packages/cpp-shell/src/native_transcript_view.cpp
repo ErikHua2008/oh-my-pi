@@ -46,10 +46,12 @@ constexpr float kScrollbarHotWidth = 5.0F;
 constexpr UINT_PTR kScrollbarHideTimer = 1;
 constexpr UINT_PTR kMessageCopyFeedbackTimer = 2;
 constexpr UINT_PTR kMediaRetryTimer = 3;
+constexpr UINT_PTR kFileActionFeedbackTimer = 4;
 constexpr UINT kScrollbarHideDelayMs = 1'100;
 constexpr UINT kMessageCopyFeedbackDelayMs = 1'200;
 constexpr UINT kMediaFailureRetryDelayMs = 2'000;
 constexpr UINT kMediaRequestTimeoutMs = 5'000;
+constexpr UINT kFileActionFeedbackDelayMs = 2'200;
 constexpr std::uint8_t kMaximumMediaRequestAttempts = 3;
 constexpr UINT kContextCopy = 1;
 constexpr UINT kContextSelectAll = 2;
@@ -391,6 +393,7 @@ void NativeTranscriptView::Destroy() {
 		KillTimer(window_, kScrollbarHideTimer);
 		KillTimer(window_, kMessageCopyFeedbackTimer);
 		KillTimer(window_, kMediaRetryTimer);
+		KillTimer(window_, kFileActionFeedbackTimer);
 	}
 	DiscardDeviceResources();
 	layout_cache_.clear();
@@ -511,6 +514,7 @@ void NativeTranscriptView::Clear() {
 		KillTimer(window_, kScrollbarHideTimer);
 		KillTimer(window_, kMessageCopyFeedbackTimer);
 		KillTimer(window_, kMediaRetryTimer);
+		KillTimer(window_, kFileActionFeedbackTimer);
 	}
 	model_.Clear();
 	layout_cache_.clear();
@@ -530,6 +534,9 @@ void NativeTranscriptView::Clear() {
 	scrollbar_hovered_ = false;
 	jump_button_hovered_ = false;
 	hovered_message_action_.reset();
+	hovered_file_action_.reset();
+	file_action_feedback_.reset();
+	file_action_feedback_text_.clear();
 	copied_row_id_.clear();
 	mouse_tracking_ = false;
 	stick_to_bottom_ = true;
@@ -568,10 +575,14 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 		process_detail_scroll_offsets_.clear();
 		ClearSelection();
 		hovered_message_action_.reset();
+		hovered_file_action_.reset();
+		file_action_feedback_.reset();
+		file_action_feedback_text_.clear();
 		copied_row_id_.clear();
 		if (window_ != nullptr) {
 			KillTimer(window_, kScrollbarHideTimer);
 			KillTimer(window_, kMessageCopyFeedbackTimer);
+			KillTimer(window_, kFileActionFeedbackTimer);
 		}
 	}
 	model_.ReplaceSnapshot(std::move(rows));
@@ -610,6 +621,12 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 	}
 	if (hovered_message_action_ && !model_.IndexOf(hovered_message_action_->row_id)) {
 		hovered_message_action_.reset();
+	}
+	if (hovered_file_action_ && !model_.IndexOf(hovered_file_action_->row_id)) hovered_file_action_.reset();
+	if (file_action_feedback_ && !model_.IndexOf(file_action_feedback_->row_id)) {
+		file_action_feedback_.reset();
+		file_action_feedback_text_.clear();
+		if (window_ != nullptr) KillTimer(window_, kFileActionFeedbackTimer);
 	}
 	if (!copied_row_id_.empty() && !model_.IndexOf(copied_row_id_)) {
 		copied_row_id_.clear();
@@ -664,6 +681,12 @@ void NativeTranscriptView::Remove(std::string_view id) {
 		ClearSelection();
 	}
 	if (hovered_message_action_ && hovered_message_action_->row_id == id) hovered_message_action_.reset();
+	if (hovered_file_action_ && hovered_file_action_->row_id == id) hovered_file_action_.reset();
+	if (file_action_feedback_ && file_action_feedback_->row_id == id) {
+		file_action_feedback_.reset();
+		file_action_feedback_text_.clear();
+		if (window_ != nullptr) KillTimer(window_, kFileActionFeedbackTimer);
+	}
 	if (copied_row_id_ == id) {
 		copied_row_id_.clear();
 		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
@@ -831,6 +854,15 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			InvalidateRect(window_, nullptr, FALSE);
 			return 0;
 		}
+		if (wparam == kFileActionFeedbackTimer) {
+			KillTimer(window_, kFileActionFeedbackTimer);
+			if (file_action_feedback_) {
+				file_action_feedback_.reset();
+				file_action_feedback_text_.clear();
+				InvalidateRect(window_, nullptr, FALSE);
+			}
+			return 0;
+		}
 		break;
 	case WM_MOUSEWHEEL: {
 		POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
@@ -952,6 +984,10 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			scrollbar_drag_anchor_offset_ = scroll_offset_;
 			return 0;
 		}
+		if (const auto action = HitTestFileAction(point)) {
+			ActivateFileAction(*action);
+			return 0;
+		}
 		if (const auto action = HitTestMessageAction(point)) {
 			if (action->action == MessageActionKind::Copy) {
 				CopyRowToClipboard(action->row_id);
@@ -990,6 +1026,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		}
 		UpdateOverlayHover(point);
 		UpdateMessageActionHover(point);
+		UpdateFileActionHover(point);
 		if (scrollbar_dragging_ && (wparam & MK_LBUTTON) != 0) {
 			const NativeTranscriptScrollbarGeometry scrollbar = CurrentScrollbarGeometry();
 			const float travel = scrollbar.track.Height() - scrollbar.thumb.Height();
@@ -1057,10 +1094,11 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 	}
 	case WM_MOUSELEAVE:
 		mouse_tracking_ = false;
-		if (scrollbar_hovered_ || jump_button_hovered_ || hovered_message_action_) {
+		if (scrollbar_hovered_ || jump_button_hovered_ || hovered_message_action_ || hovered_file_action_) {
 			scrollbar_hovered_ = false;
 			jump_button_hovered_ = false;
 			hovered_message_action_.reset();
+			hovered_file_action_.reset();
 			InvalidateRect(window_, nullptr, FALSE);
 		}
 		ScheduleOverlayScrollbarHide();
@@ -1079,7 +1117,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 					SetCursor(LoadCursorW(nullptr, IDC_ARROW));
 					return TRUE;
 				}
-				if (HitTestProcessItemHeader(point) || HitTestExpandableHeader(point)) {
+				if (HitTestFileAction(point) || HitTestProcessItemHeader(point) || HitTestExpandableHeader(point)) {
 					SetCursor(LoadCursorW(nullptr, IDC_HAND));
 					return TRUE;
 				}
@@ -1094,7 +1132,8 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		break;
 	case WM_LBUTTONDBLCLK: {
 		const POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
-		if (HitTestMessageAction(point) || HitTestProcessItemHeader(point) || HitTestExpandableHeader(point)) {
+		if (HitTestFileAction(point) || HitTestMessageAction(point) || HitTestProcessItemHeader(point) ||
+			HitTestExpandableHeader(point)) {
 			return 0;
 		}
 		if (const auto hit = HitTestText(point)) {
@@ -1126,6 +1165,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 		KillTimer(destroyed_window, kScrollbarHideTimer);
 		KillTimer(destroyed_window, kMessageCopyFeedbackTimer);
 		KillTimer(destroyed_window, kMediaRetryTimer);
+		KillTimer(destroyed_window, kFileActionFeedbackTimer);
 		SetWindowLongPtrW(destroyed_window, GWLP_USERDATA, 0);
 		window_ = nullptr;
 		return DefWindowProcW(destroyed_window, message, wparam, lparam);
@@ -1316,7 +1356,8 @@ bool NativeTranscriptView::MeasureRowHeight(std::size_t index, float viewport_wi
 				layout->measured_width,
 				layout->measured_height,
 				row.media_ids.size(),
-				!row.time_label.empty())
+				!row.time_label.empty(),
+				row.file_links.size())
 				.row_height);
 		} else {
 			measured_height = static_cast<std::int32_t>(std::ceil(
@@ -1407,7 +1448,8 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 			cached->measured_width,
 			cached->measured_height,
 			row.media_ids.size(),
-			!row.time_label.empty());
+			!row.time_label.empty(),
+			row.file_links.size());
 	}
 	float structured_height = 2.0F * kRowVerticalPadding + kLabelHeight + kTextGap;
 	if (structured_process) {
@@ -1496,6 +1538,7 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 			user ? user_foreground_brush_.Get() : primary_brush_.Get(),
 			D2D1_DRAW_TEXT_OPTIONS_CLIP);
 		DrawMedia(row, content_left, origin.y + cached->measured_height + kMediaGap, content_width);
+		if (message && !row.file_links.empty()) DrawFileCards(row, bubble_layout, row_top);
 	}
 	if (message && !row.time_label.empty()) {
 		DrawMessageActions(row, bubble_layout, row_top);
@@ -1760,6 +1803,101 @@ void NativeTranscriptView::DrawMedia(const NativeTranscriptRow& row, float left,
 				row.kind == NativeTranscriptRowKind::User ? user_foreground_brush_.Get() : muted_brush_.Get());
 		}
 		top += kThumbnailHeight + kMediaGap;
+	}
+}
+
+void NativeTranscriptView::DrawFileCards(
+	const NativeTranscriptRow& row,
+	const NativeTranscriptBubbleLayout& bubble_layout,
+	float row_top) {
+	float top = row_top + bubble_layout.file_cards_top;
+	for (std::size_t index = 0; index < row.file_links.size(); ++index) {
+		const NativeTranscriptFileLink& link = row.file_links[index];
+		const NativeTranscriptFileCardLayout card =
+			ComputeNativeTranscriptFileCardLayout(bubble_layout.content_left, top, bubble_layout.content_width);
+		const auto hovered = [this, &row, index](FileActionKind action) {
+			return hovered_file_action_ && hovered_file_action_->row_id == row.id &&
+				hovered_file_action_->file_index == index && hovered_file_action_->action == action;
+		};
+		const D2D1_ROUNDED_RECT surface = D2D1::RoundedRect(ToD2DRect(card.card), 8.0F, 8.0F);
+		render_target_->FillRoundedRectangle(surface, jump_button_brush_.Get());
+		render_target_->DrawRoundedRectangle(surface, line_brush_.Get(), 1.0F);
+
+		// Compact document glyph with a folded corner.
+		const float fold = 7.0F;
+		render_target_->DrawRoundedRectangle(
+			D2D1::RoundedRect(ToD2DRect(card.icon), 3.0F, 3.0F), muted_brush_.Get(), 1.4F);
+		render_target_->DrawLine(
+			D2D1::Point2F(card.icon.right - fold, card.icon.top),
+			D2D1::Point2F(card.icon.right - fold, card.icon.top + fold),
+			muted_brush_.Get(),
+			1.2F);
+		render_target_->DrawLine(
+			D2D1::Point2F(card.icon.right - fold, card.icon.top + fold),
+			D2D1::Point2F(card.icon.right, card.icon.top + fold),
+			muted_brush_.Get(),
+			1.2F);
+		for (float offset : {17.0F, 22.0F, 27.0F}) {
+			render_target_->DrawLine(
+				D2D1::Point2F(card.icon.left + 6.0F, card.icon.top + offset),
+				D2D1::Point2F(card.icon.right - 6.0F, card.icon.top + offset),
+				muted_brush_.Get(),
+				1.0F);
+		}
+
+		const auto draw_button = [this, &hovered](const NativeTranscriptRectF& bounds, FileActionKind action) {
+			const bool hot = hovered(action);
+			const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(ToD2DRect(bounds), 6.0F, 6.0F);
+			render_target_->FillRoundedRectangle(shape, hot ? jump_button_hot_brush_.Get() : assistant_brush_.Get());
+			render_target_->DrawRoundedRectangle(shape, hot ? drop_accent_brush_.Get() : line_brush_.Get(), 1.0F);
+		};
+		draw_button(card.open, FileActionKind::Open);
+		draw_button(card.reveal, FileActionKind::Reveal);
+
+		const std::wstring title = Utf8ToWide(link.label);
+		std::wstring secondary = Utf8ToWide(link.path);
+		ID2D1SolidColorBrush* secondary_brush = muted_brush_.Get();
+		if (file_action_feedback_ && file_action_feedback_->row_id == row.id &&
+			file_action_feedback_->file_index == index && !file_action_feedback_text_.empty()) {
+			secondary = file_action_feedback_text_;
+			secondary_brush = drop_accent_brush_.Get();
+		}
+		render_target_->DrawTextW(
+			title.data(),
+			static_cast<UINT32>(std::min<std::size_t>(title.size(), std::numeric_limits<UINT32>::max())),
+			label_format_.Get(),
+			ToD2DRect(card.title),
+			primary_brush_.Get(),
+			D2D1_DRAW_TEXT_OPTIONS_CLIP);
+		render_target_->DrawTextW(
+			secondary.data(),
+			static_cast<UINT32>(std::min<std::size_t>(secondary.size(), std::numeric_limits<UINT32>::max())),
+			label_format_.Get(),
+			ToD2DRect(card.path),
+			secondary_brush,
+			D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+		label_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+		label_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+		constexpr std::wstring_view kOpen = L"打开";
+		constexpr std::wstring_view kReveal = L"所在文件夹";
+		render_target_->DrawTextW(
+			kOpen.data(),
+			static_cast<UINT32>(kOpen.size()),
+			label_format_.Get(),
+			ToD2DRect(card.open),
+			hovered(FileActionKind::Open) ? drop_accent_brush_.Get() : primary_brush_.Get(),
+			D2D1_DRAW_TEXT_OPTIONS_CLIP);
+		render_target_->DrawTextW(
+			kReveal.data(),
+			static_cast<UINT32>(kReveal.size()),
+			label_format_.Get(),
+			ToD2DRect(card.reveal),
+			hovered(FileActionKind::Reveal) ? drop_accent_brush_.Get() : primary_brush_.Get(),
+			D2D1_DRAW_TEXT_OPTIONS_CLIP);
+		label_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+		label_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+		top += kNativeTranscriptFileCardHeight + kNativeTranscriptFileCardGap;
 	}
 }
 
@@ -2078,7 +2216,13 @@ std::optional<NativeTranscriptView::MessageActionHit> NativeTranscriptView::HitT
 		return std::nullopt;
 	}
 	NativeTranscriptBubbleLayout bubble = ComputeNativeTranscriptBubbleLayout(
-		viewport_width, user, layout->measured_width, layout->measured_height, row.media_ids.size(), true);
+		viewport_width,
+		user,
+		layout->measured_width,
+		layout->measured_height,
+		row.media_ids.size(),
+		true,
+		row.file_links.size());
 	NativeTranscriptMessageActionsLayout actions =
 		ComputeNativeTranscriptMessageActionsLayout(bubble, user, row.can_edit);
 	const float row_top = static_cast<float>(model_.RowTop(range.first) - scroll_offset_);
@@ -2098,6 +2242,91 @@ void NativeTranscriptView::UpdateMessageActionHover(POINT point) {
 	if (unchanged) return;
 	hovered_message_action_ = next;
 	if (window_ != nullptr) InvalidateRect(window_, nullptr, FALSE);
+}
+
+std::optional<NativeTranscriptView::FileActionHit> NativeTranscriptView::HitTestFileAction(POINT point) {
+	if (model_.Empty() || window_ == nullptr) return std::nullopt;
+	RECT client{};
+	GetClientRect(window_, &client);
+	if (client.right <= client.left || client.bottom <= client.top) return std::nullopt;
+	const float scale = std::max(0.01F, DpiScale());
+	const float x = static_cast<float>(point.x) / scale;
+	const float y = static_cast<float>(point.y) / scale;
+	const float viewport_width = static_cast<float>(client.right - client.left) / scale;
+	const std::int64_t content_y = scroll_offset_ + static_cast<std::int64_t>(std::floor(y));
+	const NativeTranscriptVisibleRange range = model_.VisibleRange(content_y, 1);
+	if (range.Empty() || range.first >= model_.Size()) return std::nullopt;
+	const NativeTranscriptRow& row = model_.RowAt(range.first);
+	if (row.kind != NativeTranscriptRowKind::Assistant || row.file_links.empty()) return std::nullopt;
+	TextLayout* layout = GetTextLayout(row, NativeTranscriptBubbleMaxContentWidth(viewport_width, false));
+	if (layout == nullptr) return std::nullopt;
+	const NativeTranscriptBubbleLayout bubble = ComputeNativeTranscriptBubbleLayout(
+		viewport_width,
+		false,
+		layout->measured_width,
+		layout->measured_height,
+		row.media_ids.size(),
+		!row.time_label.empty(),
+		row.file_links.size());
+	float top = static_cast<float>(model_.RowTop(range.first) - scroll_offset_) + bubble.file_cards_top;
+	for (std::size_t index = 0; index < row.file_links.size(); ++index) {
+		const NativeTranscriptFileCardLayout card =
+			ComputeNativeTranscriptFileCardLayout(bubble.content_left, top, bubble.content_width);
+		if (card.open.Contains(x, y)) return FileActionHit{row.id, index, FileActionKind::Open};
+		if (card.reveal.Contains(x, y)) return FileActionHit{row.id, index, FileActionKind::Reveal};
+		top += kNativeTranscriptFileCardHeight + kNativeTranscriptFileCardGap;
+	}
+	return std::nullopt;
+}
+
+void NativeTranscriptView::UpdateFileActionHover(POINT point) {
+	const auto next = HitTestFileAction(point);
+	const bool unchanged = (!next && !hovered_file_action_) ||
+		(next && hovered_file_action_ && next->row_id == hovered_file_action_->row_id &&
+			next->file_index == hovered_file_action_->file_index && next->action == hovered_file_action_->action);
+	if (unchanged) return;
+	hovered_file_action_ = next;
+	if (window_ != nullptr) InvalidateRect(window_, nullptr, FALSE);
+}
+
+void NativeTranscriptView::SetFileActionFeedback(const FileActionHit& hit, std::wstring text) {
+	file_action_feedback_ = hit;
+	file_action_feedback_text_ = std::move(text);
+	if (window_ != nullptr) {
+		KillTimer(window_, kFileActionFeedbackTimer);
+		SetTimer(window_, kFileActionFeedbackTimer, kFileActionFeedbackDelayMs, nullptr);
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+}
+
+void NativeTranscriptView::ActivateFileAction(const FileActionHit& hit) {
+	const auto row_index = model_.IndexOf(hit.row_id);
+	if (!row_index) return;
+	const NativeTranscriptRow& row = model_.RowAt(*row_index);
+	if (hit.file_index >= row.file_links.size()) return;
+	const NativeTranscriptFileLink& link = row.file_links[hit.file_index];
+	if (!IsNativeTranscriptAbsoluteFilePath(link.path)) {
+		SetFileActionFeedback(hit, L"文件路径无效");
+		return;
+	}
+	const std::wstring path = Utf8ToWide(link.path);
+	if (path.empty() || GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+		SetFileActionFeedback(hit, L"文件已移动或删除");
+		return;
+	}
+	if (hit.action == FileActionKind::Open) {
+		const HINSTANCE opened = ShellExecuteW(window_, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		if (reinterpret_cast<INT_PTR>(opened) <= 32) SetFileActionFeedback(hit, L"无法打开这个文件");
+		return;
+	}
+	PIDLIST_ABSOLUTE item = ILCreateFromPathW(path.c_str());
+	if (item == nullptr) {
+		SetFileActionFeedback(hit, L"无法定位这个文件");
+		return;
+	}
+	const HRESULT revealed = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+	CoTaskMemFree(item);
+	if (FAILED(revealed)) SetFileActionFeedback(hit, L"无法打开所在文件夹");
 }
 
 void NativeTranscriptView::ToggleExpandable(std::string_view row_id) {
@@ -2273,7 +2502,9 @@ std::optional<NativeTranscriptView::SelectionPoint> NativeTranscriptView::HitTes
 			user,
 			layout->measured_width,
 			layout->measured_height,
-			row.media_ids.size());
+			row.media_ids.size(),
+			false,
+			row.file_links.size());
 	}
 	const float content_left = message ? bubble_layout.content_left : horizontal_padding;
 	const float text_top = static_cast<float>(model_.RowTop(index) - scroll_offset_) +

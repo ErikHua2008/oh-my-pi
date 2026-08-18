@@ -10,6 +10,7 @@ import {
 	removePinnedSession,
 	removeSessionReadThrough,
 } from "../src/components/sessions/SessionsPanel";
+import { ProjectRenameDialog } from "../src/components/sessions/ProjectRenameDialog";
 import { ConfirmDialog } from "../src/components/shell/ConfirmDialog";
 import { groupArchivedSessions, SettingsModal } from "../src/components/shell/SettingsModal";
 import type { ControlSnapshot } from "../src/lib/control-client";
@@ -174,12 +175,12 @@ describe("Codex import conversation matching", () => {
 });
 
 describe("SessionsPanel session actions", () => {
-	it("uses the Grimoire Router App name and both monochrome theme marks", () => {
+	it("uses the Grimoire Router App name and both theme-aware cube marks", () => {
 		const html = renderPanel(snapshot([]));
 
 		expect(html).toContain("Grimoire Router App");
-		expect(html).toContain("grimoire-brain-on-light.svg");
-		expect(html).toContain("grimoire-brain-on-dark.svg");
+		expect(html).toContain("grimoire-cube-on-light.svg");
+		expect(html).toContain("grimoire-cube-on-dark.svg");
 		expect(html).not.toContain(">OMP<");
 	});
 
@@ -266,6 +267,23 @@ describe("SessionsPanel session actions", () => {
 
 		expect(html).toContain('class="sh-project-new"');
 		expect(html).toContain('title="在 test 中新建对话"');
+	});
+
+	it("uses a dedicated project display-name dialog instead of renaming the folder", () => {
+		const html = renderToStaticMarkup(
+			<ProjectRenameDialog
+				name="旧名称"
+				path="C:\work\folder"
+				onSave={async () => {}}
+				onCancel={() => {}}
+			/>,
+		);
+
+		expect(html).toContain('role="dialog"');
+		expect(html).toContain("重命名项目");
+		expect(html).toContain("不会重命名或移动硬盘上的文件夹");
+		expect(html).toContain('maxLength="120"');
+		expect(html).toContain("C:\\work\\folder");
 	});
 
 	it("blocks inline archive while another session operation is pending", () => {

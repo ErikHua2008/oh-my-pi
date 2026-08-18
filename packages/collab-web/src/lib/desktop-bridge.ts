@@ -50,6 +50,8 @@ export interface DesktopNativeTranscriptRow {
 	durationMs?: number;
 	/** Second-level operation disclosures shown after the reasoning row is opened. */
 	processItems?: readonly DesktopNativeTranscriptProcessItem[];
+	/** Bounded local-file references rendered as native cards below an assistant answer. */
+	fileLinks?: readonly DesktopNativeTranscriptFileLink[];
 }
 
 export interface DesktopNativeTranscriptProcessItem {
@@ -57,6 +59,11 @@ export interface DesktopNativeTranscriptProcessItem {
 	summary: string;
 	detail: string;
 	failed?: boolean;
+}
+
+export interface DesktopNativeTranscriptFileLink {
+	path: string;
+	label: string;
 }
 
 export interface DesktopNativeTranscriptImage {
@@ -459,12 +466,10 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 		},
 		async renameProject(path: string, name: string) {
 			if (authorization !== "authorized") return;
-			try {
-				await invoke<void>("project_rename", { path, name });
-			} catch (error) {
-				authorization = "denied";
-				throw error;
-			}
+			// Rename can fail because of validation or a transient config write.
+			// That does not mean the already-probed desktop bridge disappeared;
+			// keeping it authorized lets the dialog report the error and retry.
+			await invoke<void>("project_rename", { path, name });
 		},
 		async removeProject(path: string) {
 			if (authorization !== "authorized") return;
