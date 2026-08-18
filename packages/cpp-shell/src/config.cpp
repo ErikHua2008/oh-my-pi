@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
 #include <system_error>
 
@@ -16,13 +17,21 @@ namespace omp::shell {
 namespace {
 
 using Json = nlohmann::json;
+constexpr std::uintmax_t kMaximumConfigBytes = 8 * 1024 * 1024;
+constexpr std::size_t kMaximumPathBytes = 32 * 1024;
+constexpr std::size_t kMaximumSessionIdBytes = 512;
+constexpr std::size_t kMaximumTimestampBytes = 128;
 
 std::optional<std::wstring> OptionalWideString(const Json& json, const char* key) {
 	const auto item = json.find(key);
 	if (item == json.end() || !item->is_string()) {
 		return std::nullopt;
 	}
-	const std::wstring value = Utf8ToWide(item->get_ref<const std::string&>());
+	const std::string& encoded = item->get_ref<const std::string&>();
+	if (encoded.size() > kMaximumPathBytes) {
+		return std::nullopt;
+	}
+	const std::wstring value = Utf8ToWide(encoded);
 	return value.empty() ? std::nullopt : std::optional<std::wstring>(value);
 }
 
@@ -93,6 +102,9 @@ std::optional<std::wstring> ShellConfig::ProjectName(std::wstring_view project_d
 }
 
 bool ShellConfig::SetProjectName(std::wstring project_directory, std::wstring name) {
+	if (project_directory.empty()) {
+		return false;
+	}
 	const auto first = name.find_first_not_of(L" \t\r\n");
 	if (first == std::wstring::npos) {
 		return false;
@@ -127,6 +139,13 @@ std::filesystem::path DefaultConfigPath() {
 }
 
 ShellConfig LoadConfig(const std::filesystem::path& path) {
+	std::error_code size_error;
+	const std::uintmax_t file_size = std::filesystem::file_size(path, size_error);
+	if (!size_error && file_size > kMaximumConfigBytes) {
+		std::error_code ignored;
+		std::filesystem::copy_file(path, BackupPath(path), std::filesystem::copy_options::overwrite_existing, ignored);
+		return {};
+	}
 	std::ifstream input(path, std::ios::binary);
 	if (!input) {
 		return {};
@@ -141,22 +160,25 @@ ShellConfig LoadConfig(const std::filesystem::path& path) {
 		config.last_project = OptionalWideString(json, "lastProject");
 		if (const auto projects = json.find("recentProjects"); projects != json.end() && projects->is_array()) {
 			for (const auto& project : *projects) {
-				if (project.is_string() && config.recent_projects.size() < 8) {
+				if (project.is_string() && project.get_ref<const std::string&>().size() <= kMaximumPathBytes &&
+					config.recent_projects.size() < 8) {
 					config.recent_projects.push_back(Utf8ToWide(project.get_ref<const std::string&>()));
 				}
 			}
 		}
 		if (const auto names = json.find("projectNames"); names != json.end() && names->is_object()) {
 			for (const auto& [project_path, name] : names->items()) {
-				if (name.is_string()) {
-					config.project_names.emplace(
-						Utf8ToWide(project_path), Utf8ToWide(name.get_ref<const std::string&>()));
+				if (name.is_string() && project_path.size() <= kMaximumPathBytes && config.project_names.size() < 256) {
+					static_cast<void>(config.SetProjectName(
+						Utf8ToWide(project_path), Utf8ToWide(name.get_ref<const std::string&>())));
 				}
 			}
 		}
 		if (const auto pinned = json.find("pinnedSessions"); pinned != json.end() && pinned->is_array()) {
 			for (const auto& session : *pinned) {
-				if (session.is_string() && config.pinned_sessions.size() < 1000) {
+				if (session.is_string() && !session.get_ref<const std::string&>().empty() &&
+					session.get_ref<const std::string&>().size() <= kMaximumSessionIdBytes &&
+					config.pinned_sessions.size() < 1000) {
 					config.pinned_sessions.push_back(session.get_ref<const std::string&>());
 				}
 			}
@@ -164,7 +186,9 @@ ShellConfig LoadConfig(const std::filesystem::path& path) {
 		if (const auto read_through = json.find("sessionReadThrough");
 			read_through != json.end() && read_through->is_object()) {
 			for (const auto& [session, timestamp] : read_through->items()) {
-				if (timestamp.is_string() && config.session_read_through.size() < 5000) {
+				if (!session.empty() && session.size() <= kMaximumSessionIdBytes && timestamp.is_string() &&
+					timestamp.get_ref<const std::string&>().size() <= kMaximumTimestampBytes &&
+					config.session_read_through.size() < 5000) {
 					config.session_read_through.emplace(session, timestamp.get_ref<const std::string&>());
 				}
 			}

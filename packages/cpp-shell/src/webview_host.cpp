@@ -3,8 +3,10 @@
 #include "omp_shell/text_utils.h"
 
 #include <ShlObj.h>
+#include <shellapi.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <nlohmann/json.hpp>
 #include <utility>
@@ -49,11 +51,110 @@ std::wstring HtmlEscape(std::wstring_view value) {
 		case L'\r':
 			break;
 		default:
-			escaped.push_back(ch);
+			if (ch < 0x20 && ch != L'\t') {
+				escaped.push_back(L'\uFFFD');
+			} else {
+				escaped.push_back(ch);
+			}
 			break;
 		}
 	}
 	return escaped;
+}
+
+bool IsDecimalPort(std::wstring_view value) {
+	if (value.empty() || value.size() > 5) {
+		return false;
+	}
+	std::uint32_t port = 0;
+	for (const wchar_t ch : value) {
+		if (ch < L'0' || ch > L'9') {
+			return false;
+		}
+		port = port * 10U + static_cast<std::uint32_t>(ch - L'0');
+	}
+	return port != 0U && port <= 65535U;
+}
+
+bool IsLoopbackAuthority(std::wstring_view authority) {
+	if (authority.find(L'@') != std::wstring_view::npos) {
+		return false;
+	}
+	const auto separator = authority.rfind(L':');
+	if (separator == std::wstring_view::npos) {
+		return false;
+	}
+	const std::wstring_view host = authority.substr(0, separator);
+	return (host == L"127.0.0.1" || host == L"localhost") && IsDecimalPort(authority.substr(separator + 1));
+}
+
+bool IsTrustedLoopbackHttpUri(std::wstring_view uri) {
+	constexpr std::wstring_view scheme = L"http://";
+	if (uri.size() > 8U * 1024U || !uri.starts_with(scheme)) {
+		return false;
+	}
+	for (const wchar_t ch : uri) {
+		if (ch <= 0x20 || ch == 0x7F || ch == L'\\' || ch == L'"' || ch == L'<' || ch == L'>') {
+			return false;
+		}
+	}
+	const auto authority_end = uri.find_first_of(L"/?#", scheme.size());
+	const std::wstring_view authority = authority_end == std::wstring_view::npos
+		? uri.substr(scheme.size())
+		: uri.substr(scheme.size(), authority_end - scheme.size());
+	return IsLoopbackAuthority(authority);
+}
+
+bool IsTrustedWebViewUri(std::wstring_view uri) {
+	return uri == L"about:blank" || IsTrustedLoopbackHttpUri(uri);
+}
+
+bool StartsWithAsciiCaseInsensitive(std::wstring_view value, std::wstring_view prefix) {
+	if (value.size() < prefix.size()) {
+		return false;
+	}
+	for (std::size_t index = 0; index < prefix.size(); ++index) {
+		wchar_t actual = value[index];
+		if (actual >= L'A' && actual <= L'Z') {
+			actual = static_cast<wchar_t>(actual - L'A' + L'a');
+		}
+		if (actual != prefix[index]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool IsAllowedExternalUri(std::wstring_view uri) {
+	constexpr std::size_t kMaximumUriLength = 8U * 1024U;
+	if (uri.empty() || uri.size() > kMaximumUriLength ||
+		(!StartsWithAsciiCaseInsensitive(uri, L"http://") &&
+			!StartsWithAsciiCaseInsensitive(uri, L"https://"))) {
+		return false;
+	}
+	const std::size_t scheme_end = uri.find(L"://");
+	if (scheme_end == std::wstring_view::npos) {
+		return false;
+	}
+	const std::size_t authority_start = scheme_end + 3U;
+	const std::size_t authority_end = uri.find_first_of(L"/?#", authority_start);
+	if (authority_start >= uri.size() || authority_end == authority_start) {
+		return false;
+	}
+	for (const wchar_t ch : uri) {
+		if (ch <= 0x20 || ch == 0x7F || ch == L'\\' || ch == L'"' || ch == L'<' || ch == L'>') {
+			return false;
+		}
+	}
+	return true;
+}
+
+void OpenExternalUri(HWND owner, std::wstring_view uri) {
+	if (!IsAllowedExternalUri(uri)) {
+		return;
+	}
+	const std::wstring owned(uri);
+	ShellExecuteW(owner, L"open", owned.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 constexpr std::wstring_view kPageStyle = LR"css(
@@ -194,6 +295,12 @@ constexpr wchar_t kDesktopBridgeScript[] = LR"js(
 } // namespace
 
 WebViewHost::~WebViewHost() {
+	if (webview_ && navigation_token_.value != 0) {
+		webview_->remove_NavigationStarting(navigation_token_);
+	}
+	if (webview_ && new_window_token_.value != 0) {
+		webview_->remove_NewWindowRequested(new_window_token_);
+	}
 	if (webview_ && message_token_.value != 0) {
 		webview_->remove_WebMessageReceived(message_token_);
 	}
@@ -237,11 +344,16 @@ void WebViewHost::Initialize(HWND window, ReadyHandler ready_handler, MessageHan
 								}
 								return S_OK;
 							}
-							ConfigureController();
+							const HRESULT configure_result = ConfigureController();
+							if (FAILED(configure_result)) {
+								if (ready_handler_) ready_handler_(configure_result);
+								return S_OK;
+							}
 							const HRESULT bridge_result = webview_->AddScriptToExecuteOnDocumentCreated(
 								kDesktopBridgeScript,
 								Microsoft::WRL::Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
 									[this](HRESULT script_result, LPCWSTR) -> HRESULT {
+										bridge_ready_ = SUCCEEDED(script_result);
 										if (ready_handler_) {
 											ready_handler_(script_result);
 										}
@@ -271,7 +383,7 @@ void WebViewHost::Resize() const {
 }
 
 void WebViewHost::Navigate(std::wstring_view url) const {
-	if (!webview_) {
+	if (!webview_ || !bridge_ready_ || !IsTrustedLoopbackHttpUri(url)) {
 		return;
 	}
 	const std::wstring owned(url);
@@ -279,13 +391,13 @@ void WebViewHost::Navigate(std::wstring_view url) const {
 }
 
 void WebViewHost::Reload() const {
-	if (webview_) {
+	if (webview_ && bridge_ready_) {
 		webview_->Reload();
 	}
 }
 
 void WebViewHost::ExecuteScript(std::wstring_view script) const {
-	if (!webview_) {
+	if (!webview_ || !bridge_ready_) {
 		return;
 	}
 	const std::wstring owned(script);
@@ -293,7 +405,7 @@ void WebViewHost::ExecuteScript(std::wstring_view script) const {
 }
 
 void WebViewHost::PostJson(std::wstring_view json) const {
-	if (!webview_) {
+	if (!webview_ || !bridge_ready_) {
 		return;
 	}
 	const std::wstring owned(json);
@@ -301,7 +413,7 @@ void WebViewHost::PostJson(std::wstring_view json) const {
 }
 
 void WebViewHost::ShowWelcome() const {
-	if (!webview_) {
+	if (!webview_ || !bridge_ready_) {
 		return;
 	}
 	std::wstring page = LR"html(<!doctype html><html lang="zh-CN" data-theme=")html";
@@ -317,7 +429,7 @@ void WebViewHost::ShowWelcome() const {
 }
 
 void WebViewHost::ShowStatus(std::wstring_view title, std::wstring_view detail, bool is_error) const {
-	if (!webview_) {
+	if (!webview_ || !bridge_ready_) {
 		return;
 	}
 	std::wstring page = LR"html(<!doctype html><html lang="zh-CN" data-theme=")html";
@@ -346,10 +458,10 @@ void WebViewHost::ShowStatus(std::wstring_view title, std::wstring_view detail, 
 }
 
 bool WebViewHost::ready() const noexcept {
-	return webview_ != nullptr;
+	return webview_ != nullptr && bridge_ready_;
 }
 
-void WebViewHost::ConfigureController() {
+HRESULT WebViewHost::ConfigureController() {
 	Resize();
 	SetDarkTheme(dark_theme_);
 
@@ -362,9 +474,76 @@ void WebViewHost::ConfigureController() {
 #endif
 	}
 
-	webview_->add_WebMessageReceived(
+	HRESULT result = webview_->add_NavigationStarting(
+		Microsoft::WRL::Callback<ICoreWebView2NavigationStartingEventHandler>(
+			[this](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* arguments) -> HRESULT {
+				try {
+				LPWSTR raw_uri = nullptr;
+				if (arguments == nullptr || FAILED(arguments->get_Uri(&raw_uri)) || raw_uri == nullptr) {
+					if (arguments != nullptr) {
+						arguments->put_Cancel(TRUE);
+					}
+					return S_OK;
+				}
+				const std::wstring uri(raw_uri);
+				CoTaskMemFree(raw_uri);
+				const bool trusted = IsTrustedWebViewUri(uri);
+				if (!trusted) {
+					arguments->put_Cancel(TRUE);
+					BOOL user_initiated = FALSE;
+					if (SUCCEEDED(arguments->get_IsUserInitiated(&user_initiated)) && user_initiated) {
+						OpenExternalUri(window_, uri);
+					}
+				}
+				return S_OK;
+				} catch (...) {
+					if (arguments != nullptr) arguments->put_Cancel(TRUE);
+					return S_OK;
+				}
+			})
+			.Get(),
+		&navigation_token_);
+	if (FAILED(result)) return result;
+
+	result = webview_->add_NewWindowRequested(
+		Microsoft::WRL::Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+			[this](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* arguments) -> HRESULT {
+				try {
+				if (arguments == nullptr) {
+					return S_OK;
+				}
+				arguments->put_Handled(TRUE);
+				BOOL user_initiated = FALSE;
+				LPWSTR raw_uri = nullptr;
+				if (SUCCEEDED(arguments->get_IsUserInitiated(&user_initiated)) && user_initiated &&
+					SUCCEEDED(arguments->get_Uri(&raw_uri)) && raw_uri != nullptr) {
+					const std::wstring uri(raw_uri);
+					CoTaskMemFree(raw_uri);
+					OpenExternalUri(window_, uri);
+				}
+				return S_OK;
+				} catch (...) {
+					if (arguments != nullptr) arguments->put_Handled(TRUE);
+					return S_OK;
+				}
+			})
+			.Get(),
+		&new_window_token_);
+	if (FAILED(result)) return result;
+
+	result = webview_->add_WebMessageReceived(
 		Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
 			[this](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* arguments) -> HRESULT {
+				try {
+				LPWSTR raw_source = nullptr;
+				if (arguments == nullptr || FAILED(arguments->get_Source(&raw_source)) || raw_source == nullptr) {
+					return S_OK;
+				}
+				const bool trusted_source = IsTrustedWebViewUri(raw_source);
+				CoTaskMemFree(raw_source);
+				if (!trusted_source) {
+					return S_OK;
+				}
 				LPWSTR raw_message = nullptr;
 				if (SUCCEEDED(arguments->TryGetWebMessageAsString(&raw_message)) && raw_message != nullptr) {
 					std::wstring message(raw_message);
@@ -386,7 +565,8 @@ void WebViewHost::ConfigureController() {
 										SUCCEEDED(value.As(&file)) && SUCCEEDED(file->get_Path(&file_path)) &&
 										file_path != nullptr) {
 										std::error_code status_error;
-										if (std::filesystem::is_regular_file(file_path, status_error) && !status_error) {
+										if (wcsnlen_s(file_path, 32'769) <= 32'768 &&
+											std::filesystem::is_regular_file(file_path, status_error) && !status_error) {
 											paths.push_back(WideToUtf8(file_path));
 										}
 										CoTaskMemFree(file_path);
@@ -406,9 +586,13 @@ void WebViewHost::ConfigureController() {
 					}
 				}
 				return S_OK;
+				} catch (...) {
+					return S_OK;
+				}
 			})
 			.Get(),
 		&message_token_);
+	return result;
 }
 
 void WebViewHost::SetDarkTheme(bool dark) {
@@ -422,6 +606,12 @@ void WebViewHost::SetDarkTheme(bool dark) {
 		}
 	}
 	if (webview_ != nullptr) {
+		Microsoft::WRL::ComPtr<ICoreWebView2_13> webview13;
+		Microsoft::WRL::ComPtr<ICoreWebView2Profile> profile;
+		if (SUCCEEDED(webview_.As(&webview13)) && SUCCEEDED(webview13->get_Profile(&profile)) && profile != nullptr) {
+			profile->put_PreferredColorScheme(
+				dark ? COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK : COREWEBVIEW2_PREFERRED_COLOR_SCHEME_LIGHT);
+		}
 		const wchar_t* script = dark
 			? L"document.documentElement.dataset.theme='dark'"
 			: L"document.documentElement.dataset.theme='light'";

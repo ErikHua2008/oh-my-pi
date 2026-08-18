@@ -15,6 +15,8 @@
 
 namespace omp::shell {
 
+inline constexpr UINT kShowExistingInstanceMessage = WM_APP + 3;
+
 class App final {
 public:
 	explicit App(HINSTANCE instance);
@@ -39,6 +41,7 @@ private:
 	void PickProject();
 	[[nodiscard]] std::vector<std::wstring> PickAttachments(std::string_view kind) const;
 	void SwitchProject(std::wstring project_directory);
+	void DiscardPendingCoreEvents() const noexcept;
 	void HandleCoreEvent(std::unique_ptr<CoreEvent> event);
 	void HandleWebMessage(std::wstring message);
 	void HandleDesktopRequest(std::string_view payload);
@@ -71,11 +74,13 @@ private:
 	bool native_transcript_preferred_ = true;
 	bool agent_rail_open_ = false;
 	bool agent_rail_docked_ = false;
+	bool agent_rail_pending_restore_expansion_ = false;
 	bool dark_theme_ = false;
 	bool screenshot_active_ = false;
 	bool tray_added_ = false;
 	bool exiting_ = false;
 	bool shutting_down_ = false;
+	UINT taskbar_created_message_ = 0;
 };
 
 } // namespace omp::shell

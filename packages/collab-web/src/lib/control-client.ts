@@ -7,12 +7,13 @@
  * session-registry control room instead of a live session. The host replies
  * with `ctrl-sessions` list broadcasts every ~2s, so the snapshot refreshes
  * on its own; App-level flows (create/resume/drop) are fired through
- * `sendCreate`/`sendResume`/`sendDrop` and consumed via the `onSession`
+ * `sendCreate`/`sendResume`/`deleteArchivedSession` and consumed via the `onSession`
  * / `onError` callbacks.
  */
 
 import type {
 	ControlHostFrame,
+	ForeignSessionImportConflict,
 	ForeignSessionSummary,
 	ImportedForeignSession,
 	SessionSummary,
@@ -36,6 +37,10 @@ export interface ControlSessionInfo {
 	link: string;
 	title?: string;
 }
+
+export type CodexImportResult =
+	| { kind: "imported"; session: ImportedForeignSession }
+	| { kind: "conflict"; conflict: ForeignSessionImportConflict };
 
 /** Mirrors the session guest's WELCOME_TIMEOUT_MS. */
 const WELCOME_TIMEOUT_MS = 30_000;
@@ -66,10 +71,11 @@ export class ControlClient {
 	#snapshot: ControlSnapshot;
 	#nextRequestId = 1;
 	readonly #pendingArchivedLists = new Map<number, PendingRequest<readonly SessionSummary[]>>();
+	readonly #pendingArchivedDeletes = new Map<number, PendingRequest<void>>();
 	readonly #pendingArchives = new Map<number, PendingRequest<void>>();
 	readonly #pendingRestores = new Map<number, PendingRequest<SessionSummary>>();
 	readonly #pendingImportLists = new Map<number, PendingRequest<readonly ForeignSessionSummary[]>>();
-	readonly #pendingImports = new Map<number, PendingRequest<ImportedForeignSession>>();
+	readonly #pendingImports = new Map<number, PendingRequest<CodexImportResult>>();
 
 	/** Host-side `ctrl-error` frames surface here (the App shows a toast). */
 	onError?: (message: string) => void;
@@ -132,16 +138,24 @@ export class ControlClient {
 		this.#socket.send({ t: "ctrl-list" });
 	}
 
-	sendCreate(): void {
-		this.#socket.send({ t: "ctrl-create" });
+	sendCreate(cwd?: string): void {
+		this.#socket.send({ t: "ctrl-create", ...(cwd ? { cwd } : {}) });
 	}
 
 	sendResume(id: string): void {
 		this.#socket.send({ t: "ctrl-resume", id });
 	}
 
-	sendDrop(id: string): void {
-		this.#socket.send({ t: "ctrl-drop", id });
+	deleteArchivedSession(id: string): Promise<void> {
+		const reqId = this.#nextRequestId++;
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		const timeout = setTimeout(() => {
+			this.#pendingArchivedDeletes.delete(reqId);
+			reject(new Error("timed out while permanently deleting the archived chat"));
+		}, ARCHIVE_REQUEST_TIMEOUT_MS);
+		this.#pendingArchivedDeletes.set(reqId, { resolve, reject, timeout });
+		this.#socket.send({ t: "ctrl-delete-archived", reqId, id });
+		return promise;
 	}
 
 	sendRename(id: string, title: string): void {
@@ -198,9 +212,10 @@ export class ControlClient {
 
 	importCodexSession(
 		session: Pick<ForeignSessionSummary, "id" | "path" | "archived">,
-	): Promise<ImportedForeignSession> {
+		merge = false,
+	): Promise<CodexImportResult> {
 		const reqId = this.#nextRequestId++;
-		const { promise, resolve, reject } = Promise.withResolvers<ImportedForeignSession>();
+		const { promise, resolve, reject } = Promise.withResolvers<CodexImportResult>();
 		const timeout = setTimeout(() => {
 			this.#pendingImports.delete(reqId);
 			reject(new Error("timed out while importing the Codex conversation"));
@@ -213,6 +228,7 @@ export class ControlClient {
 			id: session.id,
 			path: session.path,
 			archived: session.archived,
+			...(merge ? { merge: true } : {}),
 		});
 		return promise;
 	}
@@ -257,6 +273,10 @@ export class ControlClient {
 			clearTimeout(request.timeout);
 			request.reject(error);
 		}
+		for (const request of this.#pendingArchivedDeletes.values()) {
+			clearTimeout(request.timeout);
+			request.reject(error);
+		}
 		for (const request of this.#pendingArchives.values()) {
 			clearTimeout(request.timeout);
 			request.reject(error);
@@ -274,6 +294,7 @@ export class ControlClient {
 			request.reject(error);
 		}
 		this.#pendingArchivedLists.clear();
+		this.#pendingArchivedDeletes.clear();
 		this.#pendingArchives.clear();
 		this.#pendingRestores.clear();
 		this.#pendingImportLists.clear();
@@ -281,6 +302,13 @@ export class ControlClient {
 	}
 
 	#rejectRequest(reqId: number, message: string): void {
+		const archivedDelete = this.#pendingArchivedDeletes.get(reqId);
+		if (archivedDelete) {
+			this.#pendingArchivedDeletes.delete(reqId);
+			clearTimeout(archivedDelete.timeout);
+			archivedDelete.reject(new Error(message));
+			return;
+		}
 		const archivedList = this.#pendingArchivedLists.get(reqId);
 		if (archivedList) {
 			this.#pendingArchivedLists.delete(reqId);
@@ -346,6 +374,14 @@ export class ControlClient {
 				// snapshot intentionally does not change for these frames.
 				this.onSession?.(frame);
 				return;
+			case "ctrl-archived-deleted": {
+				const pending = this.#pendingArchivedDeletes.get(frame.reqId);
+				if (!pending) return;
+				this.#pendingArchivedDeletes.delete(frame.reqId);
+				clearTimeout(pending.timeout);
+				pending.resolve();
+				return;
+			}
 			case "ctrl-archived-list": {
 				const pending = this.#pendingArchivedLists.get(frame.reqId);
 				if (!pending) return;
@@ -383,7 +419,15 @@ export class ControlClient {
 				if (!pending) return;
 				this.#pendingImports.delete(frame.reqId);
 				clearTimeout(pending.timeout);
-				pending.resolve(frame.session);
+				pending.resolve({ kind: "imported", session: frame.session });
+				return;
+			}
+			case "ctrl-import-conflict": {
+				const pending = this.#pendingImports.get(frame.reqId);
+				if (!pending) return;
+				this.#pendingImports.delete(frame.reqId);
+				clearTimeout(pending.timeout);
+				pending.resolve({ kind: "conflict", conflict: frame.conflict });
 				return;
 			}
 			case "ctrl-request-error":

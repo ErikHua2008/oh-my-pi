@@ -10,7 +10,7 @@
  */
 
 import * as path from "node:path";
-import { directoryExists, getProjectDir, getSessionsDir, logger } from "@oh-my-pi/pi-utils";
+import { directoryExists, getManagedMediaDir, getProjectDir, getSessionsDir, logger } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import { MCPManager } from "../mcp";
 // Cyclic import with ../modes/core-mode (core-mode will import this registry
@@ -19,18 +19,62 @@ import { MCPManager } from "../mcp";
 import { createHeadlessCollabContext } from "../modes/core-mode";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
-import { createForeignSessionStore, persistForeignSession } from "../session/foreign-session-import";
+import {
+	appendForeignSessionImportMarker,
+	createForeignSessionStore,
+	inspectForeignSessionImport,
+	persistForeignSession,
+} from "../session/foreign-session-import";
+import {
+	collectSessionTreeMediaReferences,
+	garbageCollectSessionMedia,
+	type SessionMediaReferenceCounts,
+} from "../session/media-gc";
+import type { SessionEntry } from "../session/session-entries";
 import { listAllSessions, listSessions, resolveResumableSession, type SessionInfo } from "../session/session-listing";
+import { loadEntriesFromFile } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
 import { FileSessionStorage, moveSessionWithArtifacts } from "../session/session-storage";
 import { EventBus } from "../utils/event-bus";
 import { CollabHost } from "./host";
 import {
+	type ForeignSessionImportConflict,
 	type ForeignSessionSummary,
 	type ImportedForeignSession,
 	parseCollabLink,
 	type SessionSummary,
 } from "./protocol";
+
+interface ExistingForeignImport {
+	info: SessionInfo;
+	path: string;
+	managed?: ManagedSession;
+	inspection: ReturnType<typeof inspectForeignSessionImport>;
+}
+
+function chronologicalMergeEntries(entryGroups: readonly (readonly SessionEntry[])[]): SessionEntry[] {
+	const byId = new Map<string, { entry: SessionEntry; ordinal: number }>();
+	let ordinal = 0;
+	for (const entries of entryGroups) {
+		for (const entry of entries) {
+			if (!byId.has(entry.id)) byId.set(entry.id, { entry: structuredClone(entry), ordinal });
+			ordinal++;
+		}
+	}
+	const sorted = [...byId.values()].sort((left, right) => {
+		const leftTime = Date.parse(left.entry.timestamp);
+		const rightTime = Date.parse(right.entry.timestamp);
+		const safeLeft = Number.isFinite(leftTime) ? leftTime : Number.MAX_SAFE_INTEGER;
+		const safeRight = Number.isFinite(rightTime) ? rightTime : Number.MAX_SAFE_INTEGER;
+		return safeLeft - safeRight || left.ordinal - right.ordinal;
+	});
+	let parentId: string | null = null;
+	return sorted.map(({ entry }) => {
+		entry.parentId = parentId;
+		parentId = entry.id;
+		return entry;
+	});
+}
 
 function sameProjectPath(left: string, right: string): boolean {
 	const resolvedLeft = path.resolve(left);
@@ -125,9 +169,16 @@ export class SessionRegistry {
 		this.#emitChange();
 	}
 
-	/** Create a brand-new persisted session and start its collab host. */
-	async createSession(): Promise<{ id: string; link: string }> {
-		const sessionManager = SessionManager.create(this.#cwd, this.#sessionDir);
+	/** Create a brand-new persisted session in the requested project and start its collab host. */
+	async createSession(cwd = this.#cwd): Promise<{ id: string; link: string }> {
+		const targetCwd = path.resolve(cwd);
+		if (!(await directoryExists(targetCwd))) {
+			throw new Error(`the new session project directory is not available: ${cwd}`);
+		}
+		const targetSessionDir = sameProjectPath(targetCwd, this.#cwd)
+			? this.#sessionDir
+			: SessionManager.getDefaultSessionDir(targetCwd, this.#agentDir);
+		const sessionManager = SessionManager.create(targetCwd, targetSessionDir);
 		return await this.#provisionSession(sessionManager);
 	}
 
@@ -150,13 +201,179 @@ export class SessionRegistry {
 		}));
 	}
 
+	async #findExistingForeignImports(source: "codex", sourceId: string): Promise<ExistingForeignImport[]> {
+		const storage = new FileSessionStorage();
+		const infos = await listAllSessions(storage, getSessionsDir(this.#agentDir));
+		const matches: ExistingForeignImport[] = [];
+		const seenPaths = new Set<string>();
+		for (const info of infos) {
+			const sessionPath = path.resolve(info.path);
+			const pathKey = comparableFilePath(sessionPath);
+			if (seenPaths.has(pathKey)) continue;
+			seenPaths.add(pathKey);
+			const managed = this.#active.get(info.id);
+			const entries = managed
+				? managed.sessionManager.getEntries()
+				: ((await loadEntriesFromFile(sessionPath, storage)).slice(1) as SessionEntry[]);
+			const inspection = inspectForeignSessionImport(entries, source, sourceId);
+			if (inspection.matched) matches.push({ info, path: sessionPath, managed, inspection });
+		}
+		matches.sort((left, right) => left.info.created.getTime() - right.info.created.getTime());
+		return matches;
+	}
+
+	async #deactivateImportedSession(candidate: ExistingForeignImport): Promise<void> {
+		const managed = candidate.managed;
+		if (!managed) return;
+		managed.state = "dropping";
+		this.#emitChange();
+		try {
+			await managed.collabHost.stop("Codex conversation refreshed");
+		} catch (error) {
+			logger.warn("failed to stop collab host while refreshing Codex import", {
+				id: managed.id,
+				error: String(error),
+			});
+		}
+		try {
+			await managed.session.dispose();
+		} catch (error) {
+			logger.warn("failed to dispose session while refreshing Codex import", {
+				id: managed.id,
+				error: String(error),
+			});
+		}
+		this.#streamingUnsubs.get(managed.id)?.();
+		this.#streamingUnsubs.delete(managed.id);
+		this.#active.delete(managed.id);
+	}
+
+	async #archiveSupersededImport(candidate: ExistingForeignImport): Promise<void> {
+		const projectDirectory = path.basename(path.dirname(candidate.path));
+		const targetPath = path.join(this.#archivedSessionsRoot, projectDirectory, path.basename(candidate.path));
+		await moveSessionWithArtifacts(candidate.path, targetPath);
+	}
+
+	async #refreshForeignImport(
+		store: ReturnType<typeof createForeignSessionStore>,
+		selected: Awaited<ReturnType<typeof store.list>>[number],
+		candidates: ExistingForeignImport[],
+		merge: boolean,
+	): Promise<ImportedForeignSession> {
+		for (const candidate of candidates) {
+			if (candidate.managed?.streaming) {
+				throw new Error("wait for the current response to finish before updating this imported conversation");
+			}
+		}
+		for (const candidate of candidates) await this.#deactivateImportedSession(candidate);
+
+		const primary = candidates[0]!;
+		const primaryManager = await SessionManager.open(primary.path, undefined, undefined, {
+			initialCwd: selected.cwd,
+			suppressBreadcrumb: true,
+		});
+		let provisioned = false;
+		let refreshed: SessionManager | undefined;
+		try {
+			refreshed = await store.load(selected);
+			appendForeignSessionImportMarker(refreshed, selected);
+			const refreshedInspection = inspectForeignSessionImport(refreshed.getEntries(), selected.source, selected.id);
+			const resolvedInspections: ReturnType<typeof inspectForeignSessionImport>[] = [];
+			for (const candidate of candidates) {
+				if (candidate === primary) {
+					resolvedInspections.push(
+						inspectForeignSessionImport(primaryManager.getEntries(), selected.source, selected.id),
+					);
+					continue;
+				}
+				const manager = await SessionManager.open(candidate.path, undefined, undefined, {
+					initialCwd: selected.cwd,
+					suppressBreadcrumb: true,
+				});
+				try {
+					resolvedInspections.push(
+						inspectForeignSessionImport(manager.getEntries(), selected.source, selected.id),
+					);
+				} finally {
+					await manager.close();
+				}
+			}
+
+			const localEntries = (merge ? resolvedInspections : resolvedInspections.slice(0, 1)).flatMap(
+				inspection => inspection.localEntries,
+			);
+			const oldSourceEntries = merge
+				? resolvedInspections.flatMap(inspection =>
+						inspection.sourceEntries.filter(entry => entry.id.startsWith("codex-")),
+					)
+				: [];
+			const mergedEntries =
+				merge || localEntries.length > 0
+					? chronologicalMergeEntries([refreshedInspection.sourceEntries, oldSourceEntries, localEntries])
+					: structuredClone(refreshedInspection.sourceEntries);
+			const marker = refreshed
+				.getEntries()
+				.findLast(
+					entry =>
+						entry.type === "custom" &&
+						entry.customType === "foreign_session_import" &&
+						(entry.data as { sourceId?: unknown } | undefined)?.sourceId === selected.id,
+				);
+			if (!marker) throw new Error("the refreshed Codex conversation is missing its import marker");
+			const markerCopy = structuredClone(marker);
+			markerCopy.parentId = mergedEntries.at(-1)?.id ?? null;
+			markerCopy.timestamp = new Date().toISOString();
+			mergedEntries.push(markerCopy);
+
+			const currentState = primaryManager.captureState();
+			const sourceState = refreshed.captureState();
+			const keepUserTitle = currentState.titleSource === "user";
+			const sessionName = keepUserTitle
+				? currentState.sessionName
+				: (sourceState.sessionName ?? currentState.sessionName);
+			const titleSource = keepUserTitle ? currentState.titleSource : sourceState.titleSource;
+			primaryManager.restoreState({
+				...currentState,
+				cwd: selected.cwd,
+				sessionName,
+				titleSource,
+				titleUpdatedAt: keepUserTitle ? currentState.titleUpdatedAt : sourceState.titleUpdatedAt,
+				header: {
+					...currentState.header,
+					cwd: selected.cwd,
+					title: sessionName,
+					titleSource,
+				},
+				entries: mergedEntries,
+				onDisk: true,
+				needsRewrite: true,
+			});
+			await primaryManager.rewriteEntries();
+
+			for (const duplicate of candidates.slice(1)) await this.#archiveSupersededImport(duplicate);
+			await this.#provisionSession(primaryManager);
+			provisioned = true;
+			this.#emitChange();
+			return {
+				id: primaryManager.getSessionId(),
+				cwd: primaryManager.getCwd(),
+				title: primaryManager.getSessionName(),
+				requiresProjectSwitch: false,
+			};
+		} finally {
+			await refreshed?.close();
+			if (!provisioned) await primaryManager.close();
+		}
+	}
+
 	/** Convert and persist one foreign transcript under its original project directory. */
 	async importForeignSession(
 		source: "codex",
 		sourceId: string,
 		sourcePath: string,
 		archived = false,
-	): Promise<ImportedForeignSession> {
+		merge = false,
+	): Promise<ImportedForeignSession | ForeignSessionImportConflict> {
 		const store = createForeignSessionStore(source);
 		const requestedCollection = await store.list({ archived });
 		let selected = requestedCollection.find(
@@ -176,6 +393,26 @@ export class SessionRegistry {
 			if (sameId.length === 1) selected = sameId[0];
 		}
 		if (!selected) throw new Error("selected Codex session is no longer available");
+
+		const existing = await this.#findExistingForeignImports(source, sourceId);
+		if (existing.length > 0) {
+			const localMessageCount = existing.reduce(
+				(total, candidate) => total + candidate.inspection.localMessageCount,
+				0,
+			);
+			if (!merge && existing.some(candidate => candidate.inspection.hasLocalConversation)) {
+				const primary = existing[0]!;
+				return {
+					kind: "conflict",
+					existingSessionId: primary.info.id,
+					cwd: primary.info.cwd,
+					title: primary.info.title,
+					duplicateCount: existing.length,
+					localMessageCount,
+				};
+			}
+			return await this.#refreshForeignImport(store, selected, existing, merge);
+		}
 		const imported = await persistForeignSession(store, selected, {
 			sessionDirForCwd: cwd =>
 				sameProjectPath(cwd, this.#cwd)
@@ -307,31 +544,42 @@ export class SessionRegistry {
 		}
 	}
 
-	/**
-	 * Drop a live session: tear down its collab host and dispose the session.
-	 *
-	 * The entry flips to "dropping" first so it leaves list() broadcasts
-	 * immediately and concurrent create/resume/drop for the same id throw
-	 * until the teardown finishes.
-	 */
-	async dropSession(id: string): Promise<void> {
-		const entry = this.#active.get(id);
-		if (!entry || entry.state === "dropping") throw new Error("no such session");
-		entry.state = "dropping";
+	async #deleteSessionFileAndOwnedMedia(id: string, sessionFile: string): Promise<void> {
+		let deletedMediaReferences: SessionMediaReferenceCounts | undefined;
 		try {
-			await entry.collabHost.stop("session dropped");
-		} catch (err) {
-			logger.warn("failed to stop collab host while dropping session", { id, error: String(err) });
+			deletedMediaReferences = await collectSessionTreeMediaReferences(
+				sessionFile,
+				getManagedMediaDir(this.#agentDir),
+			);
+		} catch (error) {
+			// Reference discovery is cleanup bookkeeping, never a reason to keep
+			// a chat the user explicitly deleted.
+			logger.warn("failed to inspect deleted session media references", { id, error: String(error) });
 		}
+
+		await new FileSessionStorage().deleteSessionWithArtifacts(sessionFile);
+		if (
+			!deletedMediaReferences ||
+			(deletedMediaReferences.blobs.size === 0 && deletedMediaReferences.managedMedia.size === 0)
+		) {
+			return;
+		}
+
 		try {
-			await entry.session.dispose();
-		} catch (err) {
-			logger.warn("failed to dispose session while dropping", { id, error: String(err) });
+			const gc = await garbageCollectSessionMedia({
+				agentDir: this.#agentDir,
+				apply: true,
+				additionalSessionRoots: [this.#sessionDir],
+				blobHashes: new Set(deletedMediaReferences.blobs.keys()),
+				managedMediaHashes: new Set(deletedMediaReferences.managedMedia.keys()),
+			});
+			const errors = [...gc.blobs.errors, ...gc.managedMedia.errors];
+			if (errors.length > 0) logger.warn("post-delete media GC completed with errors", { id, errors });
+		} catch (error) {
+			// The transcript is already gone. Report cleanup diagnostics without
+			// turning a successful user-visible deletion into a false failure.
+			logger.warn("post-delete media GC failed", { id, error: String(error) });
 		}
-		this.#streamingUnsubs.get(id)?.();
-		this.#streamingUnsubs.delete(id);
-		this.#active.delete(id);
-		this.#emitChange();
 	}
 
 	/** Move a stored chat out of the active session tree and tear down its live room if needed. */
@@ -384,6 +632,16 @@ export class SessionRegistry {
 	async listArchivedSessions(): Promise<SessionSummary[]> {
 		const infos = await listAllSessions(new FileSessionStorage(), this.#archivedSessionsRoot);
 		return infos.map(info => this.#summaryFromInfo(info));
+	}
+
+	/** Permanently delete one archived chat and OMP-owned media no other chat references. */
+	async deleteArchivedSession(id: string): Promise<void> {
+		const archived = await listAllSessions(new FileSessionStorage(), this.#archivedSessionsRoot);
+		const matches = archived.filter(info => info.id === id);
+		if (matches.length === 0) throw new Error("no such archived session");
+		if (matches.length > 1) throw new Error("more than one archived session has this id");
+		await this.#deleteSessionFileAndOwnedMedia(id, matches[0]!.path);
+		this.#emitChange();
 	}
 
 	/** Restore one archived chat to the active session tree without opening it. */

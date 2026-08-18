@@ -2,7 +2,8 @@ import type { ForeignSessionSummary, ImportedForeignSession } from "@oh-my-pi/pi
 import { Menu, Plus } from "lucide-react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ControlClient, ControlSnapshot } from "../../lib/control-client";
+import type { CodexImportResult, ControlClient, ControlSnapshot } from "../../lib/control-client";
+import { notifySessionPreferencesRemoved } from "../../lib/session-preference-events";
 import { useControlSnapshot } from "../../lib/use-control";
 import { SettingsModal } from "../shell/SettingsModal";
 import { SessionsPanel } from "./SessionsPanel";
@@ -18,10 +19,9 @@ export interface SessionsLayoutProps {
 	/** Active session view, or null for the empty state (no session open). */
 	content: ReactNode;
 	onOpenSession(id: string): void;
-	onNewSession(): void;
+	onNewSession(projectPath?: string): void;
 	onOpenImportedSession(session: ImportedForeignSession): Promise<void>;
 	onRenameSession(id: string, title: string): void;
-	onDropSession(id: string): void;
 	onArchiveSession(id: string): Promise<void>;
 	onLeave(): void;
 }
@@ -40,7 +40,6 @@ export function SessionsLayout({
 	onNewSession,
 	onOpenImportedSession,
 	onRenameSession,
-	onDropSession,
 	onArchiveSession,
 	onLeave,
 }: SessionsLayoutProps): ReactNode {
@@ -49,17 +48,25 @@ export function SessionsLayout({
 	const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 	const [sidebarOverlay, setSidebarOverlay] = useState(() => window.matchMedia("(max-width: 900px)").matches);
 	const [settingsOpen, setSettingsOpen] = useState(false);
+	const [selectedProjectPath, setSelectedProjectPath] = useState<string | null>(null);
 	const sidebarRef = useRef<HTMLElement | null>(null);
 	const sidebarTriggerRef = useRef<HTMLButtonElement | null>(null);
+	const activeProjectPath = activeSessionId
+		? snap.sessions.find(session => session.id === activeSessionId)?.cwd
+		: undefined;
 
-	const openSession = (id: string): void => {
+	const openSession = (id: string, projectPath: string): void => {
 		setSidebarOpen(false);
+		setSelectedProjectPath(projectPath);
 		onOpenSession(id);
 	};
-	const newSession = (): void => {
+	const newSession = (projectPath?: string): void => {
 		setSidebarOpen(false);
-		onNewSession();
+		onNewSession(projectPath ?? selectedProjectPath ?? activeProjectPath);
 	};
+	const initializeProject = useCallback((projectPath: string): void => {
+		setSelectedProjectPath(current => current ?? projectPath);
+	}, []);
 	const listCodexSessions = useCallback((archived = false) => client.listCodexSessions(archived), [client]);
 	const listArchivedSessions = useCallback(() => client.listArchivedSessions(), [client]);
 	const restoreArchivedSession = useCallback(
@@ -68,13 +75,25 @@ export function SessionsLayout({
 		},
 		[client],
 	);
+	const deleteArchivedSession = useCallback(
+		async (id: string): Promise<void> => {
+			await client.deleteArchivedSession(id);
+			notifySessionPreferencesRemoved(id);
+		},
+		[client],
+	);
 	const importCodexSession = useCallback(
-		async (source: ForeignSessionSummary): Promise<void> => {
-			const imported = await client.importCodexSession(source);
-			await onOpenImportedSession(imported);
+		async (source: ForeignSessionSummary, merge = false): Promise<CodexImportResult> => {
+			const result = await client.importCodexSession(source, merge);
+			if (result.kind === "imported") await onOpenImportedSession(result.session);
+			return result;
 		},
 		[client, onOpenImportedSession],
 	);
+
+	useEffect(() => {
+		if (activeProjectPath) setSelectedProjectPath(activeProjectPath);
+	}, [activeProjectPath]);
 
 	useEffect(() => {
 		const media = window.matchMedia("(max-width: 900px)");
@@ -133,11 +152,12 @@ export function SessionsLayout({
 			{settingsOpen && (
 				<SettingsModal
 					onClose={() => setSettingsOpen(false)}
-					project={snap.sessions[0]?.cwd}
+					project={selectedProjectPath ?? activeProjectPath}
 					readOnly={snap.readOnly}
 					connection={snap.phase}
 					loadArchivedSessions={listArchivedSessions}
 					onRestoreArchivedSession={restoreArchivedSession}
+					onDeleteArchivedSession={deleteArchivedSession}
 				/>
 			)}
 			{sidebarOpen && (
@@ -165,13 +185,15 @@ export function SessionsLayout({
 					activeSessionId={activeSessionId}
 					pending={pending}
 					creating={creating}
+					selectedProjectPath={selectedProjectPath ?? activeProjectPath ?? null}
 					onOpenSettings={() => setSettingsOpen(true)}
 					onOpenSession={openSession}
 					onNewSession={newSession}
+					onSelectProject={setSelectedProjectPath}
+					onInitializeProject={initializeProject}
 					onListCodexSessions={listCodexSessions}
 					onImportCodexSession={importCodexSession}
 					onRenameSession={onRenameSession}
-					onDropSession={onDropSession}
 					onArchiveSession={onArchiveSession}
 					onLeave={onLeave}
 				/>
@@ -187,7 +209,7 @@ export function SessionsLayout({
 					<Menu size={18} aria-hidden="true" />
 				</button>
 				<div className="sh-control-view">
-					{content ?? <SessionsEmpty snap={snap} creating={creating} onNewSession={newSession} />}
+					{content ?? <SessionsEmpty snap={snap} creating={creating} onNewSession={() => newSession()} />}
 				</div>
 			</div>
 		</div>

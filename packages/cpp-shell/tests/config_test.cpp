@@ -75,6 +75,7 @@ OMP_TEST("shell config round trips Unicode projects and window state without cre
 
 OMP_TEST("project aliases reject blank and oversized names") {
 	omp::shell::ShellConfig config;
+	OMP_CHECK(!config.SetProjectName(L"", L"Name"));
 	OMP_CHECK(!config.SetProjectName(L"C:\\repo", L"   "));
 	OMP_CHECK(!config.SetProjectName(L"C:\\repo", std::wstring(121, L'x')));
 	OMP_CHECK(config.SetProjectName(L"C:\\repo", L"  Display Name  "));
@@ -116,6 +117,23 @@ OMP_TEST("corrupt shell config is backed up and replaced with safe defaults in m
 	OMP_CHECK(loaded.omp_bin == L"omp");
 	OMP_CHECK(!loaded.last_project.has_value());
 	OMP_CHECK(!loaded.dark_theme.has_value());
+	std::filesystem::path backup = path;
+	backup += L".bak";
+	OMP_CHECK(std::filesystem::exists(backup));
+}
+
+OMP_TEST("oversized shell config is rejected before JSON allocation and backed up") {
+	TemporaryDirectory directory;
+	const auto path = directory.path() / L"config.json";
+	{
+		std::ofstream output(path, std::ios::binary);
+		const std::string block(1024, 'x');
+		for (int index = 0; index < 8193; ++index) {
+			output.write(block.data(), static_cast<std::streamsize>(block.size()));
+		}
+	}
+	const omp::shell::ShellConfig loaded = omp::shell::LoadConfig(path);
+	OMP_CHECK(loaded.recent_projects.empty());
 	std::filesystem::path backup = path;
 	backup += L".bak";
 	OMP_CHECK(std::filesystem::exists(backup));

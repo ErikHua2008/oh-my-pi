@@ -281,9 +281,12 @@
 }
 
 .sh-project-row:hover,
-.sh-project-row:focus-within,
-.sh-project-row[data-current="true"] {
+.sh-project-row:focus-within {
 	background: var(--bg-hover);
+}
+
+.sh-project-row[data-selected="true"] {
+	background: var(--bg-selected);
 }
 
 .sh-project-disclosure {
@@ -323,6 +326,7 @@
 	text-align: left;
 }
 
+.sh-project-new,
 .sh-project-rename,
 .sh-sessions-rename {
 	display: inline-flex;
@@ -338,6 +342,15 @@
 	border-radius: var(--radius-sm);
 }
 
+.sh-project-new {
+	opacity: 0.72;
+}
+
+.sh-project-new:disabled {
+	cursor: default;
+	opacity: 0.3;
+}
+
 .sh-project-rename {
 	margin-right: 3px;
 	opacity: 0;
@@ -348,6 +361,8 @@
 	opacity: 1;
 }
 
+.sh-project-new:hover,
+.sh-project-new:focus-visible,
 .sh-project-rename:hover,
 .sh-project-rename:focus-visible,
 .sh-sessions-rename:hover,
@@ -550,7 +565,7 @@
 	}
 }
 
-.sh-sessions-drop,
+.sh-sessions-archive,
 .sh-sessions-rename {
 	position: absolute;
 	top: 4px;
@@ -573,7 +588,7 @@
 		color var(--dur-fast) var(--ease);
 }
 
-.sh-sessions-drop {
+.sh-sessions-archive {
 	right: 4px;
 }
 
@@ -581,17 +596,17 @@
 	right: 32px;
 }
 
-.sh-sessions-item:hover .sh-sessions-drop,
-.sh-sessions-item:focus-within .sh-sessions-drop,
+.sh-sessions-item:hover .sh-sessions-archive,
+.sh-sessions-item:focus-within .sh-sessions-archive,
 .sh-sessions-item:hover .sh-sessions-rename,
 .sh-sessions-item:focus-within .sh-sessions-rename {
 	opacity: 1;
 	pointer-events: auto;
 }
 
-.sh-sessions-drop:hover,
-.sh-sessions-drop:focus-visible {
-	color: var(--err);
+.sh-sessions-archive:hover,
+.sh-sessions-archive:focus-visible {
+	color: var(--fg);
 	background: var(--bg-raised);
 }
 
@@ -1252,7 +1267,7 @@
 		padding-inline: 24px;
 	}
 
-	.sh-sessions-drop,
+	.sh-sessions-archive,
 	.sh-sessions-rename,
 	.sh-project-rename {
 		opacity: 1;
@@ -1373,7 +1388,7 @@
 		width: 44px;
 	}
 
-	.sh-sessions-drop {
+	.sh-sessions-archive {
 		top: 0;
 		right: 0;
 		width: 44px;

@@ -5,7 +5,6 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
 	getAgentDir,
-	getBlobsDir,
 	getHistoryDbPath,
 	getModelDbPath,
 	getSessionsDir,
@@ -14,15 +13,12 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
-import { BLOB_HASH_RE } from "../session/blob-store";
+import { garbageCollectSessionMedia, type MediaGcResult } from "../session/media-gc";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
-const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
-const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
-const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
@@ -46,14 +42,7 @@ export interface GcCommandArgs {
 	flags: GcCommandFlags;
 }
 
-export interface BlobGcResult {
-	referenced: number;
-	candidates: number;
-	wouldDelete: number;
-	deleted: number;
-	bytes: number;
-	errors: string[];
-}
+export type BlobGcResult = MediaGcResult;
 
 export interface ArchiveGcResult {
 	scanned: number;
@@ -89,16 +78,10 @@ export interface GcResult {
 	agentDir: string;
 	apply: boolean;
 	blobs?: BlobGcResult;
+	media?: MediaGcResult;
 	archive?: ArchiveGcResult;
 	wal?: WalGcResult;
 	lockPath: string;
-}
-
-interface BlobCandidate {
-	hash: string;
-	paths: string[];
-	bytes: number;
-	mtimeMs: number;
 }
 
 interface ArchiveCandidate {
@@ -184,6 +167,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 export function collectGcErrors(result: GcResult): string[] {
 	return [
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
+		...(result.media?.errors ?? []).map(error => `media: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 	];
 }
@@ -253,97 +237,6 @@ async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
-}
-
-async function collectBackupJsonlFiles(root: string): Promise<string[]> {
-	try {
-		const files = await Array.fromAsync(JSONL_BACKUP_GLOB.scan(root), name => path.join(root, name));
-		files.sort();
-		return files;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
-	}
-}
-
-async function collectReferencedBlobHashes(sessionRoots: string[]): Promise<Set<string>> {
-	const hashes = new Set<string>();
-	for (const root of sessionRoots) {
-		const files = [
-			...(await collectJsonlFiles(root)),
-			...(await collectCompressedJsonlFiles(root)),
-			...(await collectBackupJsonlFiles(root)),
-		];
-		for (const file of files) {
-			const text = await readTextIfPresent(file);
-			for (const match of text.matchAll(BLOB_REF_RE)) {
-				const hash = match[1]?.toLowerCase();
-				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
-			}
-		}
-	}
-	return hashes;
-}
-
-async function collectBlobCandidates(blobDir: string): Promise<BlobCandidate[]> {
-	let entries: string[];
-	try {
-		entries = await fs.readdir(blobDir);
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
-	}
-
-	const byHash = new Map<string, BlobCandidate>();
-	for (const entry of entries) {
-		const match = entry.match(BLOB_FILE_RE);
-		const hash = match?.[1];
-		if (!hash) continue;
-		const file = path.join(blobDir, entry);
-		const stat = await statIfPresent(file);
-		if (!stat) continue;
-		if (!stat.isFile()) continue;
-		const candidate = byHash.get(hash) ?? { hash, paths: [], bytes: 0, mtimeMs: stat.mtimeMs };
-		candidate.paths.push(file);
-		candidate.bytes += stat.size;
-		candidate.mtimeMs = Math.max(candidate.mtimeMs, stat.mtimeMs);
-		byHash.set(hash, candidate);
-	}
-	return [...byHash.values()].sort((a, b) => a.hash.localeCompare(b.hash));
-}
-
-async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
-	const blobDir = getBlobsDir(options.agentDir);
-	const sessionsRoot = getSessionsDir(options.agentDir);
-	const referenced = await collectReferencedBlobHashes([sessionsRoot, archiveSessionsRoot]);
-	const candidates = await collectBlobCandidates(blobDir);
-	const result: BlobGcResult = {
-		referenced: referenced.size,
-		candidates: candidates.length,
-		wouldDelete: 0,
-		deleted: 0,
-		bytes: 0,
-		errors: [],
-	};
-
-	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
-	for (const candidate of candidates) {
-		if (referenced.has(candidate.hash)) continue;
-		if (candidate.mtimeMs > deleteBeforeMs) continue;
-		result.wouldDelete += candidate.paths.length;
-		result.bytes += candidate.bytes;
-		if (!options.apply) continue;
-		for (const file of candidate.paths) {
-			try {
-				await fs.unlink(file);
-				result.deleted += 1;
-			} catch (error) {
-				if (codeOf(error) === "ENOENT") continue;
-				result.errors.push(`${file}: ${errorMessage(error)}`);
-			}
-		}
-	}
-	return result;
 }
 
 async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> {
@@ -1535,6 +1428,12 @@ function renderText(result: GcResult): string {
 		);
 		if (result.blobs.errors.length > 0) lines.push(`blob errors: ${result.blobs.errors.length}`);
 	}
+	if (result.media) {
+		lines.push(
+			`media: ${result.media.deleted}/${result.media.wouldDelete} files, ${formatBytes(result.media.bytes)}, ${result.media.referenced} refs`,
+		);
+		if (result.media.errors.length > 0) lines.push(`media errors: ${result.media.errors.length}`);
+	}
 	if (result.archive) {
 		lines.push(
 			`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived, ${result.archive.historyRowsDeleted} history rows and ${result.archive.statsRowsDeleted} stats rows removed`,
@@ -1554,7 +1453,11 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
-		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
+		if (options.runBlobs) {
+			const content = await garbageCollectSessionMedia({ agentDir: options.agentDir, apply: options.apply });
+			next.blobs = content.blobs;
+			next.media = content.managedMedia;
+		}
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);
 		return next;

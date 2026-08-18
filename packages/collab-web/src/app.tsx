@@ -19,6 +19,7 @@ import { ControlSessionFlow } from "./lib/control-session-flow";
 import { desktopBridge } from "./lib/desktop-bridge";
 import { fmtPercent, fmtTokens } from "./lib/format";
 import { parseCollabLink } from "./lib/link";
+import { notifySessionPreferencesRemoved } from "./lib/session-preference-events";
 import { useGuestSnapshot } from "./lib/use-guest";
 import type { ToolRenderHost } from "./tool-render";
 import "./components/shell/shell.css";
@@ -270,8 +271,8 @@ export function App(): ReactNode {
 	}, [appState]);
 
 	const startCreate = useCallback(
-		(client: ControlClient): void => {
-			if (!controlFlow.startCreate(client)) return;
+		(client: ControlClient, projectPath?: string): void => {
+			if (!controlFlow.startCreate(client, projectPath)) return;
 			setControlPendingOperation("create");
 		},
 		[controlFlow],
@@ -285,12 +286,6 @@ export function App(): ReactNode {
 		[controlFlow],
 	);
 
-	const startDrop = useCallback((client: ControlClient, id: string): void => {
-		// The sidebar is authoritative: the entry disappears on the next
-		// ctrl-sessions broadcast; a ctrl-error surfaces as a toast.
-		client.sendDrop(id);
-	}, []);
-
 	const startArchive = useCallback(
 		async (client: ControlClient, id: string, isActive: boolean): Promise<void> => {
 			try {
@@ -299,6 +294,7 @@ export function App(): ReactNode {
 				pushNotice("info", "对话已归档，可在 Settings 的 Archived chats 中恢复。");
 			} catch (error) {
 				pushNotice("error", error instanceof Error ? error.message : String(error));
+				throw error;
 			}
 		},
 		[backToSessions, controlFlow, pushNotice],
@@ -384,10 +380,9 @@ export function App(): ReactNode {
 					) : null
 				}
 				onOpenSession={id => startResume(appState.client, id)}
-				onNewSession={() => startCreate(appState.client)}
+				onNewSession={projectPath => startCreate(appState.client, projectPath)}
 				onOpenImportedSession={session => openImportedSession(appState.client, session)}
 				onRenameSession={(id, title) => appState.client.sendRename(id, title)}
-				onDropSession={id => startDrop(appState.client, id)}
 				onArchiveSession={id => startArchive(appState.client, id, appState.sessionId === id)}
 				onLeave={leave}
 			/>
@@ -433,6 +428,14 @@ function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionPr
 		async (id: string): Promise<void> => {
 			if (!controlClient) throw new Error("archived chats are available from the project window");
 			await controlClient.restoreArchivedSession(id);
+		},
+		[controlClient],
+	);
+	const deleteArchivedSession = useCallback(
+		async (id: string): Promise<void> => {
+			if (!controlClient) throw new Error("archived chats are available from the project window");
+			await controlClient.deleteArchivedSession(id);
+			notifySessionPreferencesRemoved(id);
 		},
 		[controlClient],
 	);
@@ -570,6 +573,7 @@ function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionPr
 					context={contextLabel(snap)}
 					loadArchivedSessions={controlClient ? listArchivedSessions : undefined}
 					onRestoreArchivedSession={controlClient ? restoreArchivedSession : undefined}
+					onDeleteArchivedSession={controlClient ? deleteArchivedSession : undefined}
 				/>
 			)}
 			<main className="sh-main">

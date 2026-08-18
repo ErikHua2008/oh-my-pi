@@ -40,10 +40,10 @@ export class ControlSessionFlow {
 		this.#pending = null;
 	}
 
-	startCreate(client: ControlClient): boolean {
+	startCreate(client: ControlClient, cwd?: string): boolean {
 		if (this.#activeClient !== client || this.#pending !== null) return false;
 		this.#pending = { op: "created", client };
-		client.sendCreate();
+		client.sendCreate(cwd);
 		return true;
 	}
 

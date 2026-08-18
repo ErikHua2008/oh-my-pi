@@ -54,6 +54,9 @@ Native media memory is bounded:
 
 - 4 MiB maximum encoded thumbnail size
 - 32 MiB maximum encoded-media cache
+- 64 MiB maximum decoded-bitmap cache; oversized sources are downsampled to a
+  maximum 1024-pixel edge before entering Direct2D; malformed or unusually
+  large sources above 40 megapixels / 16,384 pixels on one edge are rejected
 - 32 cached media entries with LRU eviction
 
 The shell does not create another copy of an original image or attachment.

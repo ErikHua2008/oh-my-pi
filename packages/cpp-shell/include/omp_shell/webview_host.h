@@ -35,7 +35,7 @@ public:
 	[[nodiscard]] bool ready() const noexcept;
 
 private:
-	void ConfigureController();
+	[[nodiscard]] HRESULT ConfigureController();
 
 	HWND window_ = nullptr;
 	ReadyHandler ready_handler_;
@@ -43,7 +43,10 @@ private:
 	Microsoft::WRL::ComPtr<ICoreWebView2Environment> environment_;
 	Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;
 	Microsoft::WRL::ComPtr<ICoreWebView2> webview_;
+	EventRegistrationToken navigation_token_{};
+	EventRegistrationToken new_window_token_{};
 	EventRegistrationToken message_token_{};
+	bool bridge_ready_ = false;
 	bool dark_theme_ = false;
 };
 

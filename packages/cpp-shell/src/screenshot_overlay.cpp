@@ -30,6 +30,8 @@ constexpr UINT kCommitTextMessage = WM_APP + 77;
 constexpr LONG kMinimumSelection = 8;
 constexpr int kResizeHandleHitRadius = 16;
 constexpr std::size_t kMaximumCapturePixels = 64'000'000;
+constexpr std::size_t kMaximumAnnotations = 512;
+constexpr std::size_t kMaximumAnnotationPoints = 32'768;
 
 enum class AnnotationTool {
 	None,
@@ -269,6 +271,7 @@ public:
 			const BOOL status = GetMessageW(&message, nullptr, 0, 0);
 			if (status <= 0) {
 				if (status == 0) PostQuitMessage(static_cast<int>(message.wParam));
+				else if (result_.error.empty()) result_.error = L"Windows 消息循环异常中止";
 				break;
 			}
 			TranslateMessage(&message);
@@ -316,7 +319,7 @@ private:
 		if (owner_ == nullptr || !IsWindow(owner_)) return;
 		owner_was_visible_ = IsWindowVisible(owner_) != FALSE;
 		owner_placement_.length = sizeof(owner_placement_);
-		GetWindowPlacement(owner_, &owner_placement_);
+		owner_placement_valid_ = GetWindowPlacement(owner_, &owner_placement_) != FALSE;
 		if (owner_was_visible_) {
 			ShowWindow(owner_, SW_HIDE);
 			DwmFlush();
@@ -326,8 +329,8 @@ private:
 	void RestoreOwner() {
 		if (owner_restored_ || !owner_was_visible_ || owner_ == nullptr || !IsWindow(owner_)) return;
 		owner_restored_ = true;
-		SetWindowPlacement(owner_, &owner_placement_);
-		ShowWindow(owner_, owner_placement_.showCmd == SW_SHOWMAXIMIZED ? SW_SHOWMAXIMIZED : SW_SHOW);
+		if (owner_placement_valid_) SetWindowPlacement(owner_, &owner_placement_);
+		ShowWindow(owner_, owner_placement_valid_ && owner_placement_.showCmd == SW_SHOWMAXIMIZED ? SW_SHOWMAXIMIZED : SW_SHOW);
 		SetForegroundWindow(owner_);
 	}
 
@@ -393,10 +396,11 @@ private:
 		ReleaseDC(nullptr, screen);
 		if (dim_dc_ == nullptr || dim_bitmap_ == nullptr || bits == nullptr) return false;
 		dim_previous_ = SelectObject(dim_dc_, dim_bitmap_);
+		if (dim_previous_ == nullptr || dim_previous_ == HGDI_ERROR) return false;
 		const std::size_t byte_count = static_cast<std::size_t>(capture_stride_) *
 			static_cast<std::size_t>(Height(client_bounds_));
 		std::memcpy(bits, capture_bits_, byte_count);
-		for (std::size_t offset = 0; offset < byte_count; offset += 4) {
+		for (std::size_t offset = 0; offset + 3 < byte_count; offset += 4) {
 			bits[offset] = static_cast<std::uint8_t>((static_cast<unsigned int>(bits[offset]) * 143U) / 255U);
 			bits[offset + 1] = static_cast<std::uint8_t>((static_cast<unsigned int>(bits[offset + 1]) * 143U) / 255U);
 			bits[offset + 2] = static_cast<std::uint8_t>((static_cast<unsigned int>(bits[offset + 2]) * 143U) / 255U);
@@ -472,6 +476,21 @@ private:
 			return 0;
 		case WM_KEYDOWN:
 			OnKeyDown(wparam);
+			return 0;
+		case WM_DISPLAYCHANGE:
+			result_ = ScreenshotCaptureResult{};
+			result_.error = L"显示器配置已变化，请重新截图";
+			DestroyTextEditor(false);
+			if (GetCapture() == window_) ReleaseCapture();
+			if (window_ != nullptr) DestroyWindow(window_);
+			return 0;
+		case WM_CLOSE:
+			Cancel();
+			return 0;
+		case WM_QUERYENDSESSION:
+			return TRUE;
+		case WM_ENDSESSION:
+			if (wparam != FALSE) Cancel();
 			return 0;
 		case WM_SETCURSOR:
 			UpdateCursor(last_mouse_);
@@ -908,8 +927,16 @@ private:
 				std::clamp(point.x, selection_.left, selection_.right - 1),
 				std::clamp(point.y, selection_.top, selection_.bottom - 1),
 			};
-			if (active_annotation_->tool == AnnotationTool::Pen || active_annotation_->tool == AnnotationTool::Mosaic)
-				active_annotation_->points.push_back(clamped);
+			if (active_annotation_->tool == AnnotationTool::Pen || active_annotation_->tool == AnnotationTool::Mosaic) {
+				if (active_annotation_->points.size() < kMaximumAnnotationPoints) {
+					const POINT previous = active_annotation_->points.back();
+					const LONG minimum_distance = active_annotation_->tool == AnnotationTool::Mosaic ? Scale(2) : 1;
+					if (std::abs(clamped.x - previous.x) >= minimum_distance ||
+						std::abs(clamped.y - previous.y) >= minimum_distance) {
+						active_annotation_->points.push_back(clamped);
+					}
+				}
+			}
 			else if (active_annotation_->points.size() == 1)
 				active_annotation_->points.push_back(clamped);
 			else
@@ -964,7 +991,8 @@ private:
 			has_selection_ = Width(selection_) >= kMinimumSelection && Height(selection_) >= kMinimumSelection;
 			if (!has_selection_) selection_ = RECT{};
 		} else if (interaction_ == Interaction::Drawing && active_annotation_) {
-			if (active_annotation_->points.size() >= 2 || active_annotation_->tool == AnnotationTool::Mosaic)
+			if (annotations_.size() < kMaximumAnnotations &&
+				(active_annotation_->points.size() >= 2 || active_annotation_->tool == AnnotationTool::Mosaic))
 				annotations_.push_back(std::move(*active_annotation_));
 			active_annotation_.reset();
 		}
@@ -1109,7 +1137,8 @@ private:
 		}
 		RemoveWindowSubclass(editor, EditProcedure, 1);
 		DestroyWindow(editor);
-		if (!text.empty()) annotations_.push_back(Annotation{AnnotationTool::Text, {text_anchor_}, std::move(text), color_, Scale(3)});
+		if (!text.empty() && annotations_.size() < kMaximumAnnotations)
+			annotations_.push_back(Annotation{AnnotationTool::Text, {text_anchor_}, std::move(text), color_, Scale(3)});
 		if (window_ != nullptr) {
 			SetFocus(window_);
 			InvalidateRect(window_, nullptr, FALSE);
@@ -1247,56 +1276,69 @@ private:
 		int stride,
 		const std::vector<std::uint8_t>& png) const {
 		bool opened = false;
-		for (int attempt = 0; attempt < 5 && !opened; ++attempt) {
-			opened = OpenClipboard(window_) != FALSE;
-			if (!opened) Sleep(10);
-		}
-		if (!opened) return false;
-		if (!EmptyClipboard()) {
-			CloseClipboard();
-			return false;
-		}
 		const std::size_t pixel_bytes = static_cast<std::size_t>(stride) * static_cast<std::size_t>(height);
 		HGLOBAL dib = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPV5HEADER) + pixel_bytes);
-		bool dib_set = false;
-		if (dib != nullptr) {
-			auto* memory = static_cast<std::uint8_t*>(GlobalLock(dib));
-			if (memory != nullptr) {
-				BITMAPV5HEADER header{};
-				header.bV5Size = sizeof(header);
-				header.bV5Width = width;
-				header.bV5Height = -height;
-				header.bV5Planes = 1;
-				header.bV5BitCount = 32;
-				header.bV5Compression = BI_BITFIELDS;
-				header.bV5RedMask = 0x00FF0000;
-				header.bV5GreenMask = 0x0000FF00;
-				header.bV5BlueMask = 0x000000FF;
-				header.bV5AlphaMask = 0xFF000000;
-				header.bV5CSType = LCS_sRGB;
-				std::memcpy(memory, &header, sizeof(header));
-				std::memcpy(memory + sizeof(header), bits, pixel_bytes);
-				GlobalUnlock(dib);
-				dib_set = SetClipboardData(CF_DIBV5, dib) != nullptr;
-			}
-			if (!dib_set) GlobalFree(dib);
+		if (dib == nullptr) return false;
+		auto* memory = static_cast<std::uint8_t*>(GlobalLock(dib));
+		if (memory == nullptr) {
+			GlobalFree(dib);
+			return false;
 		}
+		BITMAPV5HEADER header{};
+		header.bV5Size = sizeof(header);
+		header.bV5Width = width;
+		header.bV5Height = -height;
+		header.bV5Planes = 1;
+		header.bV5BitCount = 32;
+		header.bV5Compression = BI_BITFIELDS;
+		header.bV5RedMask = 0x00FF0000;
+		header.bV5GreenMask = 0x0000FF00;
+		header.bV5BlueMask = 0x000000FF;
+		header.bV5AlphaMask = 0xFF000000;
+		header.bV5CSType = LCS_sRGB;
+		std::memcpy(memory, &header, sizeof(header));
+		std::memcpy(memory + sizeof(header), bits, pixel_bytes);
+		GlobalUnlock(dib);
+
 		const UINT png_format = RegisterClipboardFormatW(L"PNG");
+		HGLOBAL png_memory = nullptr;
 		if (png_format != 0 && !png.empty()) {
-			HGLOBAL png_memory = GlobalAlloc(GMEM_MOVEABLE, png.size());
+			png_memory = GlobalAlloc(GMEM_MOVEABLE, png.size());
 			if (png_memory != nullptr) {
 				void* target = GlobalLock(png_memory);
 				if (target != nullptr) {
 					std::memcpy(target, png.data(), png.size());
 					GlobalUnlock(png_memory);
-					if (SetClipboardData(png_format, png_memory) == nullptr) GlobalFree(png_memory);
 				} else {
 					GlobalFree(png_memory);
+					png_memory = nullptr;
 				}
 			}
 		}
+		for (int attempt = 0; attempt < 5 && !opened; ++attempt) {
+			opened = OpenClipboard(window_) != FALSE;
+			if (!opened) Sleep(10);
+		}
+		if (!opened) {
+			GlobalFree(dib);
+			if (png_memory != nullptr) GlobalFree(png_memory);
+			return false;
+		}
+		if (!EmptyClipboard()) {
+			CloseClipboard();
+			GlobalFree(dib);
+			if (png_memory != nullptr) GlobalFree(png_memory);
+			return false;
+		}
+		const bool dib_set = SetClipboardData(CF_DIBV5, dib) != nullptr;
+		if (!dib_set) GlobalFree(dib);
+		bool png_set = false;
+		if (png_memory != nullptr) {
+			png_set = SetClipboardData(png_format, png_memory) != nullptr;
+			if (!png_set) GlobalFree(png_memory);
+		}
 		CloseClipboard();
-		return dib_set;
+		return dib_set || png_set;
 	}
 
 	[[nodiscard]] int Scale(int value) const noexcept {
@@ -1310,6 +1352,7 @@ private:
 	HWND edit_ = nullptr;
 	WINDOWPLACEMENT owner_placement_{sizeof(WINDOWPLACEMENT)};
 	bool owner_was_visible_ = false;
+	bool owner_placement_valid_ = false;
 	bool owner_restored_ = false;
 	bool running_ = false;
 	RECT virtual_bounds_{};

@@ -148,6 +148,15 @@ int RunCoreProcessFixtureIfRequested(int argc, char** argv) {
 		Sleep(50);
 		return 7;
 	}
+	if (mode == "stdout-flood") {
+		WriteFixtureLinks();
+		const std::string chunk(4096, 'x');
+		for (int index = 0; index < 512; ++index) {
+			std::cout.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+		}
+		std::cout << std::flush;
+		return 9;
+	}
 	if (mode == "malformed") {
 		std::cout << "debug token=must-not-leak\n" << std::flush;
 		std::cerr << "safe fixture diagnostic\n" << std::flush;
@@ -205,6 +214,20 @@ OMP_TEST("CoreProcess reports an unexpected post-start exit code") {
 	const auto exited = events.WaitFor(omp::shell::CoreEventKind::Exited, 5s);
 	OMP_CHECK(exited.has_value());
 	OMP_CHECK(exited->exit_code == 7);
+	process.Stop();
+}
+
+OMP_TEST("CoreProcess continuously drains stdout after startup") {
+	omp::shell::CoreProcess process;
+	EventCollector events;
+	std::string error;
+	OMP_CHECK(process.Start(FixtureLaunch(L"stdout-flood"),
+		[&events](omp::shell::CoreEvent event) { events.Push(std::move(event)); },
+		error));
+	OMP_CHECK(events.WaitFor(omp::shell::CoreEventKind::Ready, 5s).has_value());
+	const auto exited = events.WaitFor(omp::shell::CoreEventKind::Exited, 5s);
+	OMP_CHECK(exited.has_value());
+	OMP_CHECK(exited->exit_code == 9);
 	process.Stop();
 }
 

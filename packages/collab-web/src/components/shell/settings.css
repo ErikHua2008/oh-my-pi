@@ -312,7 +312,16 @@
 	white-space: nowrap;
 }
 
-.sh-settings-restore {
+.sh-settings-archived-actions {
+	display: inline-flex;
+	align-items: center;
+	justify-content: flex-end;
+	flex: none;
+	gap: 6px;
+}
+
+.sh-settings-restore,
+.sh-settings-delete {
 	min-height: 32px;
 	display: inline-flex;
 	align-items: center;
@@ -326,11 +335,22 @@
 	font-weight: 550;
 }
 
-.sh-settings-restore:hover:not(:disabled) {
+.sh-settings-delete {
+	color: var(--fg-muted);
+}
+
+.sh-settings-restore:hover:not(:disabled),
+.sh-settings-delete:hover:not(:disabled) {
 	background: var(--bg-hover);
 }
 
-.sh-settings-restore:disabled {
+.sh-settings-delete:hover:not(:disabled) {
+	color: var(--err);
+	border-color: color-mix(in srgb, var(--err) 35%, var(--border-strong));
+}
+
+.sh-settings-restore:disabled,
+.sh-settings-delete:disabled {
 	opacity: 0.55;
 }
 
@@ -349,6 +369,97 @@
 	margin-bottom: 12px;
 	color: var(--err);
 	border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+}
+
+/* Shared confirmation overlay for archive and permanent-delete actions. */
+.sh-confirm-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 1400;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	background: var(--backdrop);
+	animation: sh-fade-in var(--dur-fast) var(--ease);
+}
+
+.sh-confirm-dialog {
+	width: min(420px, 100%);
+	padding: 22px;
+	color: var(--fg);
+	background: var(--bg-raised);
+	border: 1px solid var(--border-strong);
+	border-radius: 14px;
+	box-shadow: var(--shadow-overlay);
+	outline: none;
+}
+
+.sh-confirm-copy h2 {
+	margin: 0 0 8px;
+	font-size: 17px;
+	font-weight: 650;
+	line-height: 24px;
+	letter-spacing: -0.01em;
+}
+
+.sh-confirm-copy > div {
+	font-size: 13px;
+	line-height: 20px;
+	color: var(--fg-muted);
+}
+
+.sh-confirm-copy strong {
+	color: var(--fg);
+	font-weight: 600;
+}
+
+.sh-confirm-actions {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 22px;
+}
+
+.sh-confirm-actions button {
+	min-width: 74px;
+	height: 34px;
+	padding: 0 14px;
+	color: var(--fg);
+	background: var(--bg);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.sh-confirm-actions button:hover:not(:disabled) {
+	background: var(--bg-hover);
+}
+
+.sh-confirm-actions .is-primary {
+	color: var(--accent-fg);
+	background: var(--accent);
+	border-color: var(--accent);
+}
+
+.sh-confirm-actions .is-primary:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--accent) 88%, var(--fg));
+}
+
+.sh-confirm-actions .is-danger {
+	color: var(--bg);
+	background: var(--err);
+	border-color: var(--err);
+}
+
+.sh-confirm-actions .is-danger:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--err) 88%, var(--fg));
+}
+
+.sh-confirm-actions button:disabled {
+	cursor: default;
+	opacity: 0.58;
 }
 
 @media (max-width: 720px) {
@@ -416,6 +527,16 @@
 
 	.sh-settings-themes {
 		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.sh-settings-archived-row {
+		align-items: flex-start;
+		flex-direction: column;
+	}
+
+	.sh-settings-archived-actions {
+		width: 100%;
+		flex-wrap: wrap;
 	}
 }
 

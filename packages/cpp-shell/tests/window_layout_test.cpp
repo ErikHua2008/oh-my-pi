@@ -38,6 +38,16 @@ OMP_TEST("window layout caps expansion to the monitor work area") {
 		760);
 }
 
+OMP_TEST("saved windows are fully recovered into the nearest monitor work area") {
+	RequireBounds(FitWindowBoundsToWorkArea(1880, 980, 1200, 800, RECT{0, 0, 1920, 1040}), 720, 240, 1920, 1040);
+	RequireBounds(FitWindowBoundsToWorkArea(-5000, -3000, 900, 700, RECT{-1920, 0, 0, 1040}), -1920, 0, -1020, 700);
+}
+
+OMP_TEST("oversized or invalid saved window dimensions are bounded by the work area") {
+	RequireBounds(FitWindowBoundsToWorkArea(100, 100, 50'000, 50'000, RECT{0, 0, 1366, 728}), 0, 0, 1366, 728);
+	RequireBounds(FitWindowBoundsToWorkArea(100, 100, -1, 0, RECT{0, 0, 1366, 728}), 100, 100, 101, 101);
+}
+
 OMP_TEST("agent rail docking follows the Web responsive breakpoint at every DPI") {
 	OMP_CHECK(!ShouldDockAgentRail(1024, 96));
 	OMP_CHECK(ShouldDockAgentRail(1025, 96));

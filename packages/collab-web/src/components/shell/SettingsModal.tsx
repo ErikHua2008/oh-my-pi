@@ -14,10 +14,12 @@ import {
 	ShieldCheck,
 	Sparkles,
 	Sun,
+	Trash2,
 } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { blockNativeSurfaces } from "../../lib/native-surface-visibility";
 import { type ThemePreference, useThemePreference } from "../../lib/theme";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 export interface SettingsModalProps {
 	onClose(): void;
@@ -30,6 +32,7 @@ export interface SettingsModalProps {
 	context?: string | null;
 	loadArchivedSessions?(): Promise<readonly SessionSummary[]>;
 	onRestoreArchivedSession?(id: string): Promise<void>;
+	onDeleteArchivedSession?(id: string): Promise<void>;
 }
 
 type SettingsSection = "general" | "appearance" | "archived";
@@ -99,6 +102,7 @@ export function SettingsModal({
 	context,
 	loadArchivedSessions,
 	onRestoreArchivedSession,
+	onDeleteArchivedSession,
 }: SettingsModalProps): ReactNode {
 	const { preference, resolved, setPreference } = useThemePreference();
 	const [section, setSection] = useState<SettingsSection>("general");
@@ -106,6 +110,8 @@ export function SettingsModal({
 	const [archivedLoading, setArchivedLoading] = useState(false);
 	const [archivedError, setArchivedError] = useState<string | null>(null);
 	const [restoringId, setRestoringId] = useState<string | null>(null);
+	const [deletingId, setDeletingId] = useState<string | null>(null);
+	const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 	const surfaceRef = useRef<HTMLDivElement>(null);
 	const onCloseRef = useRef(onClose);
 	onCloseRef.current = onClose;
@@ -115,6 +121,7 @@ export function SettingsModal({
 	const choose = (pref: ThemePreference): void => setPreference(pref);
 	const canManageArchived = readOnly !== true && loadArchivedSessions !== undefined;
 	const archivedGroups = groupArchivedSessions(archivedSessions);
+	const deleteConfirmSession = archivedSessions.find(item => item.id === deleteConfirmId);
 
 	useEffect(() => {
 		if (section !== "archived" || !canManageArchived || !loadArchivedSessions) return;
@@ -137,7 +144,8 @@ export function SettingsModal({
 	}, [canManageArchived, loadArchivedSessions, section]);
 
 	const restoreArchived = async (id: string): Promise<void> => {
-		if (!onRestoreArchivedSession || restoringId) return;
+		if (!onRestoreArchivedSession || restoringId || deletingId) return;
+		setDeleteConfirmId(null);
 		setRestoringId(id);
 		setArchivedError(null);
 		try {
@@ -147,6 +155,21 @@ export function SettingsModal({
 			setArchivedError(error instanceof Error ? error.message : String(error));
 		} finally {
 			setRestoringId(null);
+		}
+	};
+
+	const deleteArchived = async (id: string): Promise<void> => {
+		if (!onDeleteArchivedSession || deletingId || restoringId) return;
+		setDeletingId(id);
+		setArchivedError(null);
+		try {
+			await onDeleteArchivedSession(id);
+			setArchivedSessions(current => current.filter(session => session.id !== id));
+			setDeleteConfirmId(null);
+		} catch (error) {
+			setArchivedError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setDeletingId(null);
 		}
 	};
 
@@ -256,7 +279,7 @@ export function SettingsModal({
 							<h1 className="sh-settings-title">Settings</h1>
 							<p className="sh-settings-description">
 								{section === "archived"
-									? "Archived chats stay on this computer and can be restored at any time."
+									? "Archived chats stay on this computer until restored or permanently deleted."
 									: "Manage local appearance and inspect the active session."}
 							</p>
 						</header>
@@ -358,7 +381,7 @@ export function SettingsModal({
 							>
 								<div className="sh-settings-section-head">
 									<h2 id="sh-settings-archived-title">已归档对话</h2>
-									<p>恢复后，对话会重新出现在原项目下。</p>
+									<p>彻底删除只会清理 OMP 保存的附件、剪贴板和截图图片，不会删除拖入或选择的本机源文件。</p>
 								</div>
 								{archivedError && (
 									<p className="sh-settings-archived-error" role="alert">
@@ -383,15 +406,28 @@ export function SettingsModal({
 															<strong>{archivedSessionTitle(item)}</strong>
 															<span>{new Date(item.modifiedAt).toLocaleString()}</span>
 														</div>
-														<button
-															type="button"
-															className="sh-settings-restore"
-															disabled={restoringId !== null}
-															onClick={() => void restoreArchived(item.id)}
-														>
-															<RotateCcw size={14} aria-hidden="true" />
-															{restoringId === item.id ? "恢复中…" : "恢复"}
-														</button>
+														<div className="sh-settings-archived-actions">
+															<button
+																type="button"
+																className="sh-settings-restore"
+																disabled={restoringId !== null || deletingId !== null}
+																onClick={() => void restoreArchived(item.id)}
+															>
+																<RotateCcw size={14} aria-hidden="true" />
+																{restoringId === item.id ? "恢复中…" : "恢复"}
+															</button>
+															{onDeleteArchivedSession && (
+																<button
+																	type="button"
+																	className="sh-settings-delete"
+																	disabled={restoringId !== null || deletingId !== null}
+																	onClick={() => setDeleteConfirmId(item.id)}
+																>
+																	<Trash2 size={14} aria-hidden="true" />
+																	彻底删除
+																</button>
+															)}
+														</div>
 													</div>
 												))}
 											</section>
@@ -403,6 +439,22 @@ export function SettingsModal({
 					</div>
 				</main>
 			</div>
+			{deleteConfirmSession && (
+				<ConfirmDialog
+					title="彻底删除这个对话？"
+					description={
+						<>
+							<strong>“{archivedSessionTitle(deleteConfirmSession)}”</strong> 以及 OMP
+							为它保存的附件、剪贴板图片和截图将被永久删除。拖入或选择的本机源文件不会被删除。此操作无法撤销。
+						</>
+					}
+					confirmLabel={deletingId === deleteConfirmSession.id ? "删除中…" : "彻底删除"}
+					danger
+					busy={deletingId === deleteConfirmSession.id}
+					onCancel={() => setDeleteConfirmId(null)}
+					onConfirm={() => void deleteArchived(deleteConfirmSession.id)}
+				/>
+			)}
 		</div>
 	);
 }

@@ -27,6 +27,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { CodexSessionStore } from "@oh-my-pi/pi-coding-agent/session/codex-session-store";
 import type { ForeignSessionInfo } from "@oh-my-pi/pi-coding-agent/session/foreign-session-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { getBlobsDir, getManagedMediaDir, getSessionsDir } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../src/config/settings";
 import * as sdk from "../../src/sdk";
 import { EventBus } from "../../src/utils/event-bus";
@@ -209,6 +210,7 @@ interface Harness {
 	initialHost: CollabHost;
 	controlHost: ControlHost;
 	sessionDir: string;
+	agentDir: string;
 	persistInitialMessage(): Promise<void>;
 }
 
@@ -218,6 +220,7 @@ const guestCleanups: (() => void)[] = [];
 
 async function setupHarness(persistedInitial = true): Promise<Harness> {
 	const sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-core-ctrl-"));
+	const agentDir = path.join(sessionDir, "agent");
 	const initialSessionFile = path.join(sessionDir, "initial.jsonl");
 	const initialSessionFileRef: { current: string | undefined } = {
 		// SessionManager.create() assigns the future JSONL path immediately even
@@ -237,7 +240,7 @@ async function setupHarness(persistedInitial = true): Promise<Harness> {
 		webLinkBase: server.webLinkBase,
 		baseSessionOptions: {},
 		sessionDir,
-		agentDir: path.join(sessionDir, "agent"),
+		agentDir,
 	});
 
 	const initialManager = makeSessionManagerDouble(INITIAL_SESSION_ID, initialSessionFileRef, INITIAL_SESSION_CWD);
@@ -267,6 +270,7 @@ async function setupHarness(persistedInitial = true): Promise<Harness> {
 		initialHost,
 		controlHost,
 		sessionDir,
+		agentDir,
 		persistInitialMessage: async () => {
 			initialSessionFileRef.current = initialSessionFile;
 			const message = {
@@ -367,6 +371,151 @@ describe("control room + session registry (multi-session core)", () => {
 		expect(initial.streaming).toBe(false);
 		// Full-control peers see the live deep link of the initial session.
 		expect(initial.link).toBe(harness.initialHost.webLink);
+	});
+
+	it("archives first, then permanently deletes OMP-owned media without touching referenced source files", async () => {
+		harness = await setupHarness();
+		const sessionId = "disk-only-delete";
+		const sessionFile = path.join(harness.sessionDir, "disk-only.jsonl");
+		const artifactsDirectory = path.join(harness.sessionDir, "disk-only");
+		const blobHash = "a".repeat(64);
+		const mediaHash = "b".repeat(64);
+		const blob = path.join(getBlobsDir(harness.agentDir), blobHash);
+		const blobSidecar = `${blob}.png`;
+		const media = path.join(
+			getManagedMediaDir(harness.agentDir),
+			"2026",
+			"2026-08",
+			mediaHash.slice(0, 2),
+			`${mediaHash}.png`,
+		);
+		const referencedSource = path.join(harness.sessionDir, "referenced-source.png");
+		await fs.mkdir(path.dirname(blob), { recursive: true });
+		await fs.mkdir(path.dirname(media), { recursive: true });
+		await fs.writeFile(blob, "blob");
+		await fs.writeFile(blobSidecar, "sidecar");
+		await fs.writeFile(media, "media");
+		await fs.writeFile(referencedSource, "external source must survive");
+		const old = new Date(Date.now() - 60 * 60_000);
+		await fs.utimes(blob, old, old);
+		await fs.utimes(blobSidecar, old, old);
+		await fs.utimes(media, old, old);
+		await fs.writeFile(
+			sessionFile,
+			[
+				JSON.stringify({
+					type: "session",
+					id: sessionId,
+					title: "Delete this chat",
+					timestamp: new Date().toISOString(),
+					cwd: INITIAL_SESSION_CWD,
+				}),
+				JSON.stringify({
+					type: "custom_message",
+					content: `blob:sha256:${blobHash}`,
+					details: {
+						localFiles: [
+							{ kind: "local-file", path: media, name: path.basename(media) },
+							{ kind: "local-file", path: referencedSource, name: path.basename(referencedSource) },
+						],
+					},
+				}),
+				"",
+			].join("\n"),
+		);
+		await fs.mkdir(artifactsDirectory);
+		await fs.writeFile(path.join(artifactsDirectory, "attachment.txt"), "delete with transcript");
+
+		const guest = await joinRoom(harness.controlHost.webLink, "deleter", { ctrl: true });
+		guestCleanups.push(() => guest.close());
+		await guest.nextFrame(frame => frame.t === "ctrl-welcome");
+		guest.socket.send({ t: "ctrl-archive", reqId: 60, id: sessionId });
+		const archived = await guest.nextFrame(frame => frame.t === "ctrl-archived" && frame.reqId === 60);
+		expect(archived.t).toBe("ctrl-archived");
+		expect(
+			await fs.stat(sessionFile).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(
+			await fs.stat(artifactsDirectory).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(await Bun.file(blob).exists()).toBe(true);
+		expect(await Bun.file(blobSidecar).exists()).toBe(true);
+		expect(await Bun.file(media).exists()).toBe(true);
+		expect(await Bun.file(referencedSource).exists()).toBe(true);
+		expect((await harness.registry.list()).map(session => session.id)).not.toContain(sessionId);
+		expect((await harness.registry.listArchivedSessions()).map(session => session.id)).toContain(sessionId);
+
+		guest.socket.send({ t: "ctrl-delete-archived", reqId: 66, id: sessionId });
+		const deleted = await guest.nextFrame(frame => frame.t === "ctrl-archived-deleted" && frame.reqId === 66);
+		expect(deleted.t).toBe("ctrl-archived-deleted");
+		expect(await harness.registry.listArchivedSessions()).toEqual([]);
+		expect(await Bun.file(blob).exists()).toBe(false);
+		expect(await Bun.file(blobSidecar).exists()).toBe(false);
+		expect(await Bun.file(media).exists()).toBe(false);
+		expect(await Bun.file(referencedSource).exists()).toBe(true);
+	});
+
+	it("refuses permanent deletion until a live session has been archived", async () => {
+		harness = await setupHarness();
+		const sessionFile = path.join(harness.sessionDir, "initial.jsonl");
+		const artifactsDirectory = path.join(harness.sessionDir, "initial");
+		await fs.mkdir(artifactsDirectory);
+		await fs.writeFile(path.join(artifactsDirectory, "attachment.txt"), "delete with live session");
+
+		const guest = await joinRoom(harness.controlHost.webLink, "live-deleter", { ctrl: true });
+		guestCleanups.push(() => guest.close());
+		await guest.nextFrame(frame => frame.t === "ctrl-welcome");
+		guest.socket.send({ t: "ctrl-delete-archived", reqId: 64, id: INITIAL_SESSION_ID });
+		const error = await guest.nextFrame(frame => frame.t === "ctrl-request-error" && frame.reqId === 64);
+		expect(error.t).toBe("ctrl-request-error");
+		expect((await harness.registry.list()).map(session => session.id)).toContain(INITIAL_SESSION_ID);
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+		expect(await Bun.file(path.join(artifactsDirectory, "attachment.txt")).exists()).toBe(true);
+	});
+
+	it("keeps a permanent archived deletion successful when post-delete media GC cannot scan another journal", async () => {
+		harness = await setupHarness();
+		const sessionId = "delete-despite-gc-error";
+		const sessionFile = path.join(harness.sessionDir, "delete-despite-gc-error.jsonl");
+		const blobHash = "c".repeat(64);
+		const blob = path.join(getBlobsDir(harness.agentDir), blobHash);
+		await fs.mkdir(path.dirname(blob), { recursive: true });
+		await fs.writeFile(blob, "candidate");
+		const old = new Date(Date.now() - 60 * 60_000);
+		await fs.utimes(blob, old, old);
+		await fs.writeFile(
+			sessionFile,
+			`${JSON.stringify({
+				type: "session",
+				id: sessionId,
+				timestamp: new Date().toISOString(),
+				cwd: INITIAL_SESSION_CWD,
+			})}\n${JSON.stringify({ ref: `blob:sha256:${blobHash}` })}\n`,
+		);
+		const corruptArchive = path.join(getSessionsDir(harness.agentDir), "project", "corrupt.jsonl.gz");
+		await fs.mkdir(path.dirname(corruptArchive), { recursive: true });
+		await fs.writeFile(corruptArchive, "not gzip data");
+
+		const guest = await joinRoom(harness.controlHost.webLink, "gc-error-deleter", { ctrl: true });
+		guestCleanups.push(() => guest.close());
+		await guest.nextFrame(frame => frame.t === "ctrl-welcome");
+		guest.socket.send({ t: "ctrl-archive", reqId: 65, id: sessionId });
+		await guest.nextFrame(frame => frame.t === "ctrl-archived" && frame.reqId === 65);
+		guest.socket.send({ t: "ctrl-delete-archived", reqId: 67, id: sessionId });
+		const deleted = await guest.nextFrame(frame => frame.t === "ctrl-archived-deleted" && frame.reqId === 67);
+
+		expect(deleted.t).toBe("ctrl-archived-deleted");
+		expect(await Bun.file(sessionFile).exists()).toBe(false);
+		expect(await harness.registry.listArchivedSessions()).toEqual([]);
+		// GC is intentionally best-effort after the transcript is gone. A later
+		// healthy/manual pass can reclaim this still-safe candidate.
+		expect(await Bun.file(blob).exists()).toBe(true);
 	});
 
 	it("archives a persisted chat with its artifacts and restores it to the active list", async () => {
@@ -501,8 +650,33 @@ describe("control room + session registry (multi-session core)", () => {
 		expect(created).toHaveLength(1);
 		expect(created[0]?.session.sessionManager.getCwd()).toBe(sourceProject);
 		const targetDir = SessionManager.getDefaultSessionDir(sourceProject, path.join(harness.sessionDir, "agent"));
-		const targetFiles = await fs.readdir(targetDir);
+		let targetFiles = await fs.readdir(targetDir);
 		expect(targetFiles.some(file => file.includes(imported.session.id) && file.endsWith(".jsonl"))).toBe(true);
+
+		// Reproduce the old bug's on-disk state: the same Codex source was copied
+		// under a second OMP id. A new import must retain the original id and move
+		// the redundant copy out of the active sidebar instead of making a third.
+		const duplicate = await created[0]!.session.sessionManager.persistCopy({
+			sessionDir: targetDir,
+			suppressBreadcrumb: true,
+		});
+		const duplicateId = duplicate.getSessionId();
+		await duplicate.close();
+		guest.socket.send({
+			t: "ctrl-import",
+			reqId: 53,
+			source: "codex",
+			id: source.id,
+			path: source.path,
+			archived: true,
+		});
+		const refreshed = await guest.nextFrame(f => f.t === "ctrl-imported" && f.reqId === 53);
+		if (refreshed.t !== "ctrl-imported") throw new Error(`expected ctrl-imported, got ${refreshed.t}`);
+		expect(refreshed.session.id).toBe(imported.session.id);
+		targetFiles = await fs.readdir(targetDir);
+		expect(targetFiles.filter(file => file.endsWith(".jsonl"))).toHaveLength(1);
+		expect((await harness.registry.listArchivedSessions()).map(session => session.id)).toContain(duplicateId);
+		expect(created).toHaveLength(2);
 		expect(await fs.readFile(sourcePath, "utf8")).toBe("source stays untouched\n");
 
 		guest.socket.send({ t: "ctrl-resume", id: imported.session.id });
@@ -511,6 +685,80 @@ describe("control room + session registry (multi-session core)", () => {
 		);
 		if (resumed.t !== "ctrl-session") throw new Error(`expected ctrl-session, got ${resumed.t}`);
 		expect(resumed.link).toBeString();
+	});
+
+	it("requires confirmation before merging an OMP continuation and keeps one chronological chat", async () => {
+		harness = await setupHarness();
+		const { created } = spyOnCreateAgentSession();
+		const sourceProject = await fs.mkdtemp(path.join(harness.sessionDir, "codex-merge-project-"));
+		const sourcePath = path.join(harness.sessionDir, "codex-merge-rollout.jsonl");
+		await fs.writeFile(sourcePath, "source stays untouched\n");
+		const source: ForeignSessionInfo = {
+			source: "codex",
+			id: "codex-merge-source-id",
+			path: sourcePath,
+			cwd: sourceProject,
+			title: "Merged Codex chat",
+			archived: false,
+			created: new Date("2026-08-01T00:00:00.000Z"),
+			modified: new Date("2026-08-03T00:00:00.000Z"),
+		};
+		let sourceRevision = 1;
+		vi.spyOn(CodexSessionStore.prototype, "list").mockResolvedValue([source]);
+		vi.spyOn(CodexSessionStore.prototype, "load").mockImplementation(async info => {
+			const manager = SessionManager.inMemory(info.cwd);
+			manager.ingestReplicatedEntry({
+				type: "message",
+				id: "codex-user-1",
+				parentId: null,
+				timestamp: "2026-08-01T00:00:00.000Z",
+				message: { role: "user", content: "Codex first", timestamp: Date.parse("2026-08-01T00:00:00.000Z") },
+			});
+			if (sourceRevision >= 2) {
+				manager.ingestReplicatedEntry({
+					type: "message",
+					id: "codex-user-2",
+					parentId: "codex-user-1",
+					timestamp: "2026-08-03T00:00:00.000Z",
+					message: { role: "user", content: "Codex later", timestamp: Date.parse("2026-08-03T00:00:00.000Z") },
+				});
+			}
+			await manager.setSessionName(info.title ?? "Merged Codex chat");
+			return manager;
+		});
+
+		const first = await harness.registry.importForeignSession("codex", source.id, source.path, false);
+		if ("kind" in first) throw new Error("first import unexpectedly conflicted");
+		created.at(-1)!.session.sessionManager.ingestReplicatedEntry({
+			type: "message",
+			id: "omp-user-1",
+			parentId: created.at(-1)!.session.sessionManager.getLeafId(),
+			timestamp: "2026-08-02T00:00:00.000Z",
+			message: { role: "user", content: "OMP continuation", timestamp: Date.parse("2026-08-02T00:00:00.000Z") },
+		});
+		sourceRevision = 2;
+
+		const conflict = await harness.registry.importForeignSession("codex", source.id, source.path, false);
+		expect(conflict).toMatchObject({
+			kind: "conflict",
+			existingSessionId: first.id,
+			duplicateCount: 1,
+			localMessageCount: 1,
+		});
+
+		const merged = await harness.registry.importForeignSession("codex", source.id, source.path, false, true);
+		if ("kind" in merged) throw new Error("confirmed merge still conflicted");
+		expect(merged.id).toBe(first.id);
+		const messages = created
+			.at(-1)!
+			.session.sessionManager.getEntries()
+			.filter(entry => entry.type === "message" && entry.message.role === "user")
+			.map(entry => {
+				if (entry.type !== "message" || entry.message.role !== "user") return "";
+				return typeof entry.message.content === "string" ? entry.message.content : "";
+			});
+		expect(messages).toEqual(["Codex first", "OMP continuation", "Codex later"]);
+		expect((await harness.registry.list()).filter(session => session.id === first.id)).toHaveLength(1);
 	});
 
 	it("re-resolves a Codex conversation that was archived while the picker was open", async () => {
@@ -691,6 +939,43 @@ describe("control room + session registry (multi-session core)", () => {
 		const sessionWelcome = await sessionGuest.nextFrame(f => f.t === "welcome");
 		if (sessionWelcome.t !== "welcome") throw new Error(`expected welcome, got ${sessionWelcome.t}`);
 		expect(sessionWelcome.readOnly).toBeUndefined();
+	});
+
+	it("creates a session in the project selected by the control-room client", async () => {
+		harness = await setupHarness();
+		const { created } = spyOnCreateAgentSession();
+		const selectedProject = await fs.mkdtemp(path.join(harness.sessionDir, "selected-project-"));
+
+		const guest = await joinRoom(harness.controlHost.webLink, "project-creator", { ctrl: true });
+		guestCleanups.push(() => guest.close());
+		await guest.nextFrame(frame => frame.t === "ctrl-welcome");
+
+		guest.socket.send({ t: "ctrl-create", cwd: selectedProject });
+		const reply = await guest.nextFrame(frame => frame.t === "ctrl-session" && frame.op === "created");
+		if (reply.t !== "ctrl-session") throw new Error(`expected ctrl-session, got ${reply.t}`);
+		expect(created).toHaveLength(1);
+		const manager = created[0]?.session.sessionManager;
+		expect(manager?.getCwd()).toBe(path.resolve(selectedProject));
+		expect(manager?.getSessionDir()).toBe(
+			SessionManager.getDefaultSessionDir(path.resolve(selectedProject), path.join(harness.sessionDir, "agent")),
+		);
+	});
+
+	it("rejects a create request for a missing project without leaking a live session", async () => {
+		harness = await setupHarness();
+		const { created } = spyOnCreateAgentSession();
+		const missingProject = path.join(harness.sessionDir, "missing-project");
+
+		const guest = await joinRoom(harness.controlHost.webLink, "missing-project-creator", { ctrl: true });
+		guestCleanups.push(() => guest.close());
+		await guest.nextFrame(frame => frame.t === "ctrl-welcome");
+
+		guest.socket.send({ t: "ctrl-create", cwd: missingProject });
+		const error = await guest.nextFrame(frame => frame.t === "ctrl-error");
+		if (error.t !== "ctrl-error") throw new Error(`expected ctrl-error, got ${error.t}`);
+		expect(error.message).toContain("project directory is not available");
+		expect(created).toEqual([]);
+		expect((await harness.registry.list()).map(session => session.id)).toEqual([INITIAL_SESSION_ID]);
 	});
 
 	it("resumes an active session with its live link and errors for unknown ids", async () => {

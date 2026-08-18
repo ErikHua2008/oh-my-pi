@@ -15,10 +15,15 @@ bool EnsureSingleInstance() {
 	if (GetLastError() != ERROR_ALREADY_EXISTS) {
 		return true;
 	}
-	HWND existing = FindWindowW(L"OmpCppShellWindow", nullptr);
+	HWND existing = nullptr;
+	for (int attempt = 0; attempt < 50 && existing == nullptr; ++attempt) {
+		existing = FindWindowW(L"OmpCppShellWindow", nullptr);
+		if (existing == nullptr) {
+			Sleep(20);
+		}
+	}
 	if (existing != nullptr) {
-		ShowWindow(existing, SW_RESTORE);
-		SetForegroundWindow(existing);
+		PostMessageW(existing, omp::shell::kShowExistingInstanceMessage, 0, 0);
 	}
 	CloseHandle(g_instance_mutex);
 	g_instance_mutex = nullptr;
@@ -27,7 +32,7 @@ bool EnsureSingleInstance() {
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
+int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int show_command) {
 	SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 	if (!EnsureSingleInstance()) {
 		return 0;
@@ -42,8 +47,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
 	INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
 	InitCommonControlsEx(&controls);
 
-	omp::shell::App app(instance);
-	const int result = app.Run(show_command);
+	int result = 1;
+	{
+		// Release WebView2 and every other COM-backed member while OLE is still
+		// initialized on this thread.
+		omp::shell::App app(instance);
+		result = app.Run(show_command);
+	}
 	OleUninitialize();
 	if (g_instance_mutex != nullptr) {
 		CloseHandle(g_instance_mutex);

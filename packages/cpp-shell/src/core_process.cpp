@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <system_error>
@@ -199,12 +200,12 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 		return false;
 	}
 
-	STARTUPINFOW startup{};
-	startup.cb = sizeof(startup);
-	startup.dwFlags = STARTF_USESTDHANDLES;
-	startup.hStdInput = null_input;
-	startup.hStdOutput = stdout_pipe.write;
-	startup.hStdError = stderr_pipe.write;
+	STARTUPINFOEXW startup{};
+	startup.StartupInfo.cb = sizeof(startup);
+	startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+	startup.StartupInfo.hStdInput = null_input;
+	startup.StartupInfo.hStdOutput = stdout_pipe.write;
+	startup.StartupInfo.hStdError = stderr_pipe.write;
 
 	PROCESS_INFORMATION process_info{};
 	std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
@@ -234,7 +235,44 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 		return false;
 	}
 
-	const DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
+	SIZE_T attribute_bytes = 0;
+	static_cast<void>(InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes));
+	std::vector<std::byte> attribute_storage(attribute_bytes);
+	if (attribute_bytes == 0 || !InitializeProcThreadAttributeList(
+			reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data()), 1, 0, &attribute_bytes)) {
+		error = "InitializeProcThreadAttributeList failed: " +
+			std::system_category().message(static_cast<int>(GetLastError()));
+		CloseIfValid(job);
+		CloseIfValid(null_input);
+		CloseIfValid(stdout_pipe.read);
+		CloseIfValid(stdout_pipe.write);
+		CloseIfValid(stderr_pipe.read);
+		CloseIfValid(stderr_pipe.write);
+		return false;
+	}
+	startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
+	HANDLE inherited_handles[] = {null_input, stdout_pipe.write, stderr_pipe.write};
+	if (!UpdateProcThreadAttribute(startup.lpAttributeList,
+			0,
+			PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+			inherited_handles,
+			sizeof(inherited_handles),
+			nullptr,
+			nullptr)) {
+		error = "UpdateProcThreadAttribute failed: " +
+			std::system_category().message(static_cast<int>(GetLastError()));
+		DeleteProcThreadAttributeList(startup.lpAttributeList);
+		CloseIfValid(job);
+		CloseIfValid(null_input);
+		CloseIfValid(stdout_pipe.read);
+		CloseIfValid(stdout_pipe.write);
+		CloseIfValid(stderr_pipe.read);
+		CloseIfValid(stderr_pipe.write);
+		return false;
+	}
+
+	const DWORD flags =
+		CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
 	const BOOL created = CreateProcessW(application_name.empty() ? nullptr : application_name.c_str(),
 		mutable_command.data(),
 		nullptr,
@@ -243,9 +281,10 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 		flags,
 		nullptr,
 		launch.project_directory.c_str(),
-		&startup,
+		&startup.StartupInfo,
 		&process_info);
 	const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+	DeleteProcThreadAttributeList(startup.lpAttributeList);
 	CloseIfValid(null_input);
 	CloseIfValid(stdout_pipe.write);
 	CloseIfValid(stderr_pipe.write);
@@ -298,7 +337,17 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 	handler_ = std::move(handler);
 	stop_requested_.store(false);
 	running_.store(true);
-	monitor_thread_ = std::thread([this, launch = std::move(launch)]() mutable { Monitor(std::move(launch)); });
+	try {
+		monitor_thread_ = std::thread([this, launch = std::move(launch)]() mutable { Monitor(std::move(launch)); });
+	} catch (const std::exception& exception) {
+		stop_requested_.store(true);
+		TerminateTree();
+		WaitForSingleObject(process_info.hProcess, 5000);
+		CleanupHandles();
+		running_.store(false);
+		error = "starting omp core monitor failed: " + std::string(exception.what());
+		return false;
+	}
 	return true;
 }
 
@@ -326,7 +375,22 @@ void CoreProcess::Monitor(CoreLaunch launch) {
 		stderr_pipe = stderr_read_;
 	}
 
-	std::thread stderr_thread([this, stderr_pipe] { DrainStderr(stderr_pipe); });
+	std::thread stderr_thread;
+	try {
+		stderr_thread = std::thread([this, stderr_pipe] { DrainStderr(stderr_pipe); });
+	} catch (const std::exception& exception) {
+		TerminateTree();
+		WaitForSingleObject(process, 5000);
+		CleanupHandles();
+		running_.store(false);
+		if (!stop_requested_.load()) {
+			Emit(CoreEvent{CoreEventKind::StartupFailed,
+				{},
+				"starting omp core stderr monitor failed: " + std::string(exception.what()),
+				1});
+		}
+		return;
+	}
 	CoreOutputParser parser;
 	const ULONGLONG started_at = GetTickCount64();
 	bool startup_finished = false;
@@ -390,8 +454,17 @@ void CoreProcess::Monitor(CoreLaunch launch) {
 		Sleep(8);
 	}
 
+	std::thread stdout_thread;
 	if (!stop_requested_.load() && startup_finished) {
-		Emit(CoreEvent{CoreEventKind::Ready, *parser.links(), {}, 0});
+		try {
+			stdout_thread = std::thread([this, stdout_pipe] { DrainStdout(stdout_pipe); });
+		} catch (const std::exception& exception) {
+			startup_finished = false;
+			startup_error = "starting omp core stdout monitor failed: " + std::string(exception.what());
+		}
+		if (startup_finished) {
+			Emit(CoreEvent{CoreEventKind::Ready, *parser.links(), {}, 0});
+		}
 	}
 
 	if (!startup_finished) {
@@ -405,6 +478,9 @@ void CoreProcess::Monitor(CoreLaunch launch) {
 	// Terminating the job guarantees those handles close before joining the
 	// stderr drainer and before a project switch starts another Core.
 	TerminateTree();
+	if (stdout_thread.joinable()) {
+		stdout_thread.join();
+	}
 	if (stderr_thread.joinable()) {
 		stderr_thread.join();
 	}
@@ -425,6 +501,28 @@ void CoreProcess::Monitor(CoreLaunch launch) {
 
 	CleanupHandles();
 	running_.store(false);
+}
+
+void CoreProcess::DrainStdout(HANDLE pipe) const {
+	std::array<char, 4096> buffer{};
+	for (;;) {
+		DWORD available = 0;
+		if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
+			return;
+		}
+		if (available == 0) {
+			if (stop_requested_.load()) {
+				return;
+			}
+			Sleep(8);
+			continue;
+		}
+		DWORD bytes_read = 0;
+		const DWORD requested = std::min<DWORD>(available, static_cast<DWORD>(buffer.size()));
+		if (!ReadFile(pipe, buffer.data(), requested, &bytes_read, nullptr) || bytes_read == 0) {
+			return;
+		}
+	}
 }
 
 void CoreProcess::DrainStderr(HANDLE pipe) {
@@ -468,9 +566,14 @@ std::string CoreProcess::StderrTail() const {
 	return RedactCoreLinks(stderr_tail_);
 }
 
-void CoreProcess::Emit(CoreEvent event) const {
+void CoreProcess::Emit(CoreEvent event) const noexcept {
 	if (handler_) {
-		handler_(std::move(event));
+		try {
+			handler_(std::move(event));
+		} catch (...) {
+			// A UI notification failure must not escape the monitor thread and
+			// terminate the complete desktop process.
+		}
 	}
 }
 

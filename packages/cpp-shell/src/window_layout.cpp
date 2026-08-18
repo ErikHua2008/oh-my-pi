@@ -1,6 +1,7 @@
 #include "omp_shell/window_layout.h"
 
 #include <algorithm>
+#include <cstdint>
 
 namespace omp::shell {
 
@@ -13,6 +14,21 @@ RECT ExpandWindowBoundsForRail(const RECT& compact_bounds, const RECT& work_area
 		left = work_area.right - expanded_width;
 	}
 	return RECT{left, compact_bounds.top, left + expanded_width, compact_bounds.bottom};
+}
+
+RECT FitWindowBoundsToWorkArea(
+	LONG left, LONG top, LONG width, LONG height, const RECT& work_area) noexcept {
+	const std::int64_t work_width = std::max<std::int64_t>(1,
+		static_cast<std::int64_t>(work_area.right) - work_area.left);
+	const std::int64_t work_height = std::max<std::int64_t>(1,
+		static_cast<std::int64_t>(work_area.bottom) - work_area.top);
+	const LONG fitted_width = static_cast<LONG>(std::clamp<std::int64_t>(width, 1, work_width));
+	const LONG fitted_height = static_cast<LONG>(std::clamp<std::int64_t>(height, 1, work_height));
+	const LONG fitted_left = static_cast<LONG>(std::clamp<std::int64_t>(
+		left, work_area.left, static_cast<std::int64_t>(work_area.right) - fitted_width));
+	const LONG fitted_top = static_cast<LONG>(std::clamp<std::int64_t>(
+		top, work_area.top, static_cast<std::int64_t>(work_area.bottom) - fitted_height));
+	return RECT{fitted_left, fitted_top, fitted_left + fitted_width, fitted_top + fitted_height};
 }
 
 bool ShouldDockAgentRail(int window_width, int dpi) noexcept {

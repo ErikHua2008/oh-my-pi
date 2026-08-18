@@ -1,11 +1,12 @@
 import type { ForeignSessionSummary } from "@oh-my-pi/pi-wire";
 import { Archive, ArrowLeft, Check, Folder, Inbox, MessageSquare, Search, X } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import type { CodexImportResult } from "../../lib/control-client";
 import { blockNativeSurfaces } from "../../lib/native-surface-visibility";
 
 export interface CodexImportModalProps {
 	loadSessions(archived: boolean): Promise<readonly ForeignSessionSummary[]>;
-	onImport(session: ForeignSessionSummary): Promise<void>;
+	onImport(session: ForeignSessionSummary, merge?: boolean): Promise<CodexImportResult>;
 	onClose(): void;
 }
 
@@ -15,7 +16,7 @@ export interface CodexImportProject {
 	readonly sessions: readonly ForeignSessionSummary[];
 }
 
-type ImportStep = "select" | "confirm";
+type ImportStep = "select" | "confirm" | "conflict";
 
 function sessionTitle(session: ForeignSessionSummary): string {
 	return session.title?.trim() || session.firstMessage?.trim() || "Untitled Codex conversation";
@@ -89,6 +90,7 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 	const [query, setQuery] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [importing, setImporting] = useState(false);
+	const [conflict, setConflict] = useState<Extract<CodexImportResult, { kind: "conflict" }>["conflict"] | null>(null);
 	const surfaceRef = useRef<HTMLDivElement>(null);
 	const onCloseRef = useRef(onClose);
 	const importingRef = useRef(importing);
@@ -162,6 +164,7 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 		setStep("select");
 		setQuery("");
 		setError(null);
+		setConflict(null);
 	};
 
 	const trapFocus = (event: KeyboardEvent<HTMLDivElement>): void => {
@@ -181,12 +184,18 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 		}
 	};
 
-	const beginImport = async (): Promise<void> => {
+	const beginImport = async (merge = false): Promise<void> => {
 		if (!selected || importing) return;
 		setImporting(true);
 		setError(null);
 		try {
-			await onImport(selected);
+			const result = await onImport(selected, merge);
+			if (result.kind === "conflict") {
+				setConflict(result.conflict);
+				setStep("conflict");
+				setImporting(false);
+				return;
+			}
 			onCloseRef.current();
 		} catch (reason) {
 			setError(reason instanceof Error ? reason.message : String(reason));
@@ -208,7 +217,13 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 				<header className="sh-codex-import-head">
 					<div>
 						<p>Codex</p>
-						<h1 id="sh-codex-import-title">{step === "select" ? "Import a conversation" : "Confirm import"}</h1>
+						<h1 id="sh-codex-import-title">
+							{step === "select"
+								? "Import a conversation"
+								: step === "conflict"
+									? "Merge conversations"
+									: "Confirm import"}
+						</h1>
 					</div>
 					<button type="button" onClick={onClose} disabled={importing} aria-label="Close import dialog">
 						<X size={18} aria-hidden="true" />
@@ -301,7 +316,7 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 							))}
 						</div>
 					</>
-				) : (
+				) : step === "confirm" ? (
 					selected && (
 						<div className="sh-codex-import-confirm">
 							<div className="sh-codex-import-confirm-icon">
@@ -330,6 +345,41 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 							</p>
 						</div>
 					)
+				) : (
+					selected &&
+					conflict && (
+						<div className="sh-codex-import-confirm">
+							<div className="sh-codex-import-confirm-icon">
+								<MessageSquare size={22} aria-hidden="true" />
+							</div>
+							<div>
+								<h2>This Codex conversation is already linked</h2>
+								<p>
+									The existing OMP chat contains {conflict.localMessageCount} later user or assistant
+									{conflict.localMessageCount === 1 ? " message" : " messages"}. Updating it directly could
+									discard that work.
+								</p>
+							</div>
+							<dl>
+								<div>
+									<dt>OMP chat</dt>
+									<dd>{conflict.title?.trim() || sessionTitle(selected)}</dd>
+								</div>
+								<div>
+									<dt>Copies found</dt>
+									<dd>{conflict.duplicateCount}</dd>
+								</div>
+								<div>
+									<dt>Project folder</dt>
+									<dd title={displayProjectPath(conflict.cwd)}>{displayProjectPath(conflict.cwd)}</dd>
+								</div>
+							</dl>
+							<p className="sh-codex-import-note">
+								Merge keeps the original OMP chat id and places Codex and OMP entries in timestamp order. Extra
+								duplicate imports are moved to Archived chats for recovery.
+							</p>
+						</div>
+					)
 				)}
 
 				{error && (
@@ -338,8 +388,16 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 					</p>
 				)}
 				<footer className="sh-codex-import-foot">
-					{step === "confirm" && (
-						<button type="button" className="sh-btn" onClick={() => setStep("select")} disabled={importing}>
+					{step !== "select" && (
+						<button
+							type="button"
+							className="sh-btn"
+							onClick={() => {
+								setStep("select");
+								setConflict(null);
+							}}
+							disabled={importing}
+						>
 							<ArrowLeft size={15} aria-hidden="true" /> Back
 						</button>
 					)}
@@ -360,10 +418,16 @@ export function CodexImportModal({ loadSessions, onImport, onClose }: CodexImpor
 						<button
 							type="button"
 							className="sh-btn sh-btn-primary"
-							onClick={() => void beginImport()}
-							disabled={importing}
+							onClick={() => void beginImport(step === "conflict")}
+							disabled={!selected || importing}
 						>
-							{importing ? "Importing…" : "Import conversation"}
+							{importing
+								? step === "conflict"
+									? "Merging…"
+									: "Importing…"
+								: step === "conflict"
+									? "Merge and update"
+									: "Import conversation"}
 						</button>
 					)}
 				</footer>

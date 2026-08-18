@@ -109,6 +109,10 @@ export class ManagedMediaStore {
 		const month = `${year}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 		const mediaPath = path.join(this.#mediaDir, year, month, imageId.slice(0, 2), `${imageId}.${extension}`);
 		await commitManagedImage(mediaPath, bytes);
+		// A deduplicated object may already be old even though a guest has just
+		// placed it in an unsent composer draft. Refreshing its lease lets the GC
+		// write-grace window protect that path until the prompt is journaled.
+		await fs.utimes(mediaPath, now, now);
 
 		return {
 			file: { kind: "local-file", path: mediaPath, name: path.basename(mediaPath) },

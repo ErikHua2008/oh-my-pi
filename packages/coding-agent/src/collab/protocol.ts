@@ -42,6 +42,7 @@ export type {
 	CollabUiSelectItem,
 	ControlGuestFrame,
 	ControlHostFrame,
+	ForeignSessionImportConflict,
 	ForeignSessionSummary,
 	ImportedForeignSession,
 	ParsedCollabLink,

@@ -79,6 +79,8 @@ private:
 		std::vector<std::uint8_t> encoded_bytes;
 		Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
 		std::uint64_t last_use = 0;
+		std::uint64_t retry_after = 0;
+		std::uint8_t request_attempts = 0;
 		bool failed = false;
 	};
 	struct ProcessItemHit final {
@@ -184,6 +186,7 @@ private:
 	std::unordered_map<std::string, MediaEntry> media_cache_;
 	std::unordered_set<std::string> requested_media_;
 	std::unordered_set<std::string> expanded_rows_;
+	std::unordered_set<std::string> collapsed_rows_;
 	std::unordered_set<std::string> expanded_process_items_;
 	std::unordered_map<std::string, float> process_detail_scroll_offsets_;
 	std::optional<SelectionPoint> selection_anchor_;

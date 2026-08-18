@@ -37,6 +37,46 @@ OMP_TEST("remote navigation links are rejected") {
 	OMP_CHECK(parser.error() == "omp core emitted an invalid local control link");
 }
 
+OMP_TEST("loopback-looking links cannot redirect through user information") {
+	omp::shell::CoreOutputParser parser;
+	parser.Feed("ctrl: http://127.0.0.1:80@evil.example/#ws://127.0.0.1:4567/r/secret\n");
+	OMP_CHECK(!parser.complete());
+	OMP_CHECK(parser.error() == "omp core emitted an invalid local control link");
+}
+
+OMP_TEST("lookalike hosts and malformed ports are rejected") {
+	const std::string invalid_links[] = {
+		"http://127.0.0.1.evil.example:4567/#ws://127.0.0.1:4567/r/secret",
+		"http://localhost.evil.example:4567/#ws://localhost:4567/r/secret",
+		"http://127.0.0.1:0/#ws://127.0.0.1:4567/r/secret",
+		"http://127.0.0.1:65536/#ws://127.0.0.1:4567/r/secret",
+		"http://127.0.0.1:4567/#ws://127.0.0.1:not-a-port/r/secret",
+		"http://127.0.0.1:4567\\@evil.example/#ws://127.0.0.1:4567/r/secret",
+	};
+	for (const std::string& link : invalid_links) {
+		omp::shell::CoreOutputParser parser;
+		parser.Feed(std::string("ctrl: ") + link + "\n");
+		OMP_CHECK(!parser.complete());
+		OMP_CHECK(parser.error() == "omp core emitted an invalid local control link");
+	}
+}
+
+OMP_TEST("both loopback host spellings are accepted") {
+	omp::shell::CoreOutputParser parser;
+	parser.Feed("ctrl: http://localhost:4567/#ws://localhost:4567/r/control\n"
+		"session: http://127.0.0.1:4567/#ws://localhost:4567/r/session\n");
+	OMP_CHECK(parser.complete());
+}
+
+OMP_TEST("oversized loopback links are rejected before WebView navigation") {
+	omp::shell::CoreOutputParser parser;
+	std::string link = "http://127.0.0.1:4567/#ws://127.0.0.1:4567/r/";
+	link.append(9 * 1024, 'a');
+	parser.Feed(std::string("ctrl: ") + link + "\n");
+	OMP_CHECK(!parser.complete());
+	OMP_CHECK(parser.error() == "omp core emitted an invalid local control link");
+}
+
 OMP_TEST("EOF after the control line reports an incomplete startup") {
 	omp::shell::CoreOutputParser parser;
 	parser.Feed(std::string("ctrl: ") + kControl + "\n");

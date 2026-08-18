@@ -82,6 +82,20 @@ describe("ControlClient link validation", () => {
 });
 
 describe("ControlClient frame apply", () => {
+	it("sends the selected project path when creating a session", () => {
+		const sent: ControlGuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: ControlGuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const { client } = makeClient(CTRL_WRITE_LINK);
+			client.sendCreate("C:\\work\\selected");
+			expect(sent.at(-1)).toEqual({ t: "ctrl-create", cwd: "C:\\work\\selected" });
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
 	it("applies ctrl-sessions to the snapshot", () => {
 		const { client, socket } = makeClient(CTRL_WRITE_LINK);
 		expect(client.getSnapshot().sessions).toEqual([]);
@@ -173,7 +187,28 @@ describe("ControlClient frame apply", () => {
 				requiresProjectSwitch: true,
 			};
 			socket.onFrame?.({ t: "ctrl-imported", reqId: importRequest.reqId, source: "codex", session: imported }, 0);
-			expect(await importPromise).toEqual(imported);
+			expect(await importPromise).toEqual({ kind: "imported", session: imported });
+
+			const conflictPromise = client.importCodexSession(source);
+			const conflictRequest = sent.at(-1);
+			if (conflictRequest?.t !== "ctrl-import") throw new Error("expected ctrl-import");
+			const conflict = {
+				kind: "conflict" as const,
+				existingSessionId: imported.id,
+				cwd: imported.cwd,
+				title: imported.title,
+				duplicateCount: 2,
+				localMessageCount: 4,
+			};
+			socket.onFrame?.({ t: "ctrl-import-conflict", reqId: conflictRequest.reqId, source: "codex", conflict }, 0);
+			expect(await conflictPromise).toEqual({ kind: "conflict", conflict });
+
+			const mergePromise = client.importCodexSession(source, true);
+			const mergeRequest = sent.at(-1);
+			if (mergeRequest?.t !== "ctrl-import") throw new Error("expected ctrl-import");
+			expect(mergeRequest.merge).toBe(true);
+			socket.onFrame?.({ t: "ctrl-imported", reqId: mergeRequest.reqId, source: "codex", session: imported }, 0);
+			expect(await mergePromise).toEqual({ kind: "imported", session: imported });
 		} finally {
 			sendSpy.mockRestore();
 		}
@@ -205,6 +240,24 @@ describe("ControlClient frame apply", () => {
 			expect(restoreRequest.id).toBe("s1");
 			socket.onFrame?.({ t: "ctrl-restored", reqId: restoreRequest.reqId, session: SESSIONS[0]! }, 0);
 			expect(await restorePromise).toEqual(SESSIONS[0]);
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
+	it("waits for the host to confirm permanent archived-session deletion", async () => {
+		const sent: ControlGuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: ControlGuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const { client, socket } = makeClient(CTRL_WRITE_LINK);
+			const deleted = client.deleteArchivedSession("s1");
+			const request = sent.at(-1);
+			if (request?.t !== "ctrl-delete-archived") throw new Error("expected ctrl-delete-archived");
+			expect(request.id).toBe("s1");
+			socket.onFrame?.({ t: "ctrl-archived-deleted", reqId: request.reqId, id: "s1" }, 0);
+			await deleted;
 		} finally {
 			sendSpy.mockRestore();
 		}

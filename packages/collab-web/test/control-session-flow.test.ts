@@ -33,7 +33,7 @@ function makeControl(suffix: string): LiveControl {
 	clients.push(client);
 	client.connect();
 	connectSpy.mockRestore();
-	vi.spyOn(client, "sendCreate").mockImplementation(() => sent.push({ t: "ctrl-create" }));
+	vi.spyOn(client, "sendCreate").mockImplementation(cwd => sent.push({ t: "ctrl-create", ...(cwd ? { cwd } : {}) }));
 	vi.spyOn(client, "sendResume").mockImplementation(id => sent.push({ t: "ctrl-resume", id }));
 	if (socket === null) throw new Error("failed to capture control socket");
 	client.close();
@@ -62,10 +62,10 @@ describe("App control-session coordination", () => {
 		flow.activate(control.client);
 		bind(flow, control, opened);
 
-		expect(flow.startCreate(control.client)).toBe(true);
+		expect(flow.startCreate(control.client, "C:\\work\\selected")).toBe(true);
 		expect(flow.startCreate(control.client)).toBe(false);
 		expect(flow.startResume(control.client, "existing")).toBe(false);
-		expect(control.sent).toEqual([{ t: "ctrl-create" }]);
+		expect(control.sent).toEqual([{ t: "ctrl-create", cwd: "C:\\work\\selected" }]);
 		expect(flow.pending).toBe(true);
 
 		control.socket.onFrame?.(reply("resumed", "existing"), 0);

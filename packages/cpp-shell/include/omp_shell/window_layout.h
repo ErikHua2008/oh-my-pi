@@ -9,6 +9,11 @@ namespace omp::shell {
 
 [[nodiscard]] RECT ExpandWindowBoundsForRail(const RECT& compact_bounds, const RECT& work_area, int rail_width) noexcept;
 
+// Recover persisted coordinates and dimensions into a monitor work area so a
+// display topology or resolution change cannot strand the window off-screen.
+[[nodiscard]] RECT FitWindowBoundsToWorkArea(
+	LONG left, LONG top, LONG width, LONG height, const RECT& work_area) noexcept;
+
 // Keep the CSS/Win32 rail decision identical. The Web layout docks the rail
 // only above 1024 CSS pixels; narrower windows use an overlay instead.
 [[nodiscard]] bool ShouldDockAgentRail(int window_width, int dpi) noexcept;

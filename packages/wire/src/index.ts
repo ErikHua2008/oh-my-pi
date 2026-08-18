@@ -480,15 +480,24 @@ export type WireFrame = GuestFrame | HostFrame;
 export type ControlGuestFrame =
 	| { t: "ctrl-hello"; proto: number; name: string; writeToken?: string }
 	| { t: "ctrl-list" }
-	| { t: "ctrl-create" }
+	| { t: "ctrl-create"; cwd?: string }
 	| { t: "ctrl-resume"; id: string }
 	| { t: "ctrl-rename"; id: string; title: string }
-	| { t: "ctrl-drop"; id: string }
 	| { t: "ctrl-archive"; reqId: number; id: string }
 	| { t: "ctrl-archived-list"; reqId: number }
+	| { t: "ctrl-delete-archived"; reqId: number; id: string }
 	| { t: "ctrl-restore"; reqId: number; id: string }
 	| { t: "ctrl-import-list"; reqId: number; source: "codex"; archived: boolean }
-	| { t: "ctrl-import"; reqId: number; source: "codex"; id: string; path: string; archived: boolean };
+	| {
+			t: "ctrl-import";
+			reqId: number;
+			source: "codex";
+			id: string;
+			path: string;
+			archived: boolean;
+			/** Explicit confirmation that a diverged OMP continuation may be merged chronologically. */
+			merge?: boolean;
+	  };
 
 export type ControlHostFrame =
 	| { t: "ctrl-welcome"; proto: number; readOnly?: true }
@@ -496,8 +505,10 @@ export type ControlHostFrame =
 	| { t: "ctrl-session"; op: "created" | "resumed"; id: string; link: string; title?: string }
 	| { t: "ctrl-archived"; reqId: number; id: string }
 	| { t: "ctrl-archived-list"; reqId: number; sessions: SessionSummary[] }
+	| { t: "ctrl-archived-deleted"; reqId: number; id: string }
 	| { t: "ctrl-restored"; reqId: number; session: SessionSummary }
 	| { t: "ctrl-import-list"; reqId: number; source: "codex"; sessions: ForeignSessionSummary[] }
+	| { t: "ctrl-import-conflict"; reqId: number; source: "codex"; conflict: ForeignSessionImportConflict }
 	| { t: "ctrl-imported"; reqId: number; source: "codex"; session: ImportedForeignSession }
 	| { t: "ctrl-request-error"; reqId: number; message: string }
 	| { t: "ctrl-error"; message: string }
@@ -524,6 +535,18 @@ export interface ImportedForeignSession {
 	cwd: string;
 	title?: string;
 	requiresProjectSwitch: boolean;
+}
+
+/** Existing OMP continuation that requires an explicit chronological merge. */
+export interface ForeignSessionImportConflict {
+	kind: "conflict";
+	existingSessionId: string;
+	cwd: string;
+	title?: string;
+	/** Number of OMP chats created from the same Codex source id. */
+	duplicateCount: number;
+	/** User/assistant messages added on the OMP side after import. */
+	localMessageCount: number;
 }
 
 export interface SessionSummary {

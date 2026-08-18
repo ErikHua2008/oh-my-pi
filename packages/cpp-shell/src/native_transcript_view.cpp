@@ -35,14 +35,22 @@ constexpr std::int64_t kOverscan = 360;
 constexpr std::size_t kMaximumCachedLayouts = 256;
 constexpr std::size_t kMaximumCachedMedia = 32;
 constexpr std::size_t kMaximumMediaBytes = 32 * 1024 * 1024;
+constexpr std::uint64_t kMaximumDecodedMediaBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumSingleMediaBytes = 4 * 1024 * 1024;
+constexpr std::uint64_t kMaximumDecodedMediaPixels = 40'000'000;
+constexpr UINT kMaximumDecodedMediaDimension = 16'384;
+constexpr UINT kMaximumThumbnailDimension = 1'024;
 constexpr float kThumbnailHeight = 160.0F;
 constexpr float kMediaGap = 8.0F;
 constexpr float kScrollbarHotWidth = 5.0F;
 constexpr UINT_PTR kScrollbarHideTimer = 1;
 constexpr UINT_PTR kMessageCopyFeedbackTimer = 2;
+constexpr UINT_PTR kMediaRetryTimer = 3;
 constexpr UINT kScrollbarHideDelayMs = 1'100;
 constexpr UINT kMessageCopyFeedbackDelayMs = 1'200;
+constexpr UINT kMediaFailureRetryDelayMs = 2'000;
+constexpr UINT kMediaRequestTimeoutMs = 5'000;
+constexpr std::uint8_t kMaximumMediaRequestAttempts = 3;
 constexpr UINT kContextCopy = 1;
 constexpr UINT kContextSelectAll = 2;
 constexpr NativeMenuItem kContextCopyItem{L"复制\tCtrl+C", false, false};
@@ -142,7 +150,7 @@ private:
 		std::size_t character_count = 1;
 		for (UINT index = 0; index < count; ++index) {
 			const UINT length = DragQueryFileW(source, index, nullptr, 0);
-			if (length == 0) continue;
+			if (length == 0 || length > 32'768U) continue;
 			std::wstring path(static_cast<std::size_t>(length) + 1, L'\0');
 			if (DragQueryFileW(source, index, path.data(), length + 1) == 0) continue;
 			path.resize(length);
@@ -234,31 +242,37 @@ private:
 }
 
 bool WriteClipboardText(HWND owner, std::wstring_view text) {
-	if (text.empty() || !OpenClipboard(owner)) {
-		return false;
-	}
-	if (!EmptyClipboard()) {
-		CloseClipboard();
+	if (text.empty()) {
 		return false;
 	}
 	const std::size_t byte_count = (text.size() + 1) * sizeof(wchar_t);
 	HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, byte_count);
-	bool copied = false;
-	if (memory != nullptr) {
-		void* destination = GlobalLock(memory);
-		if (destination != nullptr) {
-			std::memcpy(destination, text.data(), text.size() * sizeof(wchar_t));
-			static_cast<wchar_t*>(destination)[text.size()] = L'\0';
-			GlobalUnlock(memory);
-			if (SetClipboardData(CF_UNICODETEXT, memory) != nullptr) {
-				memory = nullptr;
-				copied = true;
-			}
-		}
+	if (memory == nullptr) {
+		return false;
 	}
-	if (memory != nullptr) {
+	void* destination = GlobalLock(memory);
+	if (destination == nullptr) {
 		GlobalFree(memory);
+		return false;
 	}
+	std::memcpy(destination, text.data(), text.size() * sizeof(wchar_t));
+	static_cast<wchar_t*>(destination)[text.size()] = L'\0';
+	GlobalUnlock(memory);
+	bool opened = false;
+	for (int attempt = 0; attempt < 5 && !opened; ++attempt) {
+		opened = OpenClipboard(owner) != FALSE;
+		if (!opened) Sleep(10);
+	}
+	if (!opened) {
+		GlobalFree(memory);
+		return false;
+	}
+	bool copied = false;
+	if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, memory) != nullptr) {
+		memory = nullptr;
+		copied = true;
+	}
+	if (memory != nullptr) GlobalFree(memory);
 	CloseClipboard();
 	return copied;
 }
@@ -376,6 +390,7 @@ void NativeTranscriptView::Destroy() {
 	if (window_ != nullptr) {
 		KillTimer(window_, kScrollbarHideTimer);
 		KillTimer(window_, kMessageCopyFeedbackTimer);
+		KillTimer(window_, kMediaRetryTimer);
 	}
 	DiscardDeviceResources();
 	layout_cache_.clear();
@@ -388,9 +403,10 @@ void NativeTranscriptView::Destroy() {
 	wic_factory_.Reset();
 	d2d_factory_.Reset();
 	if (window_ != nullptr) {
-		const HWND owned = window_;
-		window_ = nullptr;
-		DestroyWindow(owned);
+		// WM_NCDESTROY owns clearing window_. Keeping the member valid until
+		// then lets the window procedure cancel timers and clear GWLP_USERDATA
+		// against the real HWND instead of a prematurely nulled handle.
+		DestroyWindow(window_);
 	}
 	visible_ = false;
 }
@@ -444,6 +460,7 @@ void NativeTranscriptView::ApplyOcclusion() {
 		CombineRgn(visible_region, visible_region, occluded_region, RGN_DIFF) == ERROR) {
 		if (visible_region != nullptr) DeleteObject(visible_region);
 		if (occluded_region != nullptr) DeleteObject(occluded_region);
+		SetWindowRgn(window_, nullptr, TRUE);
 		return;
 	}
 	DeleteObject(occluded_region);
@@ -485,12 +502,14 @@ void NativeTranscriptView::Clear() {
 	if (window_ != nullptr) {
 		KillTimer(window_, kScrollbarHideTimer);
 		KillTimer(window_, kMessageCopyFeedbackTimer);
+		KillTimer(window_, kMediaRetryTimer);
 	}
 	model_.Clear();
 	layout_cache_.clear();
 	media_cache_.clear();
 	requested_media_.clear();
 	expanded_rows_.clear();
+	collapsed_rows_.clear();
 	expanded_process_items_.clear();
 	process_detail_scroll_offsets_.clear();
 	ClearSelection();
@@ -518,10 +537,20 @@ void NativeTranscriptView::Clear() {
 
 void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows, bool reset_to_tail) {
 	const bool keep_tail = reset_to_tail || stick_to_bottom_ || scroll_offset_ >= MaximumScroll() - 2;
+	std::string viewport_anchor_id;
+	std::int64_t viewport_anchor_offset = 0;
+	if (!keep_tail && !model_.Empty()) {
+		const NativeTranscriptVisibleRange anchor = model_.VisibleRange(scroll_offset_, 1);
+		if (!anchor.Empty() && anchor.first < model_.Size()) {
+			viewport_anchor_id = model_.RowAt(anchor.first).id;
+			viewport_anchor_offset = std::max<std::int64_t>(0, scroll_offset_ - model_.RowTop(anchor.first));
+		}
+	}
 	if (reset_to_tail) {
 		stick_to_bottom_ = true;
 		scroll_offset_ = 0;
 		expanded_rows_.clear();
+		collapsed_rows_.clear();
 		expanded_process_items_.clear();
 		process_detail_scroll_offsets_.clear();
 		ClearSelection();
@@ -537,20 +566,27 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 			it = expanded_rows_.erase(it);
 		}
 	}
-	std::unordered_set<std::string> valid_process_items;
-	for (std::size_t row_index = 0; row_index < model_.Size(); ++row_index) {
-		const NativeTranscriptRow& row = model_.RowAt(row_index);
-		for (const NativeTranscriptProcessItem& item : row.process_items) {
-			valid_process_items.insert(ProcessItemKey(row, item));
-		}
-	}
-	for (auto it = expanded_process_items_.begin(); it != expanded_process_items_.end();) {
-		if (valid_process_items.contains(*it)) {
+	for (auto it = collapsed_rows_.begin(); it != collapsed_rows_.end();) {
+		if (model_.IndexOf(*it)) {
 			++it;
 		} else {
-			process_detail_scroll_offsets_.erase(*it);
-			it = expanded_process_items_.erase(it);
+			it = collapsed_rows_.erase(it);
 		}
+	}
+	// Validate only the small set of items the user has actually expanded.
+	// Building a second set containing every operation in a 100k-row session
+	// creates an avoidable memory spike during snapshot reconciliation.
+	std::unordered_set<std::string> missing_process_items = expanded_process_items_;
+	for (std::size_t row_index = 0; row_index < model_.Size() && !missing_process_items.empty(); ++row_index) {
+		const NativeTranscriptRow& row = model_.RowAt(row_index);
+		for (const NativeTranscriptProcessItem& item : row.process_items) {
+			missing_process_items.erase(ProcessItemKey(row, item));
+			if (missing_process_items.empty()) break;
+		}
+	}
+	for (const std::string& item_key : missing_process_items) {
+		process_detail_scroll_offsets_.erase(item_key);
+		expanded_process_items_.erase(item_key);
 	}
 	if ((selection_anchor_ && !model_.IndexOf(selection_anchor_->row_id)) ||
 		(selection_focus_ && !model_.IndexOf(selection_focus_->row_id))) {
@@ -570,6 +606,12 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 	layout_cache_.clear();
 	if (keep_tail) {
 		ScrollToBottom();
+	} else if (!viewport_anchor_id.empty()) {
+		if (const auto anchor_index = model_.IndexOf(viewport_anchor_id)) {
+			ScrollTo(model_.RowTop(*anchor_index) + viewport_anchor_offset, false);
+		} else {
+			ScrollTo(scroll_offset_, false);
+		}
 	} else {
 		ScrollTo(scroll_offset_, false);
 	}
@@ -611,6 +653,8 @@ void NativeTranscriptView::Remove(std::string_view id) {
 		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
 	}
 	layout_cache_.erase(std::string(id));
+	expanded_rows_.erase(std::string(id));
+	collapsed_rows_.erase(std::string(id));
 	std::string process_prefix(id);
 	process_prefix.push_back('\x1f');
 	for (auto it = expanded_process_items_.begin(); it != expanded_process_items_.end();) {
@@ -675,9 +719,14 @@ void NativeTranscriptView::ProvideImage(std::string image_id, std::vector<std::u
 	if (encoded_bytes.empty() || encoded_bytes.size() > kMaximumSingleMediaBytes) {
 		entry.encoded_bytes.clear();
 		entry.failed = true;
+		entry.retry_after = GetTickCount64() + kMediaFailureRetryDelayMs;
+		if (entry.request_attempts < kMaximumMediaRequestAttempts && window_ != nullptr) {
+			SetTimer(window_, kMediaRetryTimer, kMediaFailureRetryDelayMs, nullptr);
+		}
 	} else {
 		entry.encoded_bytes = std::move(encoded_bytes);
 		entry.failed = false;
+		entry.retry_after = 0;
 	}
 	TrimMediaCache();
 	if (window_ != nullptr) {
@@ -755,6 +804,11 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 				copied_row_id_.clear();
 				InvalidateRect(window_, nullptr, FALSE);
 			}
+			return 0;
+		}
+		if (wparam == kMediaRetryTimer) {
+			KillTimer(window_, kMediaRetryTimer);
+			InvalidateRect(window_, nullptr, FALSE);
 			return 0;
 		}
 		break;
@@ -1050,6 +1104,7 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 	case WM_NCDESTROY:
 		KillTimer(window_, kScrollbarHideTimer);
 		KillTimer(window_, kMessageCopyFeedbackTimer);
+		KillTimer(window_, kMediaRetryTimer);
 		SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
 		window_ = nullptr;
 		return 0;
@@ -1704,6 +1759,7 @@ ID2D1Bitmap* NativeTranscriptView::GetMediaBitmap(std::string_view image_id) {
 	Microsoft::WRL::ComPtr<IWICStream> stream;
 	Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
 	Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+	Microsoft::WRL::ComPtr<IWICBitmapScaler> scaler;
 	Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
 	HRESULT result = wic_factory_->CreateStream(stream.ReleaseAndGetAddressOf());
 	if (SUCCEEDED(result)) {
@@ -1717,12 +1773,38 @@ ID2D1Bitmap* NativeTranscriptView::GetMediaBitmap(std::string_view image_id) {
 	if (SUCCEEDED(result)) {
 		result = decoder->GetFrame(0, frame.ReleaseAndGetAddressOf());
 	}
+	UINT source_width = 0;
+	UINT source_height = 0;
+	if (SUCCEEDED(result)) {
+		result = frame->GetSize(&source_width, &source_height);
+		if (SUCCEEDED(result) &&
+			(source_width == 0 || source_height == 0 || source_width > kMaximumDecodedMediaDimension ||
+				source_height > kMaximumDecodedMediaDimension ||
+				static_cast<std::uint64_t>(source_width) > kMaximumDecodedMediaPixels / source_height)) {
+			result = WINCODEC_ERR_VALUEOUTOFRANGE;
+		}
+	}
+	IWICBitmapSource* bitmap_source = frame.Get();
+	if (SUCCEEDED(result) && (source_width > kMaximumThumbnailDimension || source_height > kMaximumThumbnailDimension)) {
+		const double scale = std::min(
+			static_cast<double>(kMaximumThumbnailDimension) / source_width,
+			static_cast<double>(kMaximumThumbnailDimension) / source_height);
+		const UINT target_width = std::max<UINT>(1, static_cast<UINT>(std::lround(source_width * scale)));
+		const UINT target_height = std::max<UINT>(1, static_cast<UINT>(std::lround(source_height * scale)));
+		result = wic_factory_->CreateBitmapScaler(scaler.ReleaseAndGetAddressOf());
+		if (SUCCEEDED(result)) {
+			result = scaler->Initialize(frame.Get(), target_width, target_height, WICBitmapInterpolationModeFant);
+		}
+		if (SUCCEEDED(result)) {
+			bitmap_source = scaler.Get();
+		}
+	}
 	if (SUCCEEDED(result)) {
 		result = wic_factory_->CreateFormatConverter(converter.ReleaseAndGetAddressOf());
 	}
 	if (SUCCEEDED(result)) {
 		result = converter->Initialize(
-			frame.Get(),
+			bitmap_source,
 			GUID_WICPixelFormat32bppPBGRA,
 			WICBitmapDitherTypeNone,
 			nullptr,
@@ -1737,28 +1819,63 @@ ID2D1Bitmap* NativeTranscriptView::GetMediaBitmap(std::string_view image_id) {
 		entry.bitmap.Reset();
 		entry.encoded_bytes.clear();
 		entry.failed = true;
+		entry.retry_after = GetTickCount64() + kMediaFailureRetryDelayMs;
+		if (entry.request_attempts < kMaximumMediaRequestAttempts && window_ != nullptr) {
+			SetTimer(window_, kMediaRetryTimer, kMediaFailureRetryDelayMs, nullptr);
+		}
 		return nullptr;
 	}
-	return entry.bitmap.Get();
+	entry.retry_after = 0;
+	entry.request_attempts = 0;
+	TrimMediaCache();
+	const auto retained = media_cache_.find(std::string(image_id));
+	return retained == media_cache_.end() ? nullptr : retained->second.bitmap.Get();
 }
 
 void NativeTranscriptView::RequestMedia(std::string_view image_id) {
-	if (image_id.empty() || media_cache_.contains(std::string(image_id)) ||
-		requested_media_.contains(std::string(image_id)) || !image_request_handler_) {
+	if (image_id.empty() || !image_request_handler_) {
 		return;
 	}
 	const std::string owned(image_id);
+	MediaEntry& entry = media_cache_[owned];
+	if (!entry.encoded_bytes.empty() || entry.bitmap != nullptr) {
+		return;
+	}
+	const std::uint64_t now = GetTickCount64();
+	if (requested_media_.contains(owned)) {
+		if (now < entry.retry_after) {
+			return;
+		}
+		requested_media_.erase(owned);
+	}
+	if (now < entry.retry_after) {
+		return;
+	}
+	if (entry.request_attempts >= kMaximumMediaRequestAttempts) {
+		entry.failed = true;
+		return;
+	}
+	entry.failed = false;
+	++entry.request_attempts;
+	entry.retry_after = now + kMediaRequestTimeoutMs;
 	requested_media_.insert(owned);
 	image_request_handler_(owned);
+	if (window_ != nullptr) SetTimer(window_, kMediaRetryTimer, kMediaRequestTimeoutMs, nullptr);
 }
 
 void NativeTranscriptView::TrimMediaCache() {
 	std::size_t total_bytes = 0;
+	std::uint64_t decoded_bytes = 0;
 	for (const auto& [id, entry] : media_cache_) {
 		static_cast<void>(id);
 		total_bytes += entry.encoded_bytes.size();
+		if (entry.bitmap != nullptr) {
+			const D2D1_SIZE_U pixels = entry.bitmap->GetPixelSize();
+			decoded_bytes += static_cast<std::uint64_t>(pixels.width) * pixels.height * 4ULL;
+		}
 	}
-	while (media_cache_.size() > kMaximumCachedMedia || total_bytes > kMaximumMediaBytes) {
+	while (media_cache_.size() > kMaximumCachedMedia || total_bytes > kMaximumMediaBytes ||
+		decoded_bytes > kMaximumDecodedMediaBytes) {
 		const auto oldest = std::min_element(
 			media_cache_.begin(),
 			media_cache_.end(),
@@ -1767,6 +1884,10 @@ void NativeTranscriptView::TrimMediaCache() {
 			break;
 		}
 		total_bytes -= oldest->second.encoded_bytes.size();
+		if (oldest->second.bitmap != nullptr) {
+			const D2D1_SIZE_U pixels = oldest->second.bitmap->GetPixelSize();
+			decoded_bytes -= static_cast<std::uint64_t>(pixels.width) * pixels.height * 4ULL;
+		}
 		requested_media_.erase(oldest->first);
 		media_cache_.erase(oldest);
 	}
@@ -1816,8 +1937,16 @@ void NativeTranscriptView::DrawSelection(
 bool NativeTranscriptView::IsCollapsedExpandable(const NativeTranscriptRow& row) const {
 	const bool supported = row.kind == NativeTranscriptRowKind::Reasoning ||
 		row.kind == NativeTranscriptRowKind::Tool;
-	return supported && HasFlag(row.flags, NativeTranscriptRowFlags::Expandable) &&
-		!HasFlag(row.flags, NativeTranscriptRowFlags::Expanded) && !expanded_rows_.contains(row.id);
+	if (!supported || !HasFlag(row.flags, NativeTranscriptRowFlags::Expandable)) {
+		return false;
+	}
+	if (collapsed_rows_.contains(row.id)) {
+		return true;
+	}
+	if (expanded_rows_.contains(row.id)) {
+		return false;
+	}
+	return !HasFlag(row.flags, NativeTranscriptRowFlags::Expanded);
 }
 
 std::optional<std::string> NativeTranscriptView::HitTestExpandableHeader(POINT point) const {
@@ -1918,7 +2047,8 @@ std::optional<NativeTranscriptView::MessageActionHit> NativeTranscriptView::HitT
 	}
 	const NativeTranscriptRow& row = model_.RowAt(range.first);
 	const bool user = row.kind == NativeTranscriptRowKind::User;
-	if ((!user && row.kind != NativeTranscriptRowKind::Assistant) || row.time_label.empty()) {
+	if ((!user && row.kind != NativeTranscriptRowKind::Assistant && row.kind != NativeTranscriptRowKind::Plan) ||
+		row.time_label.empty()) {
 		return std::nullopt;
 	}
 	TextLayout* layout = GetTextLayout(row, NativeTranscriptBubbleMaxContentWidth(viewport_width, user));
@@ -1959,10 +2089,12 @@ void NativeTranscriptView::ToggleExpandable(std::string_view row_id) {
 		return;
 	}
 	const std::string id(row_id);
-	if (expanded_rows_.contains(id)) {
-		expanded_rows_.erase(id);
-	} else {
+	if (IsCollapsedExpandable(row)) {
+		collapsed_rows_.erase(id);
 		expanded_rows_.insert(id);
+	} else {
+		expanded_rows_.erase(id);
+		collapsed_rows_.insert(id);
 	}
 	if ((selection_anchor_ && selection_anchor_->row_id == id) ||
 		(selection_focus_ && selection_focus_->row_id == id)) {

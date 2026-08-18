@@ -1,7 +1,7 @@
 /**
  * Host of the control room — a session-management channel that runs
  * alongside the per-session collab rooms. `omp --mode core` prints the
- * control link; the web UI opens it to list, create, resume, and drop
+ * control link; the web UI opens it to list, create, resume, archive, and restore
  * sessions. The room reuses the collab relay and wire (`COLLAB_PROTO`) but
  * carries only the `ControlGuestFrame`/`ControlHostFrame` variants and never
  * touches session-room frames.
@@ -32,7 +32,14 @@ const SESSIONS_INTERVAL_MS = 2000;
 type MutationFrame = Extract<
 	ControlGuestFrame,
 	{
-		t: "ctrl-create" | "ctrl-resume" | "ctrl-rename" | "ctrl-drop" | "ctrl-archive" | "ctrl-restore" | "ctrl-import";
+		t:
+			| "ctrl-create"
+			| "ctrl-resume"
+			| "ctrl-rename"
+			| "ctrl-archive"
+			| "ctrl-delete-archived"
+			| "ctrl-restore"
+			| "ctrl-import";
 	}
 >;
 
@@ -165,8 +172,8 @@ export class ControlHost {
 			case "ctrl-create":
 			case "ctrl-resume":
 			case "ctrl-rename":
-			case "ctrl-drop":
 			case "ctrl-archive":
+			case "ctrl-delete-archived":
 			case "ctrl-restore":
 			case "ctrl-import":
 				void this.#handleMutation(frame, fromPeer);
@@ -250,31 +257,41 @@ export class ControlHost {
 		}
 		try {
 			if (frame.t === "ctrl-create") {
-				const { id, link } = await this.#registry.createSession();
+				const { id, link } = await this.#registry.createSession(frame.cwd);
 				this.#socket?.send({ t: "ctrl-session", op: "created", id, link }, fromPeer);
 			} else if (frame.t === "ctrl-resume") {
 				const { id, link } = await this.#registry.resumeSession(frame.id);
 				this.#socket?.send({ t: "ctrl-session", op: "resumed", id, link }, fromPeer);
 			} else if (frame.t === "ctrl-rename") {
 				await this.#registry.renameSession(frame.id, frame.title);
-			} else if (frame.t === "ctrl-drop") {
-				// Drop has no link to hand back; the next ctrl-sessions
-				// broadcast reflects the removal.
-				await this.#registry.dropSession(frame.id);
 			} else if (frame.t === "ctrl-archive") {
 				await this.#registry.archiveSession(frame.id);
 				this.#socket?.send({ t: "ctrl-archived", reqId: frame.reqId, id: frame.id }, fromPeer);
+			} else if (frame.t === "ctrl-delete-archived") {
+				await this.#registry.deleteArchivedSession(frame.id);
+				this.#socket?.send({ t: "ctrl-archived-deleted", reqId: frame.reqId, id: frame.id }, fromPeer);
 			} else if (frame.t === "ctrl-restore") {
 				const session = await this.#registry.restoreArchivedSession(frame.id);
 				this.#socket?.send({ t: "ctrl-restored", reqId: frame.reqId, session }, fromPeer);
 			} else {
-				const session = await this.#registry.importForeignSession(
+				const result = await this.#registry.importForeignSession(
 					frame.source,
 					frame.id,
 					frame.path,
 					frame.archived,
+					frame.merge === true,
 				);
-				this.#socket?.send({ t: "ctrl-imported", reqId: frame.reqId, source: frame.source, session }, fromPeer);
+				if ("kind" in result) {
+					this.#socket?.send(
+						{ t: "ctrl-import-conflict", reqId: frame.reqId, source: frame.source, conflict: result },
+						fromPeer,
+					);
+				} else {
+					this.#socket?.send(
+						{ t: "ctrl-imported", reqId: frame.reqId, source: frame.source, session: result },
+						fromPeer,
+					);
+				}
 			}
 		} catch (err) {
 			if ("reqId" in frame) {

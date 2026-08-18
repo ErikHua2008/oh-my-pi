@@ -18,9 +18,11 @@ import {
 } from "lucide-react";
 import { type FormEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ControlSnapshot } from "../../lib/control-client";
+import type { CodexImportResult, ControlSnapshot } from "../../lib/control-client";
 import { copyText, type DesktopProject, desktopBridge } from "../../lib/desktop-bridge";
 import { relTime } from "../../lib/format";
+import { onSessionPreferencesRemoved } from "../../lib/session-preference-events";
+import { ConfirmDialog } from "../shell/ConfirmDialog";
 import { useNativeTranscriptOcclusion } from "../shell/useNativeTranscriptOcclusion";
 import { CodexImportModal } from "./CodexImportModal";
 
@@ -29,13 +31,15 @@ export interface SessionsPanelProps {
 	activeSessionId?: string | null;
 	pending?: boolean;
 	creating?: boolean;
+	selectedProjectPath?: string | null;
 	onOpenSettings(): void;
-	onOpenSession(id: string): void;
-	onNewSession(): void;
+	onOpenSession(id: string, projectPath: string): void;
+	onNewSession(projectPath?: string): void;
+	onSelectProject(projectPath: string): void;
+	onInitializeProject(projectPath: string): void;
 	onListCodexSessions(archived?: boolean): Promise<readonly ForeignSessionSummary[]>;
-	onImportCodexSession(session: ForeignSessionSummary): Promise<void>;
+	onImportCodexSession(session: ForeignSessionSummary, merge?: boolean): Promise<CodexImportResult>;
 	onRenameSession(id: string, title: string): void;
-	onDropSession(id: string): void;
 	onArchiveSession(id: string): Promise<void>;
 	onLeave(): void;
 }
@@ -104,6 +108,23 @@ function loadStringRecord(key: string): Readonly<Record<string, string>> {
 	} catch {
 		return {};
 	}
+}
+
+export function removePinnedSession(pinnedSessions: ReadonlySet<string>, sessionId: string): ReadonlySet<string> {
+	if (!pinnedSessions.has(sessionId)) return pinnedSessions;
+	const next = new Set(pinnedSessions);
+	next.delete(sessionId);
+	return next;
+}
+
+export function removeSessionReadThrough(
+	readThrough: Readonly<Record<string, string>>,
+	sessionId: string,
+): Readonly<Record<string, string>> {
+	if (readThrough[sessionId] === undefined) return readThrough;
+	const next = { ...readThrough };
+	delete next[sessionId];
+	return next;
 }
 
 function persistPreference(key: string, value: unknown): void {
@@ -274,13 +295,15 @@ export function SessionsPanel({
 	activeSessionId = null,
 	pending = false,
 	creating = false,
+	selectedProjectPath = null,
 	onOpenSettings,
 	onOpenSession,
 	onNewSession,
+	onSelectProject,
+	onInitializeProject,
 	onListCodexSessions,
 	onImportCodexSession,
 	onRenameSession,
-	onDropSession,
 	onArchiveSession,
 	onLeave,
 }: SessionsPanelProps): ReactNode {
@@ -292,6 +315,9 @@ export function SessionsPanel({
 	const [desktopError, setDesktopError] = useState<string | null>(null);
 	const [renamingProject, setRenamingProject] = useState<string | null>(null);
 	const [renamingSession, setRenamingSession] = useState<string | null>(null);
+	const [archivingSessions, setArchivingSessions] = useState<ReadonlySet<string>>(() => new Set());
+	const archivingSessionsRef = useRef(new Set<string>());
+	const [archiveConfirm, setArchiveConfirm] = useState<{ id: string; title: string } | null>(null);
 	const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenu | null>(null);
 	const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenu | null>(null);
 	const [codexImportOpen, setCodexImportOpen] = useState(false);
@@ -305,6 +331,15 @@ export function SessionsPanel({
 	useNativeTranscriptOcclusion(projectContextMenu !== null, projectContextMenuRef);
 	useNativeTranscriptOcclusion(sessionContextMenu !== null, sessionContextMenuRef);
 
+	useEffect(
+		() =>
+			onSessionPreferencesRemoved(sessionId => {
+				setPinnedSessions(current => removePinnedSession(current, sessionId));
+				setReadThrough(current => removeSessionReadThrough(current, sessionId));
+			}),
+		[],
+	);
+
 	useEffect(() => {
 		let active = true;
 		void desktopBridge
@@ -314,6 +349,8 @@ export function SessionsPanel({
 				const available = desktopBridge.available;
 				setDesktopAvailable(available);
 				setDesktopProjects(available ? projects : []);
+				const currentProject = available ? projects.find(project => project.current) : undefined;
+				if (currentProject) onInitializeProject(currentProject.path);
 				if (available) {
 					const preferences = await desktopBridge.loadSessionPreferences();
 					if (!active) return;
@@ -334,7 +371,7 @@ export function SessionsPanel({
 		return () => {
 			active = false;
 		};
-	}, []);
+	}, [onInitializeProject]);
 
 	useEffect(() => {
 		const pinned = Array.from(pinnedSessions);
@@ -393,6 +430,10 @@ export function SessionsPanel({
 			return next;
 		});
 	};
+	const selectAndToggleProject = (path: string): void => {
+		onSelectProject(path);
+		toggleProject(path);
+	};
 	const runDesktopAction = async (key: string, action: () => Promise<void>): Promise<void> => {
 		setDesktopAction(key);
 		setDesktopError(null);
@@ -407,6 +448,37 @@ export function SessionsPanel({
 		} finally {
 			setDesktopAction(null);
 		}
+	};
+	const newSessionInProject = (group: ProjectGroup): void => {
+		onSelectProject(group.path);
+		onNewSession(group.path);
+	};
+	const archiveSession = async (sessionId: string): Promise<boolean> => {
+		// The control protocol allows multiple correlated archive requests. Guard
+		// the UI synchronously so a rapid double click cannot race the same chat,
+		// producing a misleading "no such session" error after the first request
+		// has already moved it successfully.
+		if (archivingSessionsRef.current.has(sessionId)) return false;
+		archivingSessionsRef.current.add(sessionId);
+		setArchivingSessions(new Set(archivingSessionsRef.current));
+		// Keep preferences until Core confirms the destructive operation. A failed
+		// archive therefore cannot silently lose a user's pin/read state.
+		try {
+			await onArchiveSession(sessionId);
+		} catch {
+			return false;
+		} finally {
+			archivingSessionsRef.current.delete(sessionId);
+			setArchivingSessions(new Set(archivingSessionsRef.current));
+		}
+		setPinnedSessions(current => removePinnedSession(current, sessionId));
+		setReadThrough(current => removeSessionReadThrough(current, sessionId));
+		setSessionContextMenu(null);
+		return true;
+	};
+	const confirmArchiveSession = (sessionId: string, title: string): void => {
+		setSessionContextMenu(null);
+		setArchiveConfirm({ id: sessionId, title });
 	};
 	const renameProject = async (path: string, name: string): Promise<void> => {
 		setDesktopAction(`rename:${path}`);
@@ -506,7 +578,12 @@ export function SessionsPanel({
 					)}
 					{!readOnly && (
 						<>
-							<button type="button" className="sh-sessions-action" onClick={onNewSession} disabled={creating}>
+							<button
+								type="button"
+								className="sh-sessions-action"
+								onClick={() => onNewSession(selectedProjectPath ?? undefined)}
+								disabled={creating}
+							>
 								<Plus size={16} aria-hidden="true" />
 								<span>{creating ? "Starting session…" : "New session"}</span>
 							</button>
@@ -541,6 +618,11 @@ export function SessionsPanel({
 							<div
 								className="sh-project-row"
 								data-current={group.desktopProject?.current ? "true" : undefined}
+								data-selected={
+									selectedProjectPath !== null && comparableProjectPath(selectedProjectPath) === key
+										? "true"
+										: undefined
+								}
 								onContextMenu={event => openProjectContextMenu(event, group)}
 							>
 								<button
@@ -548,7 +630,7 @@ export function SessionsPanel({
 									className="sh-project-disclosure"
 									aria-expanded={!collapsed}
 									aria-controls={sessionsId}
-									onClick={() => toggleProject(group.path)}
+									onClick={() => selectAndToggleProject(group.path)}
 									title={collapsed ? `Expand ${group.name}` : `Collapse ${group.name}`}
 								>
 									<ChevronRight size={15} aria-hidden="true" />
@@ -567,10 +649,22 @@ export function SessionsPanel({
 										aria-expanded={!collapsed}
 										aria-controls={sessionsId}
 										title={collapsed ? `Expand ${group.name}` : `Collapse ${group.name}`}
-										onClick={() => toggleProject(group.path)}
+										onClick={() => selectAndToggleProject(group.path)}
 									>
 										<span className="sh-project-name">{group.name}</span>
 										<span className="sh-project-path">{group.path}</span>
+									</button>
+								)}
+								{!readOnly && renamingProject !== key && (
+									<button
+										type="button"
+										className="sh-project-new"
+										title={`在 ${group.name} 中新建对话`}
+										disabled={pending}
+										onClick={() => newSessionInProject(group)}
+									>
+										<Plus size={14} aria-hidden="true" />
+										<span className="sh-visually-hidden">在 {group.name} 中新建对话</span>
 									</button>
 								)}
 								{desktopAvailable && !readOnly && renamingProject !== key && (
@@ -623,7 +717,7 @@ export function SessionsPanel({
 												disabled={pending}
 												onClick={() => {
 													markSessionRead(session);
-													onOpenSession(session.id);
+													onOpenSession(session.id, session.cwd);
 												}}
 											>
 												<span className="sh-sessions-item-copy">
@@ -656,12 +750,13 @@ export function SessionsPanel({
 										{!readOnly && renamingSession !== session.id && (
 											<button
 												type="button"
-												className="sh-sessions-drop"
-												title={`Drop ${sessionTitle(session)}`}
-												onClick={() => onDropSession(session.id)}
+												className="sh-sessions-archive"
+												title={`归档 ${sessionTitle(session)}`}
+												disabled={pending || archivingSessions.has(session.id)}
+												onClick={() => confirmArchiveSession(session.id, sessionTitle(session))}
 											>
-												<Trash2 size={14} aria-hidden="true" />
-												<span className="sh-visually-hidden">Drop {sessionTitle(session)}</span>
+												<Archive size={14} aria-hidden="true" />
+												<span className="sh-visually-hidden">归档 {sessionTitle(session)}</span>
 											</button>
 										)}
 									</div>
@@ -714,23 +809,23 @@ export function SessionsPanel({
 						style={{ left: projectContextMenu.x, top: projectContextMenu.y }}
 						onPointerDown={event => event.stopPropagation()}
 					>
-						{projectContextMenu.current ? (
+						<button
+							autoFocus
+							type="button"
+							role="menuitem"
+							disabled={readOnly || pending}
+							onClick={() => {
+								const { path } = projectContextMenu;
+								setProjectContextMenu(null);
+								onSelectProject(path);
+								onNewSession(path);
+							}}
+						>
+							<Plus size={14} aria-hidden="true" />
+							<span>新建对话</span>
+						</button>
+						{!projectContextMenu.current && (
 							<button
-								autoFocus
-								type="button"
-								role="menuitem"
-								disabled={readOnly || pending}
-								onClick={() => {
-									setProjectContextMenu(null);
-									onNewSession();
-								}}
-							>
-								<Plus size={14} aria-hidden="true" />
-								<span>新建对话</span>
-							</button>
-						) : (
-							<button
-								autoFocus
 								type="button"
 								role="menuitem"
 								disabled={!desktopAvailable || desktopAction !== null}
@@ -889,11 +984,10 @@ export function SessionsPanel({
 							type="button"
 							role="menuitem"
 							className="sh-context-menu-separated"
-							disabled={pending}
+							disabled={pending || archivingSessions.has(sessionContextMenu.id)}
 							onClick={() => {
-								const { id } = sessionContextMenu;
-								setSessionContextMenu(null);
-								void onArchiveSession(id);
+								const { id, title } = sessionContextMenu;
+								confirmArchiveSession(id, title);
 							}}
 						>
 							<Archive size={14} aria-hidden="true" />
@@ -902,6 +996,25 @@ export function SessionsPanel({
 					</div>,
 					document.body,
 				)}
+			{archiveConfirm !== null && (
+				<ConfirmDialog
+					title="归档这个对话？"
+					description={
+						<>
+							<strong>“{archiveConfirm.title}”</strong> 将从左侧列表移到“设置 → 已归档对话”，之后仍可恢复。
+						</>
+					}
+					confirmLabel={archivingSessions.has(archiveConfirm.id) ? "归档中…" : "归档"}
+					busy={archivingSessions.has(archiveConfirm.id)}
+					onCancel={() => setArchiveConfirm(null)}
+					onConfirm={() => {
+						const { id } = archiveConfirm;
+						void archiveSession(id).then(success => {
+							if (success) setArchiveConfirm(current => (current?.id === id ? null : current));
+						});
+					}}
+				/>
+			)}
 		</nav>
 	);
 }

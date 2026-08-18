@@ -33,6 +33,7 @@ constexpr wchar_t kWindowClassName[] = L"OmpCppShellWindow";
 constexpr wchar_t kBaseWindowTitle[] = L"Grimoire Router App";
 constexpr UINT kCoreEventMessage = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
+constexpr UINT kReconcileAgentRailMessage = WM_APP + 4;
 constexpr UINT kMenuOpenProject = 1001;
 constexpr UINT kMenuReload = 1002;
 constexpr UINT kMenuExit = 1003;
@@ -51,6 +52,7 @@ constexpr int kConversationClientWidth = 808;
 constexpr int kCompactClientWidth = kSidebarWidth + kConversationClientWidth;
 constexpr int kAgentRailWidth = 288;
 constexpr int kWebResizeEdgeWidth = 6;
+constexpr std::size_t kMaximumNativeSnapshotBytes = 256ULL * 1024ULL * 1024ULL;
 
 constexpr NativeMenuItem kShowWindowItem{L"打开 Grimoire Router App", false, false};
 constexpr NativeMenuItem kTrayOpenProjectItem{L"打开项目...", false, false};
@@ -201,6 +203,11 @@ std::wstring CanonicalDirectory(std::wstring_view input, std::error_code& error)
 	return canonical.wstring();
 }
 
+bool IsExistingDirectory(std::wstring_view path) noexcept {
+	std::error_code error;
+	return std::filesystem::is_directory(std::filesystem::path(path), error) && !error;
+}
+
 std::wstring DirectoryName(std::wstring_view directory) {
 	std::filesystem::path path(directory);
 	std::wstring name = path.filename().wstring();
@@ -298,6 +305,17 @@ NativeTranscriptRow ParseNativeRow(const nlohmann::json& value) {
 	return row;
 }
 
+std::size_t NativeRowStorageBytes(const NativeTranscriptRow& row) noexcept {
+	std::size_t bytes = sizeof(row) + row.id.size() + row.text.size() + row.time_label.size();
+	for (const std::string& media_id : row.media_ids) {
+		bytes += sizeof(media_id) + media_id.size();
+	}
+	for (const NativeTranscriptProcessItem& item : row.process_items) {
+		bytes += sizeof(item) + item.id.size() + item.summary.size() + item.detail.size();
+	}
+	return bytes;
+}
+
 std::vector<std::uint8_t> DecodeBase64(std::string_view encoded) {
 	if (encoded.empty() || encoded.size() > 6 * 1024 * 1024 || encoded.size() > std::numeric_limits<DWORD>::max()) {
 		return {};
@@ -363,11 +381,13 @@ App::App(HINSTANCE instance)
 	: instance_(instance),
 	  config_path_(DefaultConfigPath()),
 	  config_(LoadConfig(config_path_)),
-	  dark_theme_(config_.dark_theme.value_or(SystemPrefersDarkMode())) {}
+	  dark_theme_(config_.dark_theme.value_or(SystemPrefersDarkMode())),
+	  taskbar_created_message_(RegisterWindowMessageW(L"TaskbarCreated")) {}
 
 App::~App() {
 	shutting_down_ = true;
 	core_.Stop();
+	DiscardPendingCoreEvents();
 	RemoveTray();
 }
 
@@ -421,14 +441,22 @@ LRESULT CALLBACK App::WindowProcedure(HWND window, UINT message, WPARAM wparam, 
 }
 
 LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
+	if (taskbar_created_message_ != 0 && message == taskbar_created_message_) {
+		// Explorer owns the notification area and discards all icons when it
+		// restarts. Re-register ours instead of trusting the stale local flag.
+		tray_added_ = false;
+		InitializeTray();
+		return 0;
+	}
+	if (message == kShowExistingInstanceMessage) {
+		ShowMainWindow();
+		return 0;
+	}
 	switch (message) {
 	case WM_NCCALCSIZE:
 		// Keep WS_THICKFRAME semantics, but let the Web title bar occupy the
 		// complete window instead of exposing a DWM-painted strip above it.
-		if (wparam == TRUE) {
-			return 0;
-		}
-		break;
+		return 0;
 	case WM_NCHITTEST: {
 		RECT bounds{};
 		if (!GetWindowRect(window_, &bounds)) {
@@ -474,9 +502,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 		// dominant startup costs.  Start them side-by-side; the ready link is
 		// retained in pending_navigation_ when Core wins the race.
 		if (const auto initial_project = EnvironmentValue(L"OMP_CPP_SHELL_INITIAL_PROJECT");
-			initial_project && std::filesystem::is_directory(*initial_project)) {
+			initial_project && IsExistingDirectory(*initial_project)) {
 			SwitchProject(*initial_project);
-		} else if (config_.last_project && std::filesystem::is_directory(*config_.last_project)) {
+		} else if (config_.last_project && IsExistingDirectory(*config_.last_project)) {
 			SwitchProject(*config_.last_project);
 		}
 		return 0;
@@ -493,6 +521,19 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 		if (has_native_transcript_bounds_) {
 			native_transcript_.SetBounds(native_transcript_bounds_);
 		}
+		if (wparam == SIZE_RESTORED && agent_rail_pending_restore_expansion_) {
+			// Defer until the current maximize/restore or SetWindowPos stack has
+			// unwound. A direct expansion here can recursively re-enter WM_SIZE.
+			PostMessageW(window_, kReconcileAgentRailMessage, 0, 0);
+		}
+		return 0;
+	case kReconcileAgentRailMessage:
+		if (agent_rail_open_ && agent_rail_pending_restore_expansion_ && !has_compact_window_bounds_ &&
+			!IsZoomed(window_) && !IsIconic(window_)) {
+			agent_rail_pending_restore_expansion_ = false;
+			agent_rail_open_ = false;
+			SetAgentRailOpen(true);
+		}
 		return 0;
 	case WM_DROPFILES: {
 		const HDROP drop = reinterpret_cast<HDROP>(wparam);
@@ -500,7 +541,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 		nlohmann::json paths = nlohmann::json::array();
 		for (UINT index = 0; index < count; ++index) {
 			const UINT length = DragQueryFileW(drop, index, nullptr, 0);
-			if (length == 0) {
+			if (length == 0 || length > 32'768U) {
 				continue;
 			}
 			std::wstring value(static_cast<std::size_t>(length) + 1, L'\0');
@@ -569,6 +610,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 			suggested->right - suggested->left,
 			suggested->bottom - suggested->top,
 			SWP_NOACTIVATE | SWP_NOZORDER);
+		// Refresh size-specific window and tray icons after crossing monitors.
+		ApplyTheme(dark_theme_);
 		return 0;
 	}
 	case WM_MEASUREITEM:
@@ -670,6 +713,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
 		RemoveTray();
 		native_transcript_.Destroy();
 		core_.Stop();
+		DiscardPendingCoreEvents();
 		PostQuitMessage(0);
 		return 0;
 	default:
@@ -712,11 +756,21 @@ bool App::CreateMainWindow(int show_command) {
 	// of silently growing it back to the former hard-coded 800 pixels.
 	width = std::max(width, static_cast<int>(minimum.cx));
 	height = std::max(height, static_cast<int>(minimum.cy));
-	if (config_.window_x && config_.window_y) {
-		RECT restored{*config_.window_x, *config_.window_y, *config_.window_x + width, *config_.window_y + height};
-		if (MonitorFromRect(&restored, MONITOR_DEFAULTTONULL) != nullptr) {
-			x = restored.left;
-			y = restored.top;
+	const bool has_saved_origin = config_.window_x.has_value() && config_.window_y.has_value();
+	const POINT saved_origin = has_saved_origin ? POINT{*config_.window_x, *config_.window_y} : POINT{0, 0};
+	MONITORINFO monitor_info{};
+	monitor_info.cbSize = sizeof(monitor_info);
+	const HMONITOR target_monitor = MonitorFromPoint(
+		saved_origin, has_saved_origin ? MONITOR_DEFAULTTONEAREST : MONITOR_DEFAULTTOPRIMARY);
+	if (target_monitor != nullptr && GetMonitorInfoW(target_monitor, &monitor_info)) {
+		const LONG requested_x = config_.window_x.value_or(monitor_info.rcWork.left);
+		const LONG requested_y = config_.window_y.value_or(monitor_info.rcWork.top);
+		const RECT fitted = FitWindowBoundsToWorkArea(requested_x, requested_y, width, height, monitor_info.rcWork);
+		width = fitted.right - fitted.left;
+		height = fitted.bottom - fitted.top;
+		if (has_saved_origin) {
+			x = fitted.left;
+			y = fitted.top;
 		}
 	}
 	window_ = CreateWindowExW(0,
@@ -790,9 +844,11 @@ void App::SetAgentRailOpen(bool open) {
 	}
 	agent_rail_open_ = open;
 	if (open) {
+		agent_rail_pending_restore_expansion_ = false;
 		has_compact_window_bounds_ = false;
 		agent_rail_docked_ = false;
 		if (IsZoomed(window_) || IsIconic(window_)) {
+			agent_rail_pending_restore_expansion_ = true;
 			RECT client{};
 			agent_rail_docked_ = GetClientRect(window_, &client) &&
 				ShouldDockAgentRail(client.right - client.left, static_cast<int>(GetDpiForWindow(window_)));
@@ -828,6 +884,7 @@ void App::SetAgentRailOpen(bool open) {
 		has_compact_window_bounds_ = true;
 		return;
 	}
+	agent_rail_pending_restore_expansion_ = false;
 
 	if (!has_compact_window_bounds_ || !agent_rail_docked_) {
 		has_compact_window_bounds_ = false;
@@ -915,6 +972,9 @@ void App::ShowTrayMenu() {
 	const UINT command = TrackPopupMenu(
 		menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD, cursor.x, cursor.y, 0, window_, nullptr);
 	DestroyMenu(menu);
+	// Required by the notification-area foreground-menu contract so clicking
+	// elsewhere always dismisses the popup, including while the owner is hidden.
+	PostMessageW(window_, WM_NULL, 0, 0);
 	switch (command) {
 	case kMenuShowWindow:
 		ShowMainWindow();
@@ -951,7 +1011,7 @@ void App::InitializeWebView() {
 				pending_core_failure_summary_.clear();
 				pending_core_failure_detail_.clear();
 			} else if (!project_directory_.empty() && core_.running()) {
-				webview_.ShowStatus(L"正在启动 Core", project_directory_, false);
+				webview_.ShowStatus(L"Grimoire Router App", L"正在启动 Core", false);
 			} else {
 				webview_.ShowWelcome();
 			}
@@ -983,6 +1043,10 @@ void App::PickProject() {
 	if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &selected_path)) && selected_path != nullptr) {
 		std::wstring project(selected_path);
 		CoTaskMemFree(selected_path);
+		// A folder chosen through the native picker is an explicit manual switch.
+		// Do not let an earlier Codex-import handoff resume its session id after
+		// this different project finishes starting.
+		pending_imported_session_id_.clear();
 		SwitchProject(std::move(project));
 	}
 }
@@ -1032,6 +1096,7 @@ std::vector<std::wstring> App::PickAttachments(std::string_view kind) const {
 	if (FAILED(items->GetCount(&count))) {
 		throw std::runtime_error("unable to count selected files");
 	}
+	count = std::min<DWORD>(count, 32U);
 	std::vector<std::wstring> paths;
 	paths.reserve(count);
 	for (DWORD index = 0; index < count; ++index) {
@@ -1041,7 +1106,9 @@ std::vector<std::wstring> App::PickAttachments(std::string_view kind) const {
 		}
 		PWSTR selected_path = nullptr;
 		if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &selected_path)) && selected_path != nullptr) {
-			paths.emplace_back(selected_path);
+			if (wcsnlen_s(selected_path, 32'769) <= 32'768) {
+				paths.emplace_back(selected_path);
+			}
 			CoTaskMemFree(selected_path);
 		}
 	}
@@ -1052,6 +1119,7 @@ void App::SwitchProject(std::wstring project_directory) {
 	std::error_code error;
 	std::wstring canonical = CanonicalDirectory(project_directory, error);
 	if (error || canonical.empty()) {
+		pending_imported_session_id_.clear();
 		ShowThemedMessageBox(window_,
 			L"所选路径不是可访问的项目目录。",
 			L"无法打开项目",
@@ -1063,13 +1131,17 @@ void App::SwitchProject(std::wstring project_directory) {
 		return;
 	}
 
-	webview_.ShowStatus(L"正在启动 Core", canonical, false);
+	pending_navigation_.clear();
+	pending_core_failure_summary_.clear();
+	pending_core_failure_detail_.clear();
+	webview_.ShowStatus(L"Grimoire Router App", L"正在启动 Core", false);
 	native_transcript_.SetVisible(false);
 	native_transcript_.Clear();
 	has_native_transcript_bounds_ = false;
 	native_session_id_.clear();
 	pending_native_images_.clear();
 	core_.Stop();
+	DiscardPendingCoreEvents();
 	project_directory_ = std::move(canonical);
 	config_.RecordProject(project_directory_);
 	SaveConfigFile();
@@ -1094,7 +1166,15 @@ void App::SwitchProject(std::wstring project_directory) {
 				}
 			},
 			start_error)) {
+		pending_imported_session_id_.clear();
 		ShowCoreFailure(L"无法启动 Core", start_error);
+	}
+}
+
+void App::DiscardPendingCoreEvents() const noexcept {
+	MSG message{};
+	while (PeekMessageW(&message, nullptr, kCoreEventMessage, kCoreEventMessage, PM_REMOVE)) {
+		delete reinterpret_cast<CoreEvent*>(message.lParam);
 	}
 }
 
@@ -1104,6 +1184,8 @@ void App::HandleCoreEvent(std::unique_ptr<CoreEvent> event) {
 	}
 	switch (event->kind) {
 	case CoreEventKind::Ready: {
+		pending_core_failure_summary_.clear();
+		pending_core_failure_detail_.clear();
 		std::wstring control = Utf8ToWide(event->links.control);
 		if (webview_.ready()) {
 			webview_.Navigate(control);
@@ -1116,9 +1198,11 @@ void App::HandleCoreEvent(std::unique_ptr<CoreEvent> event) {
 		webview_.ShowStatus(L"Core 启动时间较长", Utf8ToWide(event->detail), false);
 		break;
 	case CoreEventKind::StartupFailed:
+		pending_navigation_.clear();
 		ShowCoreFailure(L"Core 启动失败", event->detail);
 		break;
 	case CoreEventKind::Exited: {
+		pending_navigation_.clear();
 		std::wstring summary = L"Core 已意外退出（code ";
 		summary.append(std::to_wstring(event->exit_code));
 		summary.push_back(L'）');
@@ -1139,15 +1223,25 @@ void App::HandleWebMessage(std::wstring message) {
 void App::HandleDesktopRequest(std::string_view payload) {
 	using Json = nlohmann::json;
 	const Json request = Json::parse(payload, nullptr, false);
-	if (request.is_discarded() || !request.is_object() || request.value("channel", "") != "omp-desktop") {
+	if (request.is_discarded() || !request.is_object()) {
 		return;
 	}
-	const std::uint64_t id = request.value("id", std::uint64_t{0});
-	if (id == 0 || !request.contains("command") || !request["command"].is_string()) {
+	const auto channel_value = request.find("channel");
+	const auto request_id_value = request.find("id");
+	const auto command_value = request.find("command");
+	if (channel_value == request.end() || !channel_value->is_string() ||
+		channel_value->get_ref<const std::string&>() != "omp-desktop" || request_id_value == request.end() ||
+		!request_id_value->is_number_unsigned() || command_value == request.end() || !command_value->is_string()) {
 		return;
 	}
-	const std::string command = request["command"].get<std::string>();
-	const Json args = request.value("args", Json::object());
+	const std::uint64_t id = request_id_value->get<std::uint64_t>();
+	if (id == 0) {
+		return;
+	}
+	const std::string command = command_value->get<std::string>();
+	const auto args_value = request.find("args");
+	const Json empty_args = Json::object();
+	const Json& args = args_value == request.end() ? empty_args : *args_value;
 	const auto reply = [this, id](bool ok, Json value, std::string error = {}) {
 		Json response{{"channel", "omp-desktop-response"}, {"id", id}, {"ok", ok}};
 		if (ok) {
@@ -1157,6 +1251,10 @@ void App::HandleDesktopRequest(std::string_view payload) {
 		}
 		webview_.PostJson(Utf8ToWide(response.dump()));
 	};
+	if (!args.is_object()) {
+		reply(false, nullptr, "desktop command arguments must be an object");
+		return;
+	}
 
 	try {
 		if (command == "window_theme") {
@@ -1281,6 +1379,9 @@ void App::HandleDesktopRequest(std::string_view payload) {
 				return;
 			}
 			const Json& snapshot = args.at("snapshot");
+			if (!snapshot.is_object()) {
+				throw std::invalid_argument("native transcript snapshot must be an object");
+			}
 			const Json& encoded_rows = snapshot.at("rows");
 			if (!encoded_rows.is_array() || encoded_rows.size() > 200'000) {
 				reply(false, nullptr, "native transcript snapshot is too large");
@@ -1289,6 +1390,9 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			std::string session_id;
 			if (const auto found = snapshot.find("sessionId"); found != snapshot.end() && found->is_string()) {
 				session_id = found->get<std::string>();
+				if (session_id.size() > 512) {
+					throw std::invalid_argument("native transcript session id exceeds its size limit");
+				}
 			}
 			const bool session_changed = session_id != native_session_id_;
 			const bool preserve_streaming_tail = !session_changed;
@@ -1296,10 +1400,16 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			std::vector<NativeTranscriptRow> rows;
 			rows.reserve(encoded_rows.size() + 1);
 			std::unordered_set<std::string> ids;
-			ids.reserve(encoded_rows.size());
+			if (preserve_streaming_tail) ids.reserve(encoded_rows.size());
+			std::size_t snapshot_bytes = 0;
 			for (const Json& encoded_row : encoded_rows) {
 				NativeTranscriptRow row = ParseNativeRow(encoded_row);
-				ids.insert(row.id);
+				const std::size_t row_bytes = NativeRowStorageBytes(row);
+				if (row_bytes > kMaximumNativeSnapshotBytes - snapshot_bytes) {
+					throw std::invalid_argument("native transcript snapshot exceeds its memory budget");
+				}
+				snapshot_bytes += row_bytes;
+				if (preserve_streaming_tail) ids.insert(row.id);
 				rows.push_back(std::move(row));
 			}
 			if (preserve_streaming_tail) {
@@ -1307,6 +1417,11 @@ void App::HandleDesktopRequest(std::string_view payload) {
 				for (std::size_t index = 0; index < current.Size(); ++index) {
 					const NativeTranscriptRow& row = current.RowAt(index);
 					if (HasFlag(row.flags, NativeTranscriptRowFlags::Streaming) && !ids.contains(row.id)) {
+						const std::size_t row_bytes = NativeRowStorageBytes(row);
+						if (row_bytes > kMaximumNativeSnapshotBytes - snapshot_bytes) {
+							throw std::invalid_argument("native transcript snapshot exceeds its memory budget");
+						}
+						snapshot_bytes += row_bytes;
 						rows.push_back(row);
 					}
 				}
@@ -1354,8 +1469,11 @@ void App::HandleDesktopRequest(std::string_view payload) {
 		}
 		if (command == "native_transcript_image") {
 			const Json& image = args.at("image");
-			const std::string image_id = image.at("imageId").get<std::string>();
-			const std::string data = image.at("data").get<std::string>();
+			if (!image.is_object() || !image.at("imageId").is_string() || !image.at("data").is_string()) {
+				throw std::invalid_argument("native transcript image payload is invalid");
+			}
+			const std::string& image_id = image.at("imageId").get_ref<const std::string&>();
+			const std::string& data = image.at("data").get_ref<const std::string&>();
 			if (image_id.empty() || image_id.size() > 256 || data.size() > 6 * 1024 * 1024) {
 				reply(false, nullptr, "native transcript image payload is invalid");
 				return;
@@ -1470,8 +1588,15 @@ void App::HandleDesktopRequest(std::string_view payload) {
 				reply(false, nullptr, "project path is empty");
 				return;
 			}
+			std::error_code path_error;
+			const std::wstring canonical = CanonicalDirectory(path, path_error);
+			if (path_error || canonical.empty()) {
+				reply(false, nullptr, "project directory is not available");
+				return;
+			}
+			pending_imported_session_id_.clear();
 			reply(true, nullptr);
-			SwitchProject(path);
+			SwitchProject(canonical);
 			return;
 		}
 		if (command == "project_open_imported") {
@@ -1592,13 +1717,18 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			return;
 		}
 		if (command == "attachment_status") {
-			const std::vector<std::string> paths = args.at("paths").get<std::vector<std::string>>();
-			if (paths.size() > 64) {
+			const Json& encoded_paths = args.at("paths");
+			if (!encoded_paths.is_array() || encoded_paths.size() > 64) {
 				reply(false, nullptr, "attachment status request is too large");
 				return;
 			}
+			const std::vector<std::string> paths = encoded_paths.get<std::vector<std::string>>();
 			Json statuses = Json::array();
 			for (const auto& path : paths) {
+				if (path.empty() || path.size() > 32'768) {
+					statuses.push_back(Json{{"path", path}, {"available", false}});
+					continue;
+				}
 				std::error_code status_error;
 				const bool available = std::filesystem::is_regular_file(Utf8ToWide(path), status_error);
 				statuses.push_back(Json{{"path", path}, {"available", available && !status_error}});
@@ -1612,11 +1742,23 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			return;
 		}
 		if (command == "session_preferences_update") {
-			std::vector<std::string> pinned = args.at("pinnedSessions").get<std::vector<std::string>>();
-			std::map<std::string, std::string> read_through =
-				args.at("sessionReadThrough").get<std::map<std::string, std::string>>();
-			if (pinned.size() > 1000 || read_through.size() > 5000) {
+			const Json& encoded_pinned = args.at("pinnedSessions");
+			const Json& encoded_read_through = args.at("sessionReadThrough");
+			if (!encoded_pinned.is_array() || encoded_pinned.size() > 1000 ||
+				!encoded_read_through.is_object() || encoded_read_through.size() > 5000) {
 				reply(false, nullptr, "session preference payload is too large");
+				return;
+			}
+			std::vector<std::string> pinned = encoded_pinned.get<std::vector<std::string>>();
+			std::map<std::string, std::string> read_through =
+				encoded_read_through.get<std::map<std::string, std::string>>();
+			const bool invalid_pinned = std::ranges::any_of(
+				pinned, [](const std::string& id) { return id.empty() || id.size() > 512; });
+			const bool invalid_read_through = std::ranges::any_of(read_through, [](const auto& entry) {
+				return entry.first.empty() || entry.first.size() > 512 || entry.second.size() > 128;
+			});
+			if (invalid_pinned || invalid_read_through) {
+				reply(false, nullptr, "session preference entries are invalid");
 				return;
 			}
 			config_.pinned_sessions = std::move(pinned);
@@ -1671,7 +1813,8 @@ void App::SaveWindowState() {
 	config_.window_y = bounds.top;
 	config_.window_width = bounds.right - bounds.left;
 	config_.window_height = bounds.bottom - bounds.top;
-	config_.window_maximized = placement.showCmd == SW_SHOWMAXIMIZED;
+	config_.window_maximized = placement.showCmd == SW_SHOWMAXIMIZED ||
+		(placement.showCmd == SW_SHOWMINIMIZED && (placement.flags & WPF_RESTORETOMAXIMIZED) != 0);
 	SaveConfigFile();
 }
 

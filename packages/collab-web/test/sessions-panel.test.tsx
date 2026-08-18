@@ -7,7 +7,10 @@ import {
 	groupSessionsByProject,
 	isSessionUnread,
 	placeContextMenu,
+	removePinnedSession,
+	removeSessionReadThrough,
 } from "../src/components/sessions/SessionsPanel";
+import { ConfirmDialog } from "../src/components/shell/ConfirmDialog";
 import { groupArchivedSessions, SettingsModal } from "../src/components/shell/SettingsModal";
 import type { ControlSnapshot } from "../src/lib/control-client";
 
@@ -69,10 +72,14 @@ function renderPanel(
 			onOpenSettings={() => {}}
 			onOpenSession={() => {}}
 			onNewSession={() => {}}
+			onSelectProject={() => {}}
+			onInitializeProject={() => {}}
 			onListCodexSessions={async () => []}
-			onImportCodexSession={async () => {}}
+			onImportCodexSession={async () => ({
+				kind: "imported",
+				session: { id: "omp", cwd: "/work", requiresProjectSwitch: false },
+			})}
 			onRenameSession={() => {}}
-			onDropSession={() => {}}
 			onArchiveSession={async () => {}}
 			onLeave={() => {}}
 		/>,
@@ -150,7 +157,14 @@ describe("Codex import conversation matching", () => {
 
 	it("shows an explicit archived-chat control in the picker", () => {
 		const html = renderToStaticMarkup(
-			<CodexImportModal loadSessions={async () => []} onImport={async () => {}} onClose={() => {}} />,
+			<CodexImportModal
+				loadSessions={async () => []}
+				onImport={async () => ({
+					kind: "imported",
+					session: { id: "omp", cwd: "C:\\work", requiresProjectSwitch: false },
+				})}
+				onClose={() => {}}
+			/>,
 		);
 
 		expect(html).toContain("Current chats");
@@ -203,6 +217,22 @@ describe("SessionsPanel session actions", () => {
 		expect(isSessionUnread(item, { chat: item.modifiedAt })).toBe(false);
 	});
 
+	it("removes archived sessions from pinned and read-through preferences", () => {
+		const pinned = new Set(["keep", "deleted"]);
+		const readThrough = {
+			keep: "2026-08-04T09:00:00.000Z",
+			deleted: "2026-08-05T09:00:00.000Z",
+		};
+
+		expect([...removePinnedSession(pinned, "deleted")]).toEqual(["keep"]);
+		expect(removeSessionReadThrough(readThrough, "deleted")).toEqual({
+			keep: "2026-08-04T09:00:00.000Z",
+		});
+		// Unknown ids are left alone; a failed Core archive never calls these helpers.
+		expect(removePinnedSession(pinned, "missing")).toBe(pinned);
+		expect(removeSessionReadThrough(readThrough, "missing")).toBe(readThrough);
+	});
+
 	it("maps activeSessionId to the active row's aria-current state", () => {
 		const html = renderPanel(
 			snapshot([
@@ -215,6 +245,8 @@ describe("SessionsPanel session actions", () => {
 		expect(html).toContain('aria-current="page" title="Open Active session"');
 		expect(html).not.toContain('aria-current="page" title="Open Other session"');
 		expect(html).toContain('title="Rename session Active session"');
+		expect(html).toContain('class="sh-sessions-archive" title="归档 Active session"');
+		expect(html).not.toContain("删除 Active session");
 	});
 
 	it("uses the project label to expand or collapse instead of switching and restarting the core", () => {
@@ -227,7 +259,57 @@ describe("SessionsPanel session actions", () => {
 		expect(html).not.toContain("Switching to test");
 	});
 
-	it("renders read-only session rows without resume, create, or drop controls", () => {
+	it("shows a compact new-chat action on each writable project row", () => {
+		const html = renderPanel(
+			snapshot([session("chat", "/work/test", "2026-08-05T09:00:00.000Z", "Screen")]),
+		);
+
+		expect(html).toContain('class="sh-project-new"');
+		expect(html).toContain('title="在 test 中新建对话"');
+	});
+
+	it("blocks inline archive while another session operation is pending", () => {
+		const html = renderPanel(
+			snapshot([session("chat", "/work/test", "2026-08-05T09:00:00.000Z", "Screen")]),
+			null,
+			true,
+			false,
+		);
+		const archiveButton = html.match(/<button[^>]*class="sh-sessions-archive"[^>]*>/)?.[0];
+
+		expect(archiveButton).toBeDefined();
+		expect(archiveButton).toContain("disabled");
+	});
+
+	it("marks the explicitly selected project instead of the first or native current project", () => {
+		const html = renderToStaticMarkup(
+			<SessionsPanel
+				snapshot={snapshot([
+					session("first", "/work/first", "2026-08-05T09:00:00.000Z"),
+					session("selected", "/work/selected", "2026-08-04T09:00:00.000Z"),
+				])}
+				selectedProjectPath="/work/selected"
+				onOpenSettings={() => {}}
+				onOpenSession={() => {}}
+				onNewSession={() => {}}
+				onSelectProject={() => {}}
+				onInitializeProject={() => {}}
+				onListCodexSessions={async () => []}
+				onImportCodexSession={async () => ({
+					kind: "imported",
+					session: { id: "omp", cwd: "/work", requiresProjectSwitch: false },
+				})}
+				onRenameSession={() => {}}
+				onArchiveSession={async () => {}}
+				onLeave={() => {}}
+			/>,
+		);
+
+		expect(html).toMatch(/data-selected="true"[\s\S]*?>selected<\/span>/);
+		expect(html).not.toMatch(/data-selected="true"[\s\S]*?>first<\/span>/);
+	});
+
+	it("renders read-only session rows without resume, create, or archive controls", () => {
 		const html = renderPanel(
 			snapshot([session("readonly", "/work/project", "2026-08-05T09:00:00.000Z", "Read only session")], true),
 			"readonly",
@@ -238,8 +320,9 @@ describe("SessionsPanel session actions", () => {
 		expect(html).not.toContain("Resume");
 		expect(html).not.toContain("New session");
 		expect(html).not.toContain("Import Chat from Codex");
-		expect(html).not.toContain("Drop Read only session");
+		expect(html).not.toContain("归档 Read only session");
 		expect(html).not.toContain("Rename session Read only session");
+		expect(html).not.toContain('class="sh-project-new"');
 	});
 });
 
@@ -266,5 +349,43 @@ describe("Settings archived chats", () => {
 
 		expect(groups.map(group => group.name)).toEqual(["project", "other"]);
 		expect(groups[0]?.sessions.map(item => item.id)).toEqual(["new", "old"]);
+	});
+});
+
+describe("Session action confirmation", () => {
+	it("renders a modal archive warning with cancel before the reversible action", () => {
+		const html = renderToStaticMarkup(
+			<ConfirmDialog
+				title="归档这个对话？"
+				description={<>之后仍可恢复。</>}
+				confirmLabel="归档"
+				onCancel={() => {}}
+				onConfirm={() => {}}
+			/>,
+		);
+
+		expect(html).toContain('role="alertdialog"');
+		expect(html).toContain('aria-modal="true"');
+		expect(html).toContain("归档这个对话？");
+		expect(html).toContain("之后仍可恢复。");
+		expect(html.indexOf(">取消</button>")).toBeLessThan(html.indexOf(">归档</button>"));
+		expect(html).not.toContain('class="is-danger"');
+	});
+
+	it("renders permanent deletion as an explicit destructive confirmation", () => {
+		const html = renderToStaticMarkup(
+			<ConfirmDialog
+				title="彻底删除这个对话？"
+				description={<>此操作无法撤销。</>}
+				confirmLabel="彻底删除"
+				danger
+				onCancel={() => {}}
+				onConfirm={() => {}}
+			/>,
+		);
+
+		expect(html).toContain("彻底删除这个对话？");
+		expect(html).toContain("此操作无法撤销。");
+		expect(html).toContain('class="is-danger"');
 	});
 });

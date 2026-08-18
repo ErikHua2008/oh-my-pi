@@ -54,10 +54,11 @@ public:
 
 private:
 	void Monitor(CoreLaunch launch);
+	void DrainStdout(HANDLE pipe) const;
 	void DrainStderr(HANDLE pipe);
 	void AppendStderr(std::string_view bytes);
 	[[nodiscard]] std::string StderrTail() const;
-	void Emit(CoreEvent event) const;
+	void Emit(CoreEvent event) const noexcept;
 	void TerminateTree();
 	void CleanupHandles();
 
