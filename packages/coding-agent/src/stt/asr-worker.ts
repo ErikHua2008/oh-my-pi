@@ -28,6 +28,7 @@ import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDevice
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
 import type { SttTransport, SttWorkerInbound } from "./asr-protocol";
 import { type EndpointerEvent, StreamEndpointer } from "./endpointer";
+import { getBundledSttModelsDir, getBundledSttRuntimeDir } from "./model-paths";
 import {
 	getSttModelSpec,
 	type SherpaSttModelSpec,
@@ -74,6 +75,8 @@ interface TransformersRuntime {
 	env: {
 		cacheDir?: string;
 		allowLocalModels?: boolean;
+		allowRemoteModels?: boolean;
+		localModelPath?: string;
 		logLevel?: unknown;
 	};
 	LogLevel: {
@@ -128,6 +131,8 @@ function getSherpaVersionSpec(): string {
 }
 
 function getSttRuntimeDir(): string {
+	const bundledRuntime = getBundledSttRuntimeDir();
+	if (bundledRuntime) return bundledRuntime;
 	const key = getTransformersVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_");
 	return path.join(path.dirname(getTinyModelsCacheDir()), "stt-runtime", `transformers-${key}`);
 }
@@ -173,10 +178,11 @@ async function loadPipelineOnDevice(
 	transport: SttTransport,
 	requestId: string,
 	device: TinyModelDevice,
+	useBundledModel: boolean,
 ): Promise<AutomaticSpeechRecognitionPipeline> {
 	return transformers.pipeline(ASR_TASK, spec.repo, {
 		device,
-		dtype: sttModelDtypeOverride ?? spec.dtype,
+		dtype: useBundledModel ? spec.dtype : (sttModelDtypeOverride ?? spec.dtype),
 		progress_callback: info => sendProgress(transport, requestId, modelKey, info),
 	});
 }
@@ -187,6 +193,7 @@ async function loadPipelineWithDeviceFallback(
 	modelKey: SttModelKey,
 	transport: SttTransport,
 	requestId: string,
+	useBundledModel: boolean,
 ): Promise<{ pipeline: AutomaticSpeechRecognitionPipeline; device: TinyModelDevice }> {
 	const devices = tinyModelDeviceLoadOrder(sttModelDevicePreference);
 	if (devices[0] !== sttModelDevicePreference.device) {
@@ -201,7 +208,15 @@ async function loadPipelineWithDeviceFallback(
 		const device = devices[i]!;
 		try {
 			return {
-				pipeline: await loadPipelineOnDevice(transformers, spec, modelKey, transport, requestId, device),
+				pipeline: await loadPipelineOnDevice(
+					transformers,
+					spec,
+					modelKey,
+					transport,
+					requestId,
+					device,
+					useBundledModel,
+				),
 				device,
 			};
 		} catch (error) {
@@ -219,6 +234,24 @@ async function loadPipelineWithDeviceFallback(
 	throw new Error("No stt model devices configured");
 }
 
+async function hasBundledWhisperSmall(spec: TransformersSttModelSpec): Promise<boolean> {
+	const root = getBundledSttModelsDir();
+	if (!root || spec.repo !== "onnx-community/whisper-small" || spec.dtype !== "q8") return false;
+	const model = path.join(root, spec.repo);
+	for (const relative of [
+		"config.json",
+		path.join("onnx", "encoder_model_quantized.onnx"),
+		path.join("onnx", "decoder_model_merged_quantized.onnx"),
+	]) {
+		const complete = await fs
+			.stat(path.join(model, relative))
+			.then(stat => stat.isFile() && stat.size > 0)
+			.catch(() => false);
+		if (!complete) return false;
+	}
+	return true;
+}
+
 async function loadTransformersModel(
 	spec: TransformersSttModelSpec,
 	modelKey: SttModelKey,
@@ -232,6 +265,21 @@ async function loadTransformersModel(
 		modelKey,
 		getSttRuntimeDir,
 	);
+	const bundledModels = getBundledSttModelsDir();
+	const useBundledModel = await hasBundledWhisperSmall(spec);
+	if (bundledModels && useBundledModel) {
+		// The native desktop bundle uses the same repository-shaped layout as
+		// Transformers.js local models. Keep it read-only and prohibit an
+		// accidental network fallback when the shipped speech pack is selected.
+		transformers.env.localModelPath = bundledModels;
+		transformers.env.allowLocalModels = true;
+		transformers.env.allowRemoteModels = false;
+	} else {
+		// The runtime is memoized across model switches; restore the ordinary
+		// cache/Hub policy after a bundled-model load.
+		transformers.env.allowLocalModels = false;
+		transformers.env.allowRemoteModels = true;
+	}
 	const startedAt = performance.now();
 	const { pipeline, device } = await loadPipelineWithDeviceFallback(
 		transformers,
@@ -239,6 +287,7 @@ async function loadTransformersModel(
 		modelKey,
 		transport,
 		requestId,
+		useBundledModel,
 	);
 	sendLog(transport, "debug", "stt: local model loaded", {
 		modelKey,
@@ -246,7 +295,7 @@ async function loadTransformersModel(
 		engine: "transformers",
 		device,
 		requestedDevice: sttModelDevicePreference.device,
-		dtype: sttModelDtypeOverride ?? spec.dtype,
+		dtype: useBundledModel ? spec.dtype : (sttModelDtypeOverride ?? spec.dtype),
 		elapsedMs: Math.round(performance.now() - startedAt),
 	});
 	return { engine: "transformers", pipeline };
@@ -486,7 +535,7 @@ function startStreamingSession(
 		transport.send({ type: "error", id: request.id, error: `Unknown stt model: ${request.modelKey}` });
 		return;
 	}
-	sessions.set(request.id, {
+	const session: StreamingSession = {
 		id: request.id,
 		spec,
 		language: request.language,
@@ -499,7 +548,13 @@ function startStreamingSession(
 		pumping: false,
 		cancelled: false,
 		ended: false,
-	});
+	};
+	sessions.set(request.id, session);
+	// Attach the model promise immediately. Without this initial pump, a corrupt
+	// model/runtime could reject before the first microphone frame and the parent
+	// would keep showing "recording" until audio happened to arrive or Stop was
+	// clicked.
+	void pumpSession(session, transport);
 }
 
 function ingestStreamEvents(session: StreamingSession, events: EndpointerEvent[]): void {

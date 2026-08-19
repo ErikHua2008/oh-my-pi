@@ -19,7 +19,7 @@ export interface ThinkingPickerProps {
 	levels: readonly string[];
 	value: string;
 	disabled?: boolean;
-	desktop?: Pick<DesktopBridge, "setNativeTranscriptOcclusion">;
+	desktop?: Pick<DesktopBridge, "setNativeTranscriptOcclusions">;
 	onChange(level: string): void;
 }
 

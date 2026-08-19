@@ -1,6 +1,19 @@
 import type { LocalFileReference } from "@oh-my-pi/pi-wire";
 import { MANAGED_IMAGE_MAX_BYTES } from "@oh-my-pi/pi-wire";
-import { ArrowUp, File, FileUp, Folder, ImagePlus, Pencil, Scissors, SendHorizontal, Square, X } from "lucide-react";
+import {
+	ArrowUp,
+	File,
+	FileUp,
+	Folder,
+	ImagePlus,
+	Mic,
+	Pencil,
+	Scissors,
+	Search,
+	SendHorizontal,
+	Square,
+	X,
+} from "lucide-react";
 import type { ClipboardEvent, KeyboardEvent, ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { GuestClient, GuestSnapshot } from "../../lib/client";
@@ -16,6 +29,8 @@ export interface ComposerProps {
 	/** Optional prompt text selected from the transcript for edit-and-resend. */
 	prefill?: string;
 	onPrefillConsumed?: () => void;
+	/** Open the current conversation's chat-history search panel. */
+	onOpenChatSearch?: () => void;
 	/** Injectable native bridge; defaults to the process-wide WebView bridge. */
 	desktop?: DesktopBridge;
 }
@@ -91,6 +106,11 @@ function autosize(el: HTMLTextAreaElement | null, minimumRows = 1): void {
 	const max = MAX_ROWS * LINE_PX + PAD_Y;
 	el.style.height = `${Math.max(min, Math.min(el.scrollHeight, max))}px`;
 	el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
+}
+
+export function mergeSpeechInput(base: string, utterance: string): string {
+	if (!base || !utterance) return `${base}${utterance}`;
+	return /\s$/.test(base) || /^\s/.test(utterance) ? `${base}${utterance}` : `${base} ${utterance}`;
 }
 
 /**
@@ -207,6 +227,7 @@ export function Composer({
 	snapshot,
 	prefill,
 	onPrefillConsumed,
+	onOpenChatSearch,
 	desktop = defaultDesktopBridge,
 }: ComposerProps): ReactNode {
 	const [text, setText] = useState(prefill ?? "");
@@ -216,6 +237,7 @@ export function Composer({
 	const [attachmentBusy, setAttachmentBusy] = useState(false);
 	const [annotation, setAnnotation] = useState<PendingAnnotation | null>(null);
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
+	const speechBaseRef = useRef<string | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 
 	const live = snapshot.phase === "live";
@@ -223,10 +245,12 @@ export function Composer({
 	const uiRequest = snapshot.uiRequest;
 	const canPrompt = live && !readOnly;
 	const busy = snapshot.working;
+	const speechActive = snapshot.speech.state !== "idle";
 	const queued = snapshot.state?.queuedMessageCount ?? 0;
 	const canSend =
 		canPrompt &&
 		!attachmentBusy &&
+		!speechActive &&
 		(text.trim().length > 0 || localFiles.length > 0) &&
 		localFiles.every(file => file.available);
 	const thinkingLevels = snapshot.state?.availableThinkingLevels ?? [];
@@ -249,6 +273,35 @@ export function Composer({
 			taRef.current?.setSelectionRange(prefill.length, prefill.length);
 		});
 	}, [prefill]);
+
+	useEffect(() => {
+		if (speechBaseRef.current === null) return;
+		setText(mergeSpeechInput(speechBaseRef.current, snapshot.speech.text));
+		if (snapshot.speech.state === "idle" && snapshot.speech.final) {
+			speechBaseRef.current = null;
+			requestAnimationFrame(() => taRef.current?.focus());
+		}
+	}, [snapshot.speech]);
+
+	useEffect(
+		() => () => {
+			if (client.getSnapshot().speech.state !== "idle") client.cancelSpeechInput();
+			speechBaseRef.current = null;
+		},
+		[client],
+	);
+
+	const toggleSpeechInput = useCallback((): void => {
+		if (speechActive) {
+			client.stopSpeechInput();
+			return;
+		}
+		if (!canPrompt || attachmentBusy) return;
+		speechBaseRef.current = text;
+		setAttachmentError(null);
+		setAttachmentHint(null);
+		client.startSpeechInput();
+	}, [attachmentBusy, canPrompt, client, speechActive, text]);
 
 	const addLocalPaths = useCallback((paths: readonly string[], requestedType?: "image" | "document"): void => {
 		setLocalFiles(current => {
@@ -274,12 +327,13 @@ export function Composer({
 	}, []);
 
 	useEffect(
-		() => desktop.subscribeDroppedFiles(paths => canPrompt && addLocalPaths(paths)),
-		[addLocalPaths, canPrompt, desktop],
+		() => desktop.subscribeDroppedFiles(paths => canPrompt && !speechActive && addLocalPaths(paths)),
+		[addLocalPaths, canPrompt, desktop, speechActive],
 	);
 
 	const pickAttachments = useCallback(
 		async (kind: "image" | "document"): Promise<void> => {
+			if (!canPrompt || attachmentBusy || speechActive) return;
 			setAttachmentBusy(true);
 			setAttachmentError(null);
 			setAttachmentHint(null);
@@ -291,7 +345,7 @@ export function Composer({
 				setAttachmentBusy(false);
 			}
 		},
-		[addLocalPaths, desktop],
+		[addLocalPaths, attachmentBusy, canPrompt, desktop, speechActive],
 	);
 
 	const importManagedImage = useCallback(
@@ -341,7 +395,7 @@ export function Composer({
 	);
 
 	const startScreenshot = useCallback(async (): Promise<void> => {
-		if (attachmentBusy) return;
+		if (!canPrompt || attachmentBusy || speechActive) return;
 		setAttachmentBusy(true);
 		setAttachmentError(null);
 		setAttachmentHint(null);
@@ -356,9 +410,10 @@ export function Composer({
 		} finally {
 			setAttachmentBusy(false);
 		}
-	}, [attachmentBusy, desktop, importManagedImage]);
+	}, [attachmentBusy, canPrompt, desktop, importManagedImage, speechActive]);
 
 	const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+		if (speechActive) return;
 		const item = Array.from(event.clipboardData.items).find(
 			candidate => candidate.kind === "file" && candidate.type.startsWith("image/"),
 		);
@@ -371,7 +426,7 @@ export function Composer({
 
 	const receiveDroppedFiles = useCallback(
 		(dataTransfer: DataTransfer): void => {
-			if (!canPrompt) return;
+			if (!canPrompt || speechActive) return;
 			const paths = Array.from(dataTransfer.files)
 				.map(file => (file as File & { path?: string }).path)
 				.filter((path): path is string => typeof path === "string" && path.length > 0);
@@ -381,7 +436,7 @@ export function Composer({
 			}
 			addLocalPaths(paths);
 		},
-		[addLocalPaths, canPrompt, desktop.localFilesAvailable],
+		[addLocalPaths, canPrompt, desktop.localFilesAvailable, speechActive],
 	);
 
 	useEffect(() => {
@@ -409,11 +464,11 @@ export function Composer({
 		const onDragEnter = (event: globalThis.DragEvent): void => {
 			if (!isFileDrag(event)) return;
 			dragDepth += 1;
-			showDropSurface(canPrompt && isDropSurface(event.target));
+			showDropSurface(canPrompt && !speechActive && isDropSurface(event.target));
 		};
 		const onDragOver = (event: globalThis.DragEvent): void => {
 			if (!isFileDrag(event)) return;
-			const accepted = canPrompt && isDropSurface(event.target);
+			const accepted = canPrompt && !speechActive && isDropSurface(event.target);
 			showDropSurface(accepted);
 			if (!isDropSurface(event.target)) return;
 			event.preventDefault();
@@ -446,7 +501,7 @@ export function Composer({
 			app.removeEventListener("dragleave", onDragLeave);
 			app.removeEventListener("drop", onDrop);
 		};
-	}, [canPrompt, receiveDroppedFiles]);
+	}, [canPrompt, receiveDroppedFiles, speechActive]);
 
 	const removeAttachment = useCallback((path: string): void => {
 		setLocalFiles(current => current.filter(file => file.path !== path));
@@ -456,7 +511,7 @@ export function Composer({
 
 	const send = useCallback(async (): Promise<void> => {
 		const trimmed = text.trim();
-		if ((!trimmed && localFiles.length === 0) || !live || readOnly || attachmentBusy) return;
+		if ((!trimmed && localFiles.length === 0) || !live || readOnly || attachmentBusy || speechActive) return;
 		setAttachmentBusy(true);
 		setAttachmentError(null);
 		try {
@@ -492,7 +547,7 @@ export function Composer({
 		} finally {
 			setAttachmentBusy(false);
 		}
-	}, [attachmentBusy, client, desktop, live, localFiles, onPrefillConsumed, readOnly, text]);
+	}, [attachmentBusy, client, desktop, live, localFiles, onPrefillConsumed, readOnly, speechActive, text]);
 
 	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
 		if (shouldSubmitOnEnter(e, composingRef.current)) {
@@ -571,36 +626,65 @@ export function Composer({
 		<>
 			<div className="sh-composer">
 				<div className="sh-composer-card">
-					{desktop.localFilesAvailable && (
-						<div className="sh-composer-tools" aria-label="附件工具">
-							<button
-								type="button"
-								onClick={() => void startScreenshot()}
-								disabled={!canPrompt || attachmentBusy}
-								title="截图"
-								aria-label="截图"
-							>
-								<Scissors size={18} aria-hidden="true" />
-							</button>
-							<button
-								type="button"
-								onClick={() => void pickAttachments("image")}
-								disabled={!canPrompt || attachmentBusy}
-								title="引用本机图片"
-								aria-label="引用本机图片"
-							>
-								<ImagePlus size={18} aria-hidden="true" />
-							</button>
-							<button
-								type="button"
-								onClick={() => void pickAttachments("document")}
-								disabled={!canPrompt || attachmentBusy}
-								title="引用本机文档"
-								aria-label="引用本机文档"
-							>
-								<FileUp size={18} aria-hidden="true" />
-							</button>
-							<span className="sh-composer-tools-label">可拖入文件 · Ctrl+V 粘贴图片</span>
+					{(desktop.localFilesAvailable || desktop.speechInputAvailable || onOpenChatSearch !== undefined) && (
+						<div className="sh-composer-tools" aria-label="输入工具">
+							{desktop.localFilesAvailable && (
+								<button
+									type="button"
+									onClick={() => void startScreenshot()}
+									disabled={!canPrompt || attachmentBusy || speechActive}
+									title="截图"
+									aria-label="截图"
+								>
+									<Scissors size={18} aria-hidden="true" />
+								</button>
+							)}
+							{desktop.localFilesAvailable && (
+								<button
+									type="button"
+									onClick={() => void pickAttachments("image")}
+									disabled={!canPrompt || attachmentBusy || speechActive}
+									title="引用本机图片"
+									aria-label="引用本机图片"
+								>
+									<ImagePlus size={18} aria-hidden="true" />
+								</button>
+							)}
+							{desktop.localFilesAvailable && (
+								<button
+									type="button"
+									onClick={() => void pickAttachments("document")}
+									disabled={!canPrompt || attachmentBusy || speechActive}
+									title="引用本机文档"
+									aria-label="引用本机文档"
+								>
+									<FileUp size={18} aria-hidden="true" />
+								</button>
+							)}
+							{desktop.speechInputAvailable && (
+								<button
+									type="button"
+									className={speechActive ? "sh-composer-mic sh-composer-mic-on" : "sh-composer-mic"}
+									onClick={toggleSpeechInput}
+									disabled={!speechActive && (!canPrompt || attachmentBusy)}
+									title={speechActive ? "结束语音录入" : "语音录入"}
+									aria-label={speechActive ? "结束语音录入" : "开始语音录入"}
+								>
+									<Mic size={18} aria-hidden="true" />
+								</button>
+							)}
+							{onOpenChatSearch !== undefined && (
+								<button type="button" onClick={onOpenChatSearch} title="查找聊天记录" aria-label="查找聊天记录">
+									<Search size={18} aria-hidden="true" />
+								</button>
+							)}
+							<span className="sh-composer-tools-label">
+								{speechActive
+									? (snapshot.speech.status ?? "正在听…")
+									: desktop.localFilesAvailable
+										? "可拖入文件 · Ctrl+V 粘贴图片"
+										: "点击麦克风开始语音录入"}
+							</span>
 						</div>
 					)}
 					{localFiles.length > 0 && (
@@ -661,12 +745,15 @@ export function Composer({
 						onPaste={onPaste}
 						onCompositionStart={onCompositionStart}
 						onCompositionEnd={onCompositionEnd}
+						readOnly={speechActive}
 						placeholder={
 							readOnly
 								? "read-only session — watching only"
-								: live
-									? "prompt the host agent…"
-									: "waiting for session…"
+								: speechActive
+									? (snapshot.speech.status ?? "正在听…")
+									: live
+										? "prompt the host agent…"
+										: "waiting for session…"
 						}
 						disabled={!canPrompt}
 						rows={COMPOSER_MIN_ROWS}

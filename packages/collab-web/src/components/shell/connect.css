@@ -328,7 +328,9 @@
 .sh-toasts-transient,
 .sh-toasts-errors {
 	position: fixed;
-	z-index: 60;
+	/* Errors must remain actionable above the custom title bar, dialogs,
+	 * screenshot editor, and every other WebView surface. */
+	z-index: 5000;
 	display: flex;
 	flex-direction: column;
 	pointer-events: none;

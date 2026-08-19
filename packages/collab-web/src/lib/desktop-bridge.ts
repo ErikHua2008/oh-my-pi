@@ -135,6 +135,8 @@ export interface DesktopBridge {
 	localFilesAvailable: boolean;
 	/** Native virtual transcript is probed independently from project/file capabilities. */
 	nativeTranscriptAvailable: boolean;
+	/** Host-local microphone input is exposed only by the C++ desktop shell. */
+	speechInputAvailable: boolean;
 	/** Resize the native host to add or remove the docked Agent rail. */
 	setAgentRailOpen(open: boolean): Promise<boolean>;
 	/** Keep native HWND surfaces and DWM chrome aligned with the resolved Web theme. */
@@ -162,8 +164,11 @@ export interface DesktopBridge {
 	replaceNativeTranscript(snapshot: DesktopNativeTranscriptSnapshot): Promise<boolean>;
 	upsertNativeTranscript(row: DesktopNativeTranscriptRow): Promise<boolean>;
 	removeNativeTranscript(id: string): Promise<void>;
+	/** Reveal and briefly highlight a stable native transcript row. */
+	revealNativeTranscript(id: string): Promise<boolean>;
 	setNativeTranscriptViewport(viewport: DesktopNativeTranscriptViewport): Promise<boolean>;
-	setNativeTranscriptOcclusion(occlusion: DesktopNativeTranscriptOcclusion | null): Promise<boolean>;
+	/** Punch WebView overlay regions through the native transcript child HWND. */
+	setNativeTranscriptOcclusions(occlusions: readonly DesktopNativeTranscriptOcclusion[]): Promise<boolean>;
 	provideNativeTranscriptImage(image: DesktopNativeTranscriptImage): Promise<boolean>;
 	hideNativeTranscript(): Promise<void>;
 	takeNativeTranscriptEvents(): Promise<readonly DesktopNativeTranscriptEvent[]>;
@@ -280,6 +285,7 @@ function browserBridge(): DesktopBridge {
 		available: false,
 		localFilesAvailable: false,
 		nativeTranscriptAvailable: false,
+		speechInputAvailable: false,
 		async setAgentRailOpen(_open: boolean) {
 			return false;
 		},
@@ -326,10 +332,13 @@ function browserBridge(): DesktopBridge {
 			return false;
 		},
 		async removeNativeTranscript(_id: string) {},
+		async revealNativeTranscript(_id: string) {
+			return false;
+		},
 		async setNativeTranscriptViewport(_viewport: DesktopNativeTranscriptViewport) {
 			return false;
 		},
-		async setNativeTranscriptOcclusion(_occlusion: DesktopNativeTranscriptOcclusion | null) {
+		async setNativeTranscriptOcclusions(_occlusions: readonly DesktopNativeTranscriptOcclusion[]) {
 			return false;
 		},
 		async provideNativeTranscriptImage(_image: DesktopNativeTranscriptImage) {
@@ -381,6 +390,9 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 		},
 		get nativeTranscriptAvailable() {
 			return nativeTranscriptAuthorization !== "denied";
+		},
+		get speechInputAvailable() {
+			return true;
 		},
 		async setAgentRailOpen(open: boolean) {
 			try {
@@ -577,11 +589,23 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 		async removeNativeTranscript(id: string) {
 			await invokeNative("native_transcript_remove", { id });
 		},
+		async revealNativeTranscript(id: string) {
+			if (nativeTranscriptAuthorization === "denied") return false;
+			try {
+				await invoke<unknown>("native_transcript_reveal", { id });
+				nativeTranscriptAuthorization = "authorized";
+				return true;
+			} catch {
+				// A searched row can briefly be absent while an older-history page is
+				// being reconciled. That is a recoverable miss, not loss of capability.
+				return false;
+			}
+		},
 		async setNativeTranscriptViewport(viewport: DesktopNativeTranscriptViewport) {
 			return invokeNativeEnabled("native_transcript_viewport", { viewport });
 		},
-		async setNativeTranscriptOcclusion(occlusion: DesktopNativeTranscriptOcclusion | null) {
-			return invokeNative("native_transcript_occlusion", { occlusion });
+		async setNativeTranscriptOcclusions(occlusions: readonly DesktopNativeTranscriptOcclusion[]) {
+			return invokeNative("native_transcript_occlusion", { occlusions });
 		},
 		async provideNativeTranscriptImage(image: DesktopNativeTranscriptImage) {
 			return invokeNative("native_transcript_image", { image });

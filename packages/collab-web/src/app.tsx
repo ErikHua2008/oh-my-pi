@@ -1,4 +1,4 @@
-import type { ImportedForeignSession } from "@oh-my-pi/pi-wire";
+import type { ChatSearchResult, ImportedForeignSession } from "@oh-my-pi/pi-wire";
 import { X } from "lucide-react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -6,6 +6,7 @@ import { AgentDrawer } from "./components/agents/AgentDrawer";
 import { AgentsPanel } from "./components/agents/AgentsPanel";
 import { SessionsLayout } from "./components/sessions/SessionsLayout";
 import { Banners } from "./components/shell/Banners";
+import { ChatSearchPanel } from "./components/shell/ChatSearchPanel";
 import { Composer } from "./components/shell/Composer";
 import { ConnectScreen } from "./components/shell/ConnectScreen";
 import { DesktopFrame } from "./components/shell/DesktopFrame";
@@ -407,6 +408,8 @@ function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionPr
 	const [narrowViewport, setNarrowViewport] = useState(() => window.matchMedia("(max-width: 1024px)").matches);
 	const [nativeWindowLayout, setNativeWindowLayout] = useState(false);
 	const [settingsOpen, setSettingsOpen] = useState(false);
+	const [searchOpen, setSearchOpen] = useState(false);
+	const [revealTarget, setRevealTarget] = useState<{ entryId: string; rowId: string; revision: number } | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const autoOpenedRef = useRef(false);
 	const agentsButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -443,9 +446,50 @@ function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionPr
 		if (railOpen) closeRail();
 		else {
 			setSettingsOpen(false);
+			setSearchOpen(false);
 			setRailOpen(true);
 		}
 	}, [closeRail, railOpen]);
+	const toggleSearch = useCallback((): void => {
+		setSearchOpen(open => {
+			if (!open) {
+				setSettingsOpen(false);
+				setRailOpen(false);
+			}
+			return !open;
+		});
+	}, []);
+	const revealSearchResult = useCallback(
+		async (result: ChatSearchResult): Promise<boolean> => {
+			if (!(await client.ensureChatEntryLoaded(result.entryId))) return false;
+			setRevealTarget(current => ({
+				entryId: result.entryId,
+				rowId: result.rowId,
+				revision: (current?.revision ?? 0) + 1,
+			}));
+			return true;
+		},
+		[client],
+	);
+
+	useEffect(() => {
+		const openChatSearch = (event: globalThis.KeyboardEvent): void => {
+			if (event.key.toLocaleLowerCase() !== "f" || (!event.ctrlKey && !event.metaKey)) return;
+			event.preventDefault();
+			setSettingsOpen(false);
+			setRailOpen(false);
+			setSearchOpen(true);
+		};
+		document.addEventListener("keydown", openChatSearch);
+		return () => document.removeEventListener("keydown", openChatSearch);
+	}, []);
+
+	useEffect(() => {
+		// React can preserve this Session component while the control client swaps
+		// to another conversation. Never carry a result or highlight across chats.
+		setSearchOpen(false);
+		setRevealTarget(null);
+	}, [client]);
 
 	const subCount = useMemo(() => snap.agents.filter(a => a.kind === "sub").length, [snap.agents]);
 
@@ -545,7 +589,11 @@ function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionPr
 	const drawerAgent = selectedId != null ? snap.agents.find(a => a.id === selectedId) : undefined;
 
 	return (
-		<div className="sh-app" data-agent-rail={railOpen && !railOverlay ? "true" : undefined}>
+		<div
+			className="sh-app"
+			data-agent-rail={railOpen && !railOverlay ? "true" : undefined}
+			data-chat-search={searchOpen ? "true" : undefined}
+		>
 			<div inert={railOpen && railOverlay ? true : undefined}>
 				<HeaderBar
 					snapshot={snap}
@@ -557,9 +605,14 @@ function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionPr
 					onBack={onBack}
 					settingsOpen={settingsOpen}
 					onToggleSettings={() => {
-						if (!settingsOpen) setRailOpen(false);
+						if (!settingsOpen) {
+							setRailOpen(false);
+							setSearchOpen(false);
+						}
 						setSettingsOpen(open => !open);
 					}}
+					searchOpen={searchOpen}
+					onToggleSearch={toggleSearch}
 				/>
 			</div>
 			{settingsOpen && (
@@ -594,12 +647,16 @@ function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionPr
 							historyRemaining={snap.historyRemaining}
 							historyLoading={snap.historyLoading}
 							fileDropEnabled={snap.phase === "live" && !snap.readOnly}
+							revealTarget={revealTarget}
 							onLoadEarlier={() => client.loadEarlierHistory()}
 							host={toolHost}
 							onEditLastUserMessage={setComposerPrefill}
 						/>
 					</div>
 				</section>
+				{searchOpen && (
+					<ChatSearchPanel client={client} onClose={() => setSearchOpen(false)} onReveal={revealSearchResult} />
+				)}
 				{railOpen && (
 					<aside
 						ref={railRef}
@@ -634,6 +691,7 @@ function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionPr
 					snapshot={snap}
 					prefill={composerPrefill}
 					onPrefillConsumed={() => setComposerPrefill(undefined)}
+					onOpenChatSearch={toggleSearch}
 				/>
 			)}
 			{drawerAgent && (

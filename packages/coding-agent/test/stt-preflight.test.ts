@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { SttStreamOptions } from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as asrClient from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
+import { BUNDLED_STT_MODELS_ENV } from "@oh-my-pi/pi-coding-agent/stt/model-paths";
 import { STTController } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { getTinyModelsCacheDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -21,15 +23,20 @@ describe("isSttModelCached completeness", () => {
 	let state: SettingsTestState | undefined;
 	let tmp = "";
 	let cacheDir = "";
+	let previousBundledModels: string | undefined;
 
 	beforeEach(async () => {
 		state = beginSettingsTest();
+		previousBundledModels = process.env[BUNDLED_STT_MODELS_ENV];
+		delete process.env[BUNDLED_STT_MODELS_ENV];
 		tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stt-cache-"));
 		setAgentDir(tmp);
 		cacheDir = getTinyModelsCacheDir();
 	});
 
 	afterEach(async () => {
+		if (previousBundledModels === undefined) delete process.env[BUNDLED_STT_MODELS_ENV];
+		else process.env[BUNDLED_STT_MODELS_ENV] = previousBundledModels;
 		restoreSettingsTestState(state);
 		await removeWithRetries(tmp);
 	});
@@ -61,11 +68,24 @@ describe("isSttModelCached completeness", () => {
 		await touch(path.join(repoDir, "tokens.txt"));
 		expect(await downloader.isSttModelCached("parakeet")).toBe(true);
 	});
+
+	it("recognizes a complete read-only model shipped by the desktop app", async () => {
+		const bundledRoot = path.join(tmp, "bundled-stt");
+		const repoDir = path.join(bundledRoot, WHISPER_BASE_REPO);
+		process.env[BUNDLED_STT_MODELS_ENV] = bundledRoot;
+		await touch(path.join(repoDir, "config.json"));
+		await touch(path.join(repoDir, "onnx", "encoder_model_quantized.onnx"));
+		await touch(path.join(repoDir, "onnx", "decoder_model_merged_quantized.onnx"));
+
+		expect(await downloader.isSttModelCached("fast")).toBe(true);
+	});
 });
 
 describe("STTController preflight", () => {
 	let state: SettingsTestState | undefined;
 	let controller: STTController | undefined;
+	let streamOptions: SttStreamOptions | undefined;
+	let cancelStream: Mock<() => void>;
 
 	function makeEditor() {
 		return {
@@ -93,10 +113,15 @@ describe("STTController preflight", () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		settings.set("stt.modelName", "fast");
-		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
-			pushAudio: vi.fn(),
-			stop: vi.fn().mockResolvedValue(""),
-			cancel: vi.fn(),
+		streamOptions = undefined;
+		cancelStream = vi.fn();
+		vi.spyOn(asrClient.sttClient, "startStream").mockImplementation((_modelKey, options) => {
+			streamOptions = options;
+			return {
+				pushAudio: vi.fn(),
+				stop: vi.fn().mockResolvedValue(""),
+				cancel: cancelStream,
+			};
 		});
 	});
 
@@ -147,11 +172,61 @@ describe("STTController preflight", () => {
 		await controller.toggle(editor, options);
 
 		expect(controller.state).toBe("recording");
-		// Foreground path passes a progress callback (2 args) and surfaces it.
-		expect(download.mock.calls[0]).toHaveLength(2);
+		// Foreground path passes progress plus a cancellation signal and surfaces it.
+		expect(download.mock.calls[0]).toHaveLength(3);
 		expect(options.showStatus).toHaveBeenCalledWith("Downloading speech model Whisper base (42%)");
 		// Status was written, so the line is cleared at the end.
 		expect(options.showStatus).toHaveBeenLastCalledWith("");
+	});
+
+	it("does not open the microphone after cancellation during a first-use model download", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const downloadStarted = Promise.withResolvers<void>();
+		const downloadGate = Promise.withResolvers<void>();
+		const download = vi.spyOn(downloader, "downloadSttModel").mockImplementation(() => {
+			downloadStarted.resolve();
+			return downloadGate.promise;
+		});
+
+		const editor = makeEditor();
+		const createCapture = vi.fn(() => ({ stop: vi.fn() }));
+		controller = new STTController(createCapture);
+		const options = makeOptions();
+		const starting = controller.toggle(editor, options);
+		await downloadStarted.promise;
+
+		controller.cancel(options);
+		expect(download.mock.calls[0]?.[2]?.signal?.aborted).toBe(true);
+		downloadGate.resolve();
+		await starting;
+
+		expect(createCapture).not.toHaveBeenCalled();
+		expect(controller.state).toBe("idle");
+		expect(options.onStateChange).toHaveBeenLastCalledWith("idle");
+	});
+
+	it("treats a second toggle during first-use setup as an immediate cancellation", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const downloadStarted = Promise.withResolvers<void>();
+		const downloadGate = Promise.withResolvers<void>();
+		const download = vi.spyOn(downloader, "downloadSttModel").mockImplementation(() => {
+			downloadStarted.resolve();
+			return downloadGate.promise;
+		});
+		const createCapture = vi.fn(() => ({ stop: vi.fn() }));
+		controller = new STTController(createCapture);
+		const options = makeOptions();
+		const starting = controller.toggle(makeEditor(), options);
+		await downloadStarted.promise;
+
+		await controller.toggle(makeEditor(), options);
+
+		expect(download.mock.calls[0]?.[2]?.signal?.aborted).toBe(true);
+		expect(controller.state).toBe("idle");
+		downloadGate.resolve();
+		await starting;
+		expect(options.onStateChange).toHaveBeenLastCalledWith("idle");
+		expect(createCapture).not.toHaveBeenCalled();
 	});
 
 	it("re-runs preflight when the model changes mid-session", async () => {
@@ -193,5 +268,23 @@ describe("STTController preflight", () => {
 		expect(stopCapture).toHaveBeenCalledTimes(1);
 		expect(editor.clearVolatileText).toHaveBeenCalledTimes(1);
 		expect(options.showWarning).toHaveBeenCalledWith("Microphone permission denied");
+	});
+
+	it("stops recording immediately when the speech worker fails before Stop is clicked", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
+		const stopCapture = vi.fn();
+		const editor = makeEditor();
+		const options = makeOptions();
+		controller = new STTController(() => ({ stop: stopCapture }));
+		await controller.toggle(editor, options);
+
+		streamOptions?.onError?.(new Error("speech model failed to load"));
+
+		expect(controller.state).toBe("idle");
+		expect(stopCapture).toHaveBeenCalledTimes(1);
+		expect(cancelStream).toHaveBeenCalledTimes(1);
+		expect(editor.clearVolatileText).toHaveBeenCalledTimes(1);
+		expect(options.showWarning).toHaveBeenCalledWith("speech model failed to load");
 	});
 });

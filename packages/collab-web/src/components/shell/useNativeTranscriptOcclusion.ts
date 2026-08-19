@@ -6,6 +6,41 @@ import {
 	desktopBridge as defaultDesktopBridge,
 } from "../../lib/desktop-bridge";
 
+type OcclusionDesktop = Pick<DesktopBridge, "setNativeTranscriptOcclusions">;
+
+export class NativeTranscriptOcclusionSet {
+	readonly #regions = new Map<symbol, DesktopNativeTranscriptOcclusion>();
+
+	update(
+		token: symbol,
+		occlusion: DesktopNativeTranscriptOcclusion | null,
+	): readonly DesktopNativeTranscriptOcclusion[] {
+		if (occlusion === null) this.#regions.delete(token);
+		else this.#regions.set(token, occlusion);
+		return [...this.#regions.values()];
+	}
+
+	get empty(): boolean {
+		return this.#regions.size === 0;
+	}
+}
+
+const occlusionStates = new WeakMap<OcclusionDesktop, NativeTranscriptOcclusionSet>();
+
+function updateNativeTranscriptOcclusion(
+	desktop: OcclusionDesktop,
+	token: symbol,
+	occlusion: DesktopNativeTranscriptOcclusion | null,
+): void {
+	let state = occlusionStates.get(desktop);
+	if (state === undefined) {
+		state = new NativeTranscriptOcclusionSet();
+		occlusionStates.set(desktop, state);
+	}
+	void desktop.setNativeTranscriptOcclusions(state.update(token, occlusion));
+	if (state.empty) occlusionStates.delete(desktop);
+}
+
 interface CssBounds {
 	left: number;
 	top: number;
@@ -37,11 +72,12 @@ export function nativeTranscriptOcclusionFromBounds(
 export function useNativeTranscriptOcclusion(
 	open: boolean,
 	surfaceRef: RefObject<HTMLElement | null>,
-	desktop: Pick<DesktopBridge, "setNativeTranscriptOcclusion"> = defaultDesktopBridge,
+	desktop: OcclusionDesktop = defaultDesktopBridge,
 	layoutKey?: unknown,
 ): void {
 	useLayoutEffect(() => {
 		if (!open) return;
+		const token = Symbol("native-transcript-occlusion");
 		let frame = 0;
 		let disposed = false;
 
@@ -56,7 +92,7 @@ export function useNativeTranscriptOcclusion(
 				window.innerWidth,
 				window.innerHeight,
 			);
-			void desktop.setNativeTranscriptOcclusion(occlusion);
+			updateNativeTranscriptOcclusion(desktop, token, occlusion);
 		};
 		const schedule = (): void => {
 			cancelAnimationFrame(frame);
@@ -75,7 +111,7 @@ export function useNativeTranscriptOcclusion(
 			observer.disconnect();
 			window.removeEventListener("resize", schedule);
 			window.visualViewport?.removeEventListener("resize", schedule);
-			void desktop.setNativeTranscriptOcclusion(null);
+			updateNativeTranscriptOcclusion(desktop, token, null);
 		};
 	}, [desktop, layoutKey, open, surfaceRef]);
 }

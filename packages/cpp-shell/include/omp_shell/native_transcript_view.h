@@ -37,7 +37,7 @@ public:
 	[[nodiscard]] bool Create(HWND parent, HINSTANCE instance);
 	void Destroy();
 	void SetBounds(const RECT& bounds);
-	void SetOcclusion(std::optional<RECT> occlusion);
+	void SetOcclusions(std::vector<RECT> occlusions);
 	void SetVisible(bool visible);
 	void SetDarkTheme(bool dark);
 	void SetFileDropEnabled(bool enabled);
@@ -48,6 +48,8 @@ public:
 	void ReplaceSnapshot(std::vector<NativeTranscriptRow> rows, bool reset_to_tail = false);
 	void Upsert(NativeTranscriptRow row);
 	void Remove(std::string_view id);
+	/** Scroll a stable row into view and briefly highlight it. */
+	[[nodiscard]] bool Reveal(std::string_view id);
 	void SetHistoryState(std::size_t remaining, bool loading);
 	void SetHistoryRequestHandler(std::function<void()> handler);
 	[[nodiscard]] bool TakeHistoryRequest() noexcept;
@@ -171,7 +173,7 @@ private:
 
 	HWND window_ = nullptr;
 	RECT bounds_{};
-	std::optional<RECT> occlusion_;
+	std::vector<RECT> occlusions_;
 	NativeTranscriptModel model_;
 	Microsoft::WRL::ComPtr<ID2D1Factory> d2d_factory_;
 	Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_factory_;
@@ -210,6 +212,7 @@ private:
 	std::optional<FileActionHit> file_action_feedback_;
 	std::wstring file_action_feedback_text_;
 	std::string copied_row_id_;
+	std::string search_highlight_row_id_;
 	std::int64_t scroll_offset_ = 0;
 	std::size_t history_remaining_ = 0;
 	std::function<void()> history_request_handler_;

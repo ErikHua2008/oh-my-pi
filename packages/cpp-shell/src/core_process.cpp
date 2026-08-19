@@ -17,6 +17,8 @@ namespace {
 
 constexpr std::size_t kStderrTailBytes = 4096;
 constexpr wchar_t kNativeGuiHostEnvironment[] = L"OMP_NATIVE_GUI_HOST";
+constexpr wchar_t kBundledSttModelsEnvironment[] = L"OMP_BUNDLED_STT_MODELS";
+constexpr wchar_t kBundledSttRuntimeEnvironment[] = L"OMP_BUNDLED_STT_RUNTIME";
 
 [[nodiscard]] bool IsDevelopmentRepository(const std::filesystem::path& directory) {
 	std::error_code error;
@@ -32,6 +34,36 @@ constexpr wchar_t kNativeGuiHostEnvironment[] = L"OMP_NATIVE_GUI_HOST";
 	}
 	path.resize(length);
 	return std::filesystem::path(std::move(path));
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> BundledSttModelsDirectory() {
+	const std::filesystem::path executable = CurrentExecutablePath();
+	if (executable.empty()) return std::nullopt;
+	const std::filesystem::path root = executable.parent_path() / L"models" / L"stt";
+	const std::filesystem::path model = root / L"onnx-community" / L"whisper-small";
+	const std::array required{
+		model / L"config.json",
+		model / L"onnx" / L"encoder_model_quantized.onnx",
+		model / L"onnx" / L"decoder_model_merged_quantized.onnx",
+	};
+	std::error_code error;
+	for (const auto& file : required) {
+		if (!std::filesystem::is_regular_file(file, error) || error) return std::nullopt;
+	}
+	return root;
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> BundledSttRuntimeDirectory() {
+	const std::filesystem::path executable = CurrentExecutablePath();
+	if (executable.empty()) return std::nullopt;
+	const std::filesystem::path runtime = executable.parent_path() / L"models" / L"stt" / L"runtime";
+	std::error_code error;
+	if (!std::filesystem::is_regular_file(
+			runtime / L"node_modules" / L"@huggingface" / L"transformers" / L"package.json", error) ||
+		error) {
+		return std::nullopt;
+	}
+	return runtime;
 }
 
 [[nodiscard]] std::wstring SearchExecutable(std::wstring_view name);
@@ -291,6 +323,22 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 		CloseIfValid(stderr_pipe.write);
 		return false;
 	}
+	const std::optional<std::wstring> previous_stt_models = EnvironmentValue(kBundledSttModelsEnvironment);
+	bool set_bundled_stt_models = false;
+	if ((!previous_stt_models || previous_stt_models->empty())) {
+		if (const auto bundled_stt_models = BundledSttModelsDirectory(); bundled_stt_models) {
+			set_bundled_stt_models =
+				SetEnvironmentVariableW(kBundledSttModelsEnvironment, bundled_stt_models->c_str()) != FALSE;
+		}
+	}
+	const std::optional<std::wstring> previous_stt_runtime = EnvironmentValue(kBundledSttRuntimeEnvironment);
+	bool set_bundled_stt_runtime = false;
+	if ((!previous_stt_runtime || previous_stt_runtime->empty())) {
+		if (const auto bundled_stt_runtime = BundledSttRuntimeDirectory(); bundled_stt_runtime) {
+			set_bundled_stt_runtime =
+				SetEnvironmentVariableW(kBundledSttRuntimeEnvironment, bundled_stt_runtime->c_str()) != FALSE;
+		}
+	}
 
 	const DWORD flags =
 		CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
@@ -309,6 +357,14 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 	// descendant-only marker into unrelated programs opened later by the shell.
 	static_cast<void>(SetEnvironmentVariableW(
 		kNativeGuiHostEnvironment, previous_gui_host ? previous_gui_host->c_str() : nullptr));
+	if (set_bundled_stt_models) {
+		static_cast<void>(SetEnvironmentVariableW(kBundledSttModelsEnvironment,
+			previous_stt_models ? previous_stt_models->c_str() : nullptr));
+	}
+	if (set_bundled_stt_runtime) {
+		static_cast<void>(SetEnvironmentVariableW(kBundledSttRuntimeEnvironment,
+			previous_stt_runtime ? previous_stt_runtime->c_str() : nullptr));
+	}
 	DeleteProcThreadAttributeList(startup.lpAttributeList);
 	CloseIfValid(null_input);
 	CloseIfValid(stdout_pipe.write);

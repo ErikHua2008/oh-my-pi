@@ -244,7 +244,7 @@ public:
 	OverlaySession& operator=(const OverlaySession&) = delete;
 
 	[[nodiscard]] ScreenshotCaptureResult Run() {
-		HideOwner();
+		MinimizeOwnerForCapture();
 		if (!CaptureDesktop() || !CreateOverlayWindow()) {
 			if (result_.error.empty()) result_.error = L"无法创建截图层";
 			return std::move(result_);
@@ -315,13 +315,17 @@ private:
 		return DefSubclassProc(editor, message, wparam, lparam);
 	}
 
-	void HideOwner() {
+	void MinimizeOwnerForCapture() {
 		if (owner_ == nullptr || !IsWindow(owner_)) return;
 		owner_was_visible_ = IsWindowVisible(owner_) != FALSE;
 		owner_placement_.length = sizeof(owner_placement_);
 		owner_placement_valid_ = GetWindowPlacement(owner_, &owner_placement_) != FALSE;
 		if (owner_was_visible_) {
-			ShowWindow(owner_, SW_HIDE);
+			// Keep the main taskbar button alive while removing the application
+			// window from the captured desktop. SW_HIDE made the normal OMP taskbar
+			// button disappear, leaving only the small notification-area icon and
+			// making it look as though the icon had shrunk into another group.
+			ShowWindow(owner_, SW_MINIMIZE);
 			DwmFlush();
 		}
 	}

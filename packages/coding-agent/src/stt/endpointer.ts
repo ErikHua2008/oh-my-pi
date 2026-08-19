@@ -168,6 +168,13 @@ export class StreamEndpointer {
 		}
 
 		if (!this.#inSpeech) {
+			// The voiced onset belongs to the segment itself. Only retain preceding
+			// non-speech frames in pre-roll; otherwise #beginSegment would append the
+			// same onset frame once from pre-roll and once as `onsetFrame`.
+			if (voiced) {
+				this.#beginSegment(frame);
+				return;
+			}
 			this.#preRoll.push(frame);
 			// Keep only the most recent pre-roll window.
 			if (this.#preRoll.length > this.#preRollSamples) {
@@ -175,7 +182,6 @@ export class StreamEndpointer {
 				this.#preRoll.reset();
 				this.#preRoll.push(tail);
 			}
-			if (voiced) this.#beginSegment(frame);
 			return;
 		}
 

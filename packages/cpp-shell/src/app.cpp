@@ -1478,6 +1478,19 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			reply(true, nullptr);
 			return;
 		}
+		if (command == "native_transcript_reveal") {
+			const std::string id_value = args.at("id").get<std::string>();
+			if (id_value.empty() || id_value.size() > 512) {
+				reply(false, nullptr, "native transcript row id is invalid");
+				return;
+			}
+			if (!native_transcript_.Reveal(id_value)) {
+				reply(false, nullptr, "native transcript row is not loaded");
+				return;
+			}
+			reply(true, nullptr);
+			return;
+		}
 		if (command == "native_transcript_take_events") {
 			Json events = Json::array();
 			if (native_transcript_.TakeHistoryRequest()) {
@@ -1556,28 +1569,43 @@ void App::HandleDesktopRequest(std::string_view payload) {
 				reply(false, nullptr, "native transcript renderer is unavailable");
 				return;
 			}
-			const auto found = args.find("occlusion");
-			if (found == args.end() || found->is_null()) {
-				native_transcript_.SetOcclusion(std::nullopt);
-				reply(true, nullptr);
-				return;
+			std::vector<RECT> regions;
+			const auto append_region = [&regions](const Json& occlusion) {
+				const std::int64_t x =
+					std::clamp<std::int64_t>(occlusion.at("x").get<std::int64_t>(), -1'000'000, 1'000'000);
+				const std::int64_t y =
+					std::clamp<std::int64_t>(occlusion.at("y").get<std::int64_t>(), -1'000'000, 1'000'000);
+				const std::int64_t width =
+					std::clamp<std::int64_t>(occlusion.at("width").get<std::int64_t>(), 0, 1'000'000);
+				const std::int64_t height =
+					std::clamp<std::int64_t>(occlusion.at("height").get<std::int64_t>(), 0, 1'000'000);
+				regions.push_back(RECT{
+					static_cast<LONG>(x),
+					static_cast<LONG>(y),
+					static_cast<LONG>(x + width),
+					static_cast<LONG>(y + height),
+				});
+			};
+			if (const auto found = args.find("occlusions"); found != args.end() && found->is_array()) {
+				constexpr std::size_t kMaximumOcclusionRegions = 16;
+				for (const Json& occlusion : *found) {
+					if (!occlusion.is_object() || regions.size() >= kMaximumOcclusionRegions) break;
+					append_region(occlusion);
+				}
+			} else if (const auto legacy = args.find("occlusion"); legacy != args.end() && legacy->is_object()) {
+				// Keep old embedded Web assets usable while a developer rebuilds only
+				// one side of the shell.
+				append_region(*legacy);
 			}
-			const Json& occlusion = *found;
-			const std::int64_t x = std::clamp<std::int64_t>(occlusion.at("x").get<std::int64_t>(), -1'000'000, 1'000'000);
-			const std::int64_t y = std::clamp<std::int64_t>(occlusion.at("y").get<std::int64_t>(), -1'000'000, 1'000'000);
-			const std::int64_t width = std::clamp<std::int64_t>(occlusion.at("width").get<std::int64_t>(), 0, 1'000'000);
-			const std::int64_t height = std::clamp<std::int64_t>(occlusion.at("height").get<std::int64_t>(), 0, 1'000'000);
-			native_transcript_.SetOcclusion(RECT{
-				static_cast<LONG>(x),
-				static_cast<LONG>(y),
-				static_cast<LONG>(x + width),
-				static_cast<LONG>(y + height),
-			});
+			native_transcript_.SetOcclusions(std::move(regions));
 			reply(true, nullptr);
 			return;
 		}
 		if (command == "native_transcript_hide") {
-			native_transcript_.SetOcclusion(std::nullopt);
+			// Visibility changes happen for theme/layout refreshes and Web dialogs.
+			// Preserve active Web overlay holes so a persistent error toast is still
+			// above the transcript when the native surface is shown again. Overlay
+			// hooks remove their own regions; project switches reset them via Clear().
 			native_transcript_.SetVisible(false);
 			has_native_transcript_bounds_ = false;
 			reply(true, nullptr);

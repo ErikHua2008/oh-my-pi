@@ -5,6 +5,7 @@ import type { GuestSnapshot } from "../src/lib/client";
 import { GuestClient } from "../src/lib/client";
 import {
 	Composer,
+	mergeSpeechInput,
 	shouldCheckDraftAttachmentPaths,
 	shouldSubmitOnEnter,
 } from "../src/components/shell/Composer";
@@ -34,6 +35,7 @@ function snapshot(uiRequest: GuestSnapshot["uiRequest"]): GuestSnapshot {
 		models: null,
 		historyRemaining: 0,
 		historyLoading: false,
+		speech: { state: "idle", text: "" },
 		notices: [],
 	};
 }
@@ -43,6 +45,10 @@ function renderComposer(overrides: Partial<GuestSnapshot> = {}): string {
 }
 
 describe("Composer host UI requests", () => {
+	it("appends dictation to an existing draft without concatenating words", () => {
+		expect(mergeSpeechInput("已有内容", "新增语音")).toBe("已有内容 新增语音");
+		expect(mergeSpeechInput("已有内容 ", "新增语音")).toBe("已有内容 新增语音");
+	});
 	it("renders selectable ask responses for mobile guests", () => {
 		const html = renderToStaticMarkup(
 			<Composer
@@ -131,15 +137,22 @@ describe("Composer session metadata and controls", () => {
 		expect(waiting).toContain('disabled=""');
 	});
 
-	it("shows separate screenshot, image-reference, and document-reference tools in the native shell", () => {
+	it("shows attachment, microphone, and chat-search tools in the native shell", () => {
 		const desktop = createDesktopBridge(async <T,>(): Promise<T> => null as T);
 		const html = renderToStaticMarkup(
-			<Composer client={client} snapshot={{ ...snapshot(null), working: false }} desktop={desktop} />,
+			<Composer
+				client={client}
+				snapshot={{ ...snapshot(null), working: false }}
+				desktop={desktop}
+				onOpenChatSearch={() => {}}
+			/>,
 		);
 
 		expect(html).toContain('aria-label="截图"');
 		expect(html).toContain('aria-label="引用本机图片"');
 		expect(html).toContain('aria-label="引用本机文档"');
+		expect(html).toContain('aria-label="开始语音录入"');
+		expect(html).toContain('aria-label="查找聊天记录"');
 		expect(html).toContain("可拖入文件 · Ctrl+V 粘贴图片");
 	});
 

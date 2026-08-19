@@ -21,7 +21,7 @@ describe("DesktopBridge browser fallback", () => {
 		expect(await desktopBridge.setAgentRailOpen(true)).toBe(false);
 		expect(await desktopBridge.setWindowTheme("light")).toBe(false);
 		expect(await desktopBridge.runWindowAction("minimize")).toBe(false);
-		expect(await desktopBridge.setNativeTranscriptOcclusion({ x: 1, y: 2, width: 3, height: 4 })).toBe(false);
+		expect(await desktopBridge.setNativeTranscriptOcclusions([{ x: 1, y: 2, width: 3, height: 4 }])).toBe(false);
 		expect(await desktopBridge.listProjects()).toEqual([]);
 		await expect(desktopBridge.openProject()).resolves.toBeUndefined();
 		await expect(desktopBridge.switchProject("/work/project")).resolves.toBeUndefined();
@@ -105,8 +105,13 @@ describe("DesktopBridge native transcript capability", () => {
 				dropEnabled: true,
 			}),
 		).toBe(true);
-		expect(await bridge.setNativeTranscriptOcclusion({ x: 20, y: 300, width: 260, height: 180 })).toBe(true);
-		expect(await bridge.setNativeTranscriptOcclusion(null)).toBe(true);
+		expect(
+			await bridge.setNativeTranscriptOcclusions([
+				{ x: 20, y: 300, width: 260, height: 180 },
+				{ x: 500, y: 40, width: 220, height: 90 },
+			]),
+		).toBe(true);
+		expect(await bridge.setNativeTranscriptOcclusions([])).toBe(true);
 		await bridge.removeNativeTranscript("entry-1");
 		await bridge.hideNativeTranscript();
 		expect(await bridge.takeNativeTranscriptEvents()).toEqual([
@@ -136,6 +141,15 @@ describe("DesktopBridge native transcript capability", () => {
 					theme: "light",
 					dropEnabled: true,
 				},
+			},
+		});
+		expect(calls[3]).toEqual({
+			command: "native_transcript_occlusion",
+			args: {
+				occlusions: [
+					{ x: 20, y: 300, width: 260, height: 180 },
+					{ x: 500, y: 40, width: 220, height: 90 },
+				],
 			},
 		});
 	});

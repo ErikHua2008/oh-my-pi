@@ -59,6 +59,12 @@
 	margin: 0 0 20px;
 }
 
+.tr-row.tr-search-hit {
+	border-radius: var(--radius-sm);
+	background: var(--accent-muted);
+	box-shadow: inset 3px 0 0 var(--accent);
+}
+
 .tr-row--user {
 	align-items: flex-end;
 }

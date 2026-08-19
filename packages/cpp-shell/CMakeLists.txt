@@ -24,10 +24,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(OMP_CPP_SHELL_BUILD_TESTS "Build cpp-shell unit tests" ON)
 option(OMP_CPP_SHELL_BUILD_WEB_ASSETS "Rebuild collab-web assets with the native shell" ON)
 option(OMP_CPP_SHELL_BUILD_CORE_BUNDLE "Rebuild the single-file coding-agent Core bundle" ON)
+option(OMP_CPP_SHELL_BUNDLE_STT_MODEL "Bundle the offline Whisper Small model beside the shell" ON)
 
 get_filename_component(OMP_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 
-if(OMP_CPP_SHELL_BUILD_WEB_ASSETS OR OMP_CPP_SHELL_BUILD_CORE_BUNDLE)
+if(OMP_CPP_SHELL_BUILD_WEB_ASSETS OR OMP_CPP_SHELL_BUILD_CORE_BUNDLE OR OMP_CPP_SHELL_BUNDLE_STT_MODEL)
 	find_program(OMP_BUN_EXECUTABLE NAMES bun bun.exe REQUIRED)
 
 	if(OMP_CPP_SHELL_BUILD_WEB_ASSETS)
@@ -144,6 +145,21 @@ target_link_libraries(
 		windowscodecs
 )
 
+if(OMP_CPP_SHELL_BUNDLE_STT_MODEL)
+	set(OMP_STT_MODEL_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/prepare-stt-model.ts")
+	add_custom_target(
+		omp_bundled_stt_model ALL
+		COMMAND
+			"${OMP_BUN_EXECUTABLE}" "${OMP_STT_MODEL_SCRIPT}"
+			--output "$<TARGET_FILE_DIR:omp-cpp-shell>/models/stt"
+		DEPENDS "${OMP_STT_MODEL_SCRIPT}"
+		COMMENT "Preparing bundled offline STT model and runtime"
+		VERBATIM
+		USES_TERMINAL
+	)
+	add_dependencies(omp_bundled_stt_model omp-cpp-shell)
+endif()
+
 if(MSVC)
 	foreach(target omp_shell_base omp_shell_runtime omp-cpp-shell)
 		target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc /utf-8 /Zc:__cplusplus)
@@ -157,3 +173,6 @@ if(BUILD_TESTING AND OMP_CPP_SHELL_BUILD_TESTS)
 endif()
 
 install(TARGETS omp-cpp-shell RUNTIME DESTINATION .)
+if(OMP_CPP_SHELL_BUNDLE_STT_MODEL)
+	install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/models/stt/" DESTINATION models/stt)
+endif()

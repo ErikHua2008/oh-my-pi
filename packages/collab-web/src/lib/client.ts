@@ -11,6 +11,9 @@
 import type {
 	AgentSnapshot,
 	AssistantMessage,
+	ChatSearchKind,
+	ChatSearchResult,
+	ChatSearchRole,
 	CollabUiRequest,
 	CollabUiResponseValue,
 	HostFrame,
@@ -20,6 +23,7 @@ import type {
 	SessionEntry,
 	SessionHeader,
 	SessionState,
+	SpeechInputSnapshot,
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 	WireModel,
@@ -74,6 +78,8 @@ export interface GuestSnapshot {
 	historyRemaining: number;
 	/** True while one older-history page is in flight. */
 	historyLoading: boolean;
+	/** Host-side local microphone/STT state for the desktop composer. */
+	speech: SpeechInputSnapshot;
 	/** Capped at 50, newest last. */
 	notices: readonly Notice[];
 }
@@ -122,10 +128,27 @@ interface PendingMediaImport {
 interface PendingHistory {
 	reqId: number;
 	timer: Timer;
+	promise: Promise<boolean>;
+	resolve: (loaded: boolean) => void;
+}
+
+interface PendingChatSearch {
+	resolve: (result: ChatSearchResponse) => void;
+	reject: (error: Error) => void;
+	timer: Timer;
+	signal: AbortSignal | undefined;
+	onAbort: (() => void) | undefined;
+}
+
+export interface ChatSearchResponse {
+	results: readonly ChatSearchResult[];
+	total: number;
+	truncated: boolean;
 }
 
 const IMAGE_TIMEOUT_MS = 15_000;
 const MEDIA_IMPORT_TIMEOUT_MS = 30_000;
+const CHAT_SEARCH_TIMEOUT_MS = 10_000;
 
 export class GuestClient {
 	readonly #socket: CollabSocket;
@@ -167,6 +190,8 @@ export class GuestClient {
 	#modelListRequested = false;
 	#historyRemaining = 0;
 	#historyLoading = false;
+	#speech: SpeechInputSnapshot = { state: "idle", text: "" };
+	#pendingChatSearch = new Map<number, PendingChatSearch>();
 	#notices: readonly Notice[] = [];
 	#snapshot: GuestSnapshot;
 
@@ -253,21 +278,82 @@ export class GuestClient {
 	}
 
 	/** Request one page immediately before the oldest entry currently held. */
-	loadEarlierHistory(limit = DEFAULT_HISTORY_PAGE): void {
+	loadEarlierHistory(limit = DEFAULT_HISTORY_PAGE): Promise<boolean> {
 		const beforeId = this.#entries[0]?.id;
-		if (this.#phase !== "live" || this.#historyLoading || this.#historyRemaining <= 0 || beforeId === undefined)
-			return;
+		if (this.#phase !== "live") return Promise.resolve(false);
+		if (this.#historyLoading) return this.#pendingHistory?.promise ?? Promise.resolve(false);
+		if (this.#historyRemaining <= 0 || beforeId === undefined) return Promise.resolve(false);
 		const reqId = ++this.#reqSeq;
+		const { promise, resolve } = Promise.withResolvers<boolean>();
 		this.#historyLoading = true;
 		const timer = setTimeout(() => {
 			if (this.#pendingHistory?.reqId !== reqId) return;
-			this.#pendingHistory = null;
-			this.#historyLoading = false;
+			this.#clearPendingHistory(false);
 			this.#pushNotice("warning", "older history request timed out");
 			this.#commit();
 		}, HISTORY_TIMEOUT_MS);
-		this.#pendingHistory = { reqId, timer };
+		this.#pendingHistory = { reqId, timer, promise, resolve };
 		this.#socket.send({ t: "fetch-history", reqId, beforeId, limit });
+		this.#commit();
+		return promise;
+	}
+
+	/** Load older pages only after a user activates a search hit outside the current tail. */
+	async ensureChatEntryLoaded(entryId: string): Promise<boolean> {
+		if (this.#entries.some(entry => entry.id === entryId)) return true;
+		let previousRemaining = this.#historyRemaining;
+		while (this.#historyRemaining > 0) {
+			if (!(await this.loadEarlierHistory(500))) return false;
+			if (this.#entries.some(entry => entry.id === entryId)) return true;
+			if (this.#historyRemaining >= previousRemaining) return false;
+			previousRemaining = this.#historyRemaining;
+		}
+		return false;
+	}
+
+	searchChat(
+		query: string,
+		kind: ChatSearchKind,
+		role: ChatSearchRole,
+		date?: string,
+		limit = 100,
+		signal?: AbortSignal,
+	): Promise<ChatSearchResponse> {
+		if (this.#phase !== "live") return Promise.reject(new Error("当前无法搜索聊天记录"));
+		if (signal?.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+		const reqId = ++this.#reqSeq;
+		const { promise, resolve, reject } = Promise.withResolvers<ChatSearchResponse>();
+		const timer = setTimeout(() => {
+			this.#takePendingChatSearch(reqId)?.reject(new Error("搜索聊天记录超时"));
+		}, CHAT_SEARCH_TIMEOUT_MS);
+		const onAbort = signal
+			? () => {
+					this.#takePendingChatSearch(reqId)?.reject(new DOMException("The operation was aborted.", "AbortError"));
+				}
+			: undefined;
+		this.#pendingChatSearch.set(reqId, { resolve, reject, timer, signal, onAbort });
+		if (signal && onAbort) signal.addEventListener("abort", onAbort, { once: true });
+		this.#socket.send({ t: "chat-search", reqId, query, kind, role, date, limit });
+		return promise;
+	}
+
+	startSpeechInput(): void {
+		this.#speech = { state: "preparing", text: "", status: "正在准备中文语音识别…" };
+		this.#socket.send({ t: "speech-input", action: "start" });
+		this.#commit();
+	}
+
+	stopSpeechInput(): void {
+		if (this.#speech.state === "idle") return;
+		this.#speech = { ...this.#speech, state: "transcribing", status: "正在整理识别结果…" };
+		this.#socket.send({ t: "speech-input", action: "stop" });
+		this.#commit();
+	}
+
+	cancelSpeechInput(): void {
+		if (this.#speech.state === "idle") return;
+		this.#socket.send({ t: "speech-input", action: "cancel" });
+		this.#speech = { state: "idle", text: "", final: true };
 		this.#commit();
 	}
 
@@ -395,6 +481,10 @@ export class GuestClient {
 			pending.reject(new Error("session ended before the image was imported"));
 		}
 		this.#pendingMediaImports.clear();
+		for (const reqId of [...this.#pendingChatSearch.keys()]) {
+			this.#takePendingChatSearch(reqId)?.reject(new Error("会话已结束"));
+		}
+		this.#speech = { state: "idle", text: "" };
 		this.#imageRequests.clear();
 		this.#imageCache.clear();
 		this.#clearUiRequests();
@@ -424,12 +514,22 @@ export class GuestClient {
 		}
 	}
 
-	#clearPendingHistory(): void {
+	#clearPendingHistory(loaded = false): void {
 		if (this.#pendingHistory !== null) {
 			clearTimeout(this.#pendingHistory.timer);
+			this.#pendingHistory.resolve(loaded);
 			this.#pendingHistory = null;
 		}
 		this.#historyLoading = false;
+	}
+
+	#takePendingChatSearch(reqId: number): PendingChatSearch | undefined {
+		const pending = this.#pendingChatSearch.get(reqId);
+		if (!pending) return undefined;
+		this.#pendingChatSearch.delete(reqId);
+		clearTimeout(pending.timer);
+		if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
+		return pending;
 	}
 
 	/** Surfaces apply failures instead of letting the socket's recv chain swallow them. */
@@ -466,6 +566,7 @@ export class GuestClient {
 				this.#readOnly = frame.readOnly === true;
 				this.#clearPendingHistory();
 				this.#historyRemaining = Math.max(0, frame.historyRemaining ?? 0);
+				this.#speech = { state: "idle", text: "" };
 				this.#clearUiRequests();
 				this.#welcomed = true;
 				this.#clearWelcomeTimer();
@@ -561,8 +662,8 @@ export class GuestClient {
 			}
 			case "history": {
 				if (this.#pendingHistory?.reqId !== frame.reqId) return;
-				this.#clearPendingHistory();
 				if (frame.error !== undefined) {
+					this.#clearPendingHistory(false);
 					this.#pushNotice("error", frame.error);
 					break;
 				}
@@ -570,8 +671,26 @@ export class GuestClient {
 				const older = frame.entries.filter(entry => !existingIds.has(entry.id));
 				this.#entries = [...older, ...this.#entries];
 				this.#historyRemaining = Math.max(0, frame.remaining);
+				this.#clearPendingHistory(true);
 				break;
 			}
+			case "chat-search-results": {
+				const pending = this.#takePendingChatSearch(frame.reqId);
+				if (!pending) return;
+				if (frame.error !== undefined) pending.reject(new Error(frame.error));
+				else pending.resolve({ results: frame.results, total: frame.total, truncated: frame.truncated });
+				return;
+			}
+			case "speech-input-state":
+				this.#speech = {
+					state: frame.state,
+					text: frame.text,
+					status: frame.status,
+					error: frame.error,
+					final: frame.final,
+				};
+				if (frame.error) this.#pushNotice("error", frame.error);
+				break;
 			case "image": {
 				const pending = this.#pendingImages.get(frame.reqId);
 				if (!pending) return;
@@ -744,6 +863,7 @@ export class GuestClient {
 			models: this.#models,
 			historyRemaining: this.#historyRemaining,
 			historyLoading: this.#historyLoading,
+			speech: this.#speech,
 			notices: this.#notices,
 		};
 	}

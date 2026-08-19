@@ -145,6 +145,26 @@
 	opacity: 0.42;
 }
 
+.sh-composer-tools .sh-composer-mic-on {
+	position: relative;
+	color: var(--err);
+	background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+
+.sh-composer-tools .sh-composer-mic-on::after {
+	position: absolute;
+	width: 5px;
+	height: 5px;
+	margin: -21px -22px 0 0;
+	border-radius: 50%;
+	background: var(--err);
+	content: "";
+}
+
+.sh-composer-input:read-only:not(:disabled) {
+	cursor: default;
+}
+
 .sh-composer-tools-label {
 	margin-left: 5px;
 	font-size: 10px;

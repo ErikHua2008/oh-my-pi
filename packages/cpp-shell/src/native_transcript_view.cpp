@@ -47,11 +47,13 @@ constexpr UINT_PTR kScrollbarHideTimer = 1;
 constexpr UINT_PTR kMessageCopyFeedbackTimer = 2;
 constexpr UINT_PTR kMediaRetryTimer = 3;
 constexpr UINT_PTR kFileActionFeedbackTimer = 4;
+constexpr UINT_PTR kSearchHighlightTimer = 5;
 constexpr UINT kScrollbarHideDelayMs = 1'100;
 constexpr UINT kMessageCopyFeedbackDelayMs = 1'200;
 constexpr UINT kMediaFailureRetryDelayMs = 2'000;
 constexpr UINT kMediaRequestTimeoutMs = 5'000;
 constexpr UINT kFileActionFeedbackDelayMs = 2'200;
+constexpr UINT kSearchHighlightDelayMs = 3'000;
 constexpr std::uint8_t kMaximumMediaRequestAttempts = 3;
 constexpr UINT kContextCopy = 1;
 constexpr UINT kContextSelectAll = 2;
@@ -394,6 +396,7 @@ void NativeTranscriptView::Destroy() {
 		KillTimer(window_, kMessageCopyFeedbackTimer);
 		KillTimer(window_, kMediaRetryTimer);
 		KillTimer(window_, kFileActionFeedbackTimer);
+		KillTimer(window_, kSearchHighlightTimer);
 	}
 	DiscardDeviceResources();
 	layout_cache_.clear();
@@ -432,8 +435,8 @@ void NativeTranscriptView::SetBounds(const RECT& bounds) {
 	}
 }
 
-void NativeTranscriptView::SetOcclusion(std::optional<RECT> occlusion) {
-	occlusion_ = occlusion;
+void NativeTranscriptView::SetOcclusions(std::vector<RECT> occlusions) {
+	occlusions_ = std::move(occlusions);
 	ApplyOcclusion();
 }
 
@@ -443,30 +446,37 @@ void NativeTranscriptView::ApplyOcclusion() {
 	}
 	const LONG width = std::max(0L, bounds_.right - bounds_.left);
 	const LONG height = std::max(0L, bounds_.bottom - bounds_.top);
-	if (!occlusion_ || width == 0 || height == 0) {
-		SetWindowRgn(window_, nullptr, TRUE);
-		return;
-	}
-	const RECT clipped{
-		std::clamp(occlusion_->left - bounds_.left, 0L, width),
-		std::clamp(occlusion_->top - bounds_.top, 0L, height),
-		std::clamp(occlusion_->right - bounds_.left, 0L, width),
-		std::clamp(occlusion_->bottom - bounds_.top, 0L, height),
-	};
-	if (clipped.right <= clipped.left || clipped.bottom <= clipped.top) {
+	if (occlusions_.empty() || width == 0 || height == 0) {
 		SetWindowRgn(window_, nullptr, TRUE);
 		return;
 	}
 	HRGN visible_region = CreateRectRgn(0, 0, width, height);
-	HRGN occluded_region = CreateRectRgn(clipped.left, clipped.top, clipped.right, clipped.bottom);
-	if (visible_region == nullptr || occluded_region == nullptr ||
-		CombineRgn(visible_region, visible_region, occluded_region, RGN_DIFF) == ERROR) {
-		if (visible_region != nullptr) DeleteObject(visible_region);
-		if (occluded_region != nullptr) DeleteObject(occluded_region);
+	if (visible_region == nullptr) {
 		SetWindowRgn(window_, nullptr, TRUE);
 		return;
 	}
-	DeleteObject(occluded_region);
+	bool failed = false;
+	for (const RECT& occlusion : occlusions_) {
+		const RECT clipped{
+			std::clamp(occlusion.left - bounds_.left, 0L, width),
+			std::clamp(occlusion.top - bounds_.top, 0L, height),
+			std::clamp(occlusion.right - bounds_.left, 0L, width),
+			std::clamp(occlusion.bottom - bounds_.top, 0L, height),
+		};
+		if (clipped.right <= clipped.left || clipped.bottom <= clipped.top) continue;
+		HRGN occluded_region = CreateRectRgn(clipped.left, clipped.top, clipped.right, clipped.bottom);
+		if (occluded_region == nullptr || CombineRgn(visible_region, visible_region, occluded_region, RGN_DIFF) == ERROR) {
+			if (occluded_region != nullptr) DeleteObject(occluded_region);
+			failed = true;
+			break;
+		}
+		DeleteObject(occluded_region);
+	}
+	if (failed) {
+		DeleteObject(visible_region);
+		SetWindowRgn(window_, nullptr, TRUE);
+		return;
+	}
 	if (SetWindowRgn(window_, visible_region, TRUE) == 0) {
 		DeleteObject(visible_region);
 	}
@@ -538,9 +548,10 @@ void NativeTranscriptView::Clear() {
 	file_action_feedback_.reset();
 	file_action_feedback_text_.clear();
 	copied_row_id_.clear();
+	search_highlight_row_id_.clear();
 	mouse_tracking_ = false;
 	stick_to_bottom_ = true;
-	occlusion_.reset();
+	occlusions_.clear();
 	ApplyOcclusion();
 	UpdateScrollInfo();
 	if (window_ != nullptr) {
@@ -579,10 +590,12 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 		file_action_feedback_.reset();
 		file_action_feedback_text_.clear();
 		copied_row_id_.clear();
+		search_highlight_row_id_.clear();
 		if (window_ != nullptr) {
 			KillTimer(window_, kScrollbarHideTimer);
 			KillTimer(window_, kMessageCopyFeedbackTimer);
 			KillTimer(window_, kFileActionFeedbackTimer);
+			KillTimer(window_, kSearchHighlightTimer);
 		}
 	}
 	model_.ReplaceSnapshot(std::move(rows));
@@ -631,6 +644,10 @@ void NativeTranscriptView::ReplaceSnapshot(std::vector<NativeTranscriptRow> rows
 	if (!copied_row_id_.empty() && !model_.IndexOf(copied_row_id_)) {
 		copied_row_id_.clear();
 		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
+	}
+	if (!search_highlight_row_id_.empty() && !model_.IndexOf(search_highlight_row_id_)) {
+		search_highlight_row_id_.clear();
+		if (window_ != nullptr) KillTimer(window_, kSearchHighlightTimer);
 	}
 	// A replacement snapshot may retain stable row ids while changing their
 	// text (for example after history reconciliation or an imported transcript
@@ -691,6 +708,10 @@ void NativeTranscriptView::Remove(std::string_view id) {
 		copied_row_id_.clear();
 		if (window_ != nullptr) KillTimer(window_, kMessageCopyFeedbackTimer);
 	}
+	if (search_highlight_row_id_ == id) {
+		search_highlight_row_id_.clear();
+		if (window_ != nullptr) KillTimer(window_, kSearchHighlightTimer);
+	}
 	layout_cache_.erase(std::string(id));
 	expanded_rows_.erase(std::string(id));
 	collapsed_rows_.erase(std::string(id));
@@ -714,6 +735,21 @@ void NativeTranscriptView::Remove(std::string_view id) {
 	if (window_ != nullptr) {
 		InvalidateRect(window_, nullptr, FALSE);
 	}
+}
+
+bool NativeTranscriptView::Reveal(std::string_view id) {
+	const auto index = model_.IndexOf(id);
+	if (!index) return false;
+	stick_to_bottom_ = false;
+	const std::int64_t target = model_.RowTop(*index) - ClientHeightDip() / 3;
+	ScrollTo(target, false);
+	search_highlight_row_id_ = id;
+	if (window_ != nullptr) {
+		KillTimer(window_, kSearchHighlightTimer);
+		SetTimer(window_, kSearchHighlightTimer, kSearchHighlightDelayMs, nullptr);
+		InvalidateRect(window_, nullptr, FALSE);
+	}
+	return true;
 }
 
 void NativeTranscriptView::SetHistoryState(std::size_t remaining, bool loading) {
@@ -859,6 +895,14 @@ LRESULT NativeTranscriptView::HandleMessage(UINT message, WPARAM wparam, LPARAM 
 			if (file_action_feedback_) {
 				file_action_feedback_.reset();
 				file_action_feedback_text_.clear();
+				InvalidateRect(window_, nullptr, FALSE);
+			}
+			return 0;
+		}
+		if (wparam == kSearchHighlightTimer) {
+			KillTimer(window_, kSearchHighlightTimer);
+			if (!search_highlight_row_id_.empty()) {
+				search_highlight_row_id_.clear();
 				InvalidateRect(window_, nullptr, FALSE);
 			}
 			return 0;
@@ -1478,6 +1522,13 @@ void NativeTranscriptView::DrawRow(std::size_t index, float viewport_width) {
 	const float row_height = static_cast<float>(model_.RowAt(index).height);
 	const float content_left = message ? bubble_layout.content_left : horizontal_padding;
 	const float content_width = message ? bubble_layout.content_width : available_width;
+	if (search_highlight_row_id_ == row.id && selection_brush_ != nullptr) {
+		const D2D1_ROUNDED_RECT highlight = D2D1::RoundedRect(
+			D2D1::RectF(6.0F, row_top + 2.0F, std::max(6.0F, viewport_width - 10.0F), row_top + row_height - 2.0F),
+			8.0F,
+			8.0F);
+		render_target_->FillRoundedRectangle(highlight, selection_brush_.Get());
+	}
 
 	if (message) {
 		const D2D1_ROUNDED_RECT bubble = D2D1::RoundedRect(

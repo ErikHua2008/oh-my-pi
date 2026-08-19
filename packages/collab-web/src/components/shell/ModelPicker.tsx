@@ -9,7 +9,7 @@ export interface ModelPickerProps {
 	snapshot: GuestSnapshot;
 	onModelList(): void;
 	onModelChange(provider: string, id: string): void;
-	desktop?: Pick<DesktopBridge, "setNativeTranscriptOcclusion">;
+	desktop?: Pick<DesktopBridge, "setNativeTranscriptOcclusions">;
 	disabled?: boolean;
 }
 

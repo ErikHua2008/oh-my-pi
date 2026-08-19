@@ -59,21 +59,25 @@ export interface TranscriptProps {
 	onLoadEarlier?: () => void;
 	/** Whether the active session can accept local file references. */
 	fileDropEnabled?: boolean;
+	/** Stable search hit to reveal; revision lets repeated clicks on the same row retrigger. */
+	revealTarget?: { entryId: string; rowId: string; revision: number } | null;
 }
 
 function Row({
 	kind,
 	speaker,
 	title,
+	rowId,
 	children,
 }: {
 	kind: "user" | "assistant" | "custom" | "marker";
 	speaker: string;
 	title?: string;
+	rowId?: string;
 	children: ReactNode;
 }): ReactNode {
 	return (
-		<div className={`tr-row tr-row--${kind}`} title={title}>
+		<div className={`tr-row tr-row--${kind}`} title={title} data-transcript-row-id={rowId}>
 			<span className="tr-speaker">{speaker}</span>
 			<div className="tr-body">{children}</div>
 		</div>
@@ -806,7 +810,7 @@ const EntryRow = memo(function EntryRow({
 			switch (msg.role) {
 				case "user":
 					return (
-						<Row kind="user" speaker="host" title={entry.timestamp}>
+						<Row kind="user" speaker="host" title={entry.timestamp} rowId={entry.id}>
 							<UserMessage
 								content={msg.content}
 								localFileAvailability={localFileAvailability}
@@ -829,7 +833,7 @@ const EntryRow = memo(function EntryRow({
 				const details = parseCollabPromptDetails(entry.details);
 				const content = details.displayText ?? entry.content;
 				return (
-					<Row kind="user" speaker={details.from} title={entry.timestamp}>
+					<Row kind="user" speaker={details.from} title={entry.timestamp} rowId={entry.id}>
 						<UserMessage
 							content={content}
 							localFiles={details.localFiles}
@@ -891,6 +895,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		historyLoading = false,
 		onLoadEarlier,
 		fileDropEnabled = false,
+		revealTarget,
 	} = props;
 	const theme = useSystemTheme();
 	const presentedStream = usePresentedAssistantStream(stream, streamDone, sessionId);
@@ -949,6 +954,25 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			void desktop.removeNativeTranscript(nativeStreamRowId(sessionId));
 		}
 	}, [desktop, nativeEnabled, presentedStream, sessionId, streamDone, working]);
+
+	useEffect(() => {
+		if (!nativeEnabled || revealTarget === null || revealTarget === undefined) return;
+		let cancelled = false;
+		let timer: number | undefined;
+		let attempts = 0;
+		const reveal = (): void => {
+			attempts++;
+			void desktop.revealNativeTranscript(revealTarget.rowId).then(revealed => {
+				if (cancelled || revealed || attempts >= 4) return;
+				timer = window.setTimeout(reveal, 60 * attempts);
+			});
+		};
+		reveal();
+		return () => {
+			cancelled = true;
+			if (timer !== undefined) window.clearTimeout(timer);
+		};
+	}, [desktop, nativeEnabled, revealTarget]);
 
 	useEffect(() => {
 		if (!nativeEligible) return;
@@ -1061,6 +1085,27 @@ export function Transcript(props: TranscriptProps): ReactNode {
 
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const lockRef = useRef(true);
+
+	useEffect(() => {
+		if (revealTarget === null || revealTarget === undefined) return;
+		const index = entries.findIndex(entry => entry.id === revealTarget.entryId);
+		if (index >= 0) setVisibleLimit(limit => Math.max(limit, entries.length - index));
+	}, [entries, revealTarget]);
+
+	useLayoutEffect(() => {
+		if (nativeSurfaceVisible || revealTarget === null || revealTarget === undefined) return;
+		const root = rootRef.current;
+		if (root === null) return;
+		const row = [...root.querySelectorAll<HTMLElement>("[data-transcript-row-id]")].find(
+			candidate => candidate.dataset.transcriptRowId === revealTarget.rowId,
+		);
+		if (!row) return;
+		lockRef.current = false;
+		row.scrollIntoView({ block: "center" });
+		row.classList.add("tr-search-hit");
+		const timer = window.setTimeout(() => row.classList.remove("tr-search-hit"), 3_000);
+		return () => window.clearTimeout(timer);
+	}, [nativeSurfaceVisible, revealTarget, visibleStart]);
 
 	useLayoutEffect(() => {
 		const element = rootRef.current;
@@ -1181,7 +1226,13 @@ export function Transcript(props: TranscriptProps): ReactNode {
 								host={host}
 							/>
 						) : (
-							<Row key={item.id} kind="assistant" speaker="agent" title={item.finalEntry?.timestamp}>
+							<Row
+								key={item.id}
+								kind="assistant"
+								speaker="agent"
+								title={item.finalEntry?.timestamp}
+								rowId={item.finalEntry?.id}
+							>
 								<AssistantTurnBody
 									turn={item}
 									results={results}

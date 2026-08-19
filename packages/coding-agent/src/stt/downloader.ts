@@ -3,7 +3,8 @@ import * as path from "node:path";
 import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
 import { sttClient } from "./asr-client";
 import type { SttProgressStatus } from "./asr-protocol";
-import { resolveSttModelSpec } from "./models";
+import { getBundledSttModelsDir } from "./model-paths";
+import { resolveSttModelSpec, type SttModelSpec } from "./models";
 
 export interface DownloadProgress {
 	stage: string;
@@ -45,9 +46,8 @@ export interface SttDownloadProgress {
  * sherpa-onnx tiers every model file (encoder/decoder/joiner + tokens) must be
  * present (`.part` sidecars from an interrupted fetch are ignored).
  */
-export async function isSttModelCached(key: string): Promise<boolean> {
-	const spec = resolveSttModelSpec(key);
-	const repoDir = path.join(getTinyModelsCacheDir(), spec.repo);
+async function isSttModelCompleteAt(spec: SttModelSpec, modelRoot: string): Promise<boolean> {
+	const repoDir = path.join(modelRoot, spec.repo);
 	if (spec.engine === "sherpa") {
 		try {
 			const root = new Set(await fs.readdir(repoDir));
@@ -74,6 +74,13 @@ export async function isSttModelCached(key: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+
+export async function isSttModelCached(key: string): Promise<boolean> {
+	const spec = resolveSttModelSpec(key);
+	const bundledRoot = getBundledSttModelsDir();
+	if (bundledRoot && (await isSttModelCompleteAt(spec, bundledRoot))) return true;
+	return isSttModelCompleteAt(spec, getTinyModelsCacheDir());
 }
 
 /**

@@ -498,6 +498,120 @@ describe("GuestClient frame apply", () => {
 		expect(client.getSnapshot().uiRequest).toBeNull();
 	});
 
+	it("round-trips compact chat-search results", async () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const client = liveClient();
+			const result = client.searchChat("report", "all", "all");
+			const request = sent[0];
+			if (request?.t !== "chat-search") throw new Error("expected chat-search frame");
+			expect(request.query).toBe("report");
+			client.applyFrameForTest({
+				t: "chat-search-results",
+				reqId: request.reqId,
+				results: [
+					{
+						entryId: "e1",
+						rowId: "e1",
+						kind: "text",
+						role: "assistant",
+						timestamp: "2026-08-18T12:00:00.000Z",
+						snippet: "report ready",
+						ordinal: 7,
+					},
+				],
+				total: 1,
+				truncated: false,
+			});
+			await expect(result).resolves.toEqual({
+				results: [expect.objectContaining({ entryId: "e1", snippet: "report ready" })],
+				total: 1,
+				truncated: false,
+			});
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
+	it("cancels a superseded chat search without waiting for its timeout", async () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const client = liveClient();
+			const abort = new AbortController();
+			const result = client.searchChat("old query", "all", "all", undefined, 100, abort.signal);
+			const rejected = result.catch((error: unknown) => error);
+
+			abort.abort();
+
+			expect(await rejected).toMatchObject({ name: "AbortError" });
+			const request = sent[0];
+			if (request?.t !== "chat-search") throw new Error("expected chat-search frame");
+			// A late reply to the cancelled request is harmless and cannot settle a
+			// newer panel query.
+			client.applyFrameForTest({
+				t: "chat-search-results",
+				reqId: request.reqId,
+				results: [],
+				total: 0,
+				truncated: false,
+			});
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
+	it("rejects chat search immediately when the session is not live", async () => {
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation(() => {});
+		try {
+			const client = new GuestClient(LINK, "tester");
+			await expect(client.searchChat("report", "all", "all")).rejects.toThrow("当前无法搜索聊天记录");
+			expect(sendSpy).not.toHaveBeenCalled();
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
+	it("tracks incremental desktop speech input without sending the recognized text", () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const client = liveClient();
+			client.startSpeechInput();
+			expect(sent[0]).toEqual({ t: "speech-input", action: "start" });
+			expect(client.getSnapshot().speech.state).toBe("preparing");
+
+			client.applyFrameForTest({
+				t: "speech-input-state",
+				state: "recording",
+				text: "你好",
+				status: "正在听…",
+			});
+			expect(client.getSnapshot().speech.text).toBe("你好");
+			client.stopSpeechInput();
+			expect(sent[1]).toEqual({ t: "speech-input", action: "stop" });
+
+			client.applyFrameForTest({ t: "speech-input-state", state: "idle", text: "你好 OMP", final: true });
+			expect(client.getSnapshot().speech).toEqual({
+				state: "idle",
+				text: "你好 OMP",
+				status: undefined,
+				error: undefined,
+				final: true,
+			});
+			expect(sent.some(frame => frame.t === "prompt")).toBe(false);
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
 	it("snapshot reference is stable between frames and replaced per frame", () => {
 		const client = liveClient();
 		const before = client.getSnapshot();

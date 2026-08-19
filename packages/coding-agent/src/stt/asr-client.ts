@@ -52,12 +52,15 @@ export interface SttStreamOptions {
 	onPartial?: (text: string) => void;
 	/** A finalized segment, emitted once when the endpointer commits it. */
 	onSegment?: (text: string, index: number) => void;
+	/** Fatal worker/model failure. Fires immediately, even before the user stops recording. */
+	onError?: (error: Error) => void;
 }
 
 interface StreamState {
 	modelKey: SttModelKey;
 	onPartial: ((text: string) => void) | undefined;
 	onSegment: ((text: string, index: number) => void) | undefined;
+	onError: ((error: Error) => void) | undefined;
 	resolve: (text: string) => void;
 	reject: (error: Error) => void;
 	/** Run `apply` (resolve/reject) once, then unregister the stream. */
@@ -200,6 +203,7 @@ export class SttClient {
 			modelKey,
 			onPartial: options.onPartial,
 			onSegment: options.onSegment,
+			onError: options.onError,
 			resolve,
 			reject,
 			finish,
@@ -341,8 +345,12 @@ export class SttClient {
 			if (message.type === "error") {
 				const stream = this.#streams.get(message.id);
 				if (stream) {
+					const error = new Error(message.error);
 					this.#emitProgress({ modelKey: stream.modelKey, status: "error" });
-					stream.finish(() => stream.reject(new Error(message.error)));
+					stream.finish(() => {
+						stream.reject(error);
+						this.#notifyStreamError(stream, error);
+					});
 				}
 			}
 			return;
@@ -369,7 +377,20 @@ export class SttClient {
 	#failStreams(error: Error): void {
 		for (const stream of [...this.#streams.values()]) {
 			this.#emitProgress({ modelKey: stream.modelKey, status: "error" });
-			stream.finish(() => stream.reject(error));
+			stream.finish(() => {
+				stream.reject(error);
+				this.#notifyStreamError(stream, error);
+			});
+		}
+	}
+
+	#notifyStreamError(stream: StreamState, error: Error): void {
+		try {
+			stream.onError?.(error);
+		} catch (cause) {
+			logger.warn("stt: stream error listener failed", {
+				error: cause instanceof Error ? cause.message : String(cause),
+			});
 		}
 	}
 

@@ -74,7 +74,7 @@ export const STT_MODELS = [
 		englishOnly: false,
 		label: "Balanced (Whisper small)",
 		description: "Whisper small, multilingual. More accurate than Fast, still light on CPU/RAM.",
-		sizeHint: "~190 MB",
+		sizeHint: "~242 MB",
 	},
 	{
 		key: "turbo",

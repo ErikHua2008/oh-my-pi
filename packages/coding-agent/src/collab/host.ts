@@ -16,6 +16,8 @@ import type { ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
+	ChatSearchKind,
+	ChatSearchRole,
 	CollabUiRequest,
 	CollabUiRequestDraft,
 	CollabUiResponseValue,
@@ -30,9 +32,11 @@ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
+import { STTController, type SttEditor, type SttState, type SttToggleOptions } from "../stt";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
 import { resizeImage } from "../utils/image-resize";
+import { searchChatEntries } from "./chat-search";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
 import type { CollabHostContext } from "./host-context";
@@ -231,6 +235,30 @@ export class CollabHost {
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
+	readonly #speechController = new STTController();
+	#speechPeer: number | null = null;
+	#speechCommitted = "";
+	#speechVolatile = "";
+	#speechStatus = "";
+	readonly #speechEditor: SttEditor = {
+		insertText: text => {
+			this.#speechCommitted += text;
+		},
+		setVolatileText: text => {
+			this.#speechVolatile = text;
+		},
+		clearVolatileText: () => {
+			this.#speechVolatile = "";
+		},
+		commitVolatileText: text => {
+			this.#speechCommitted += text;
+			this.#speechVolatile = "";
+		},
+		submit: () => {},
+		deleteBeforeCursor: count => {
+			this.#speechCommitted = this.#speechCommitted.slice(0, Math.max(0, this.#speechCommitted.length - count));
+		},
+	};
 
 	constructor(ctx: CollabHostContext, options: CollabHostOptions = {}) {
 		this.#ctx = ctx;
@@ -407,6 +435,8 @@ export class CollabHost {
 		this.#pendingUi.clear();
 		for (const pending of this.#pendingManagedImages.values()) clearTimeout(pending.timer);
 		this.#pendingManagedImages.clear();
+		this.#speechController.dispose();
+		this.#speechPeer = null;
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
@@ -457,6 +487,12 @@ export class CollabHost {
 				break;
 			case "fetch-history":
 				this.#handleFetchHistory(frame.reqId, frame.beforeId, frame.limit, fromPeer);
+				break;
+			case "chat-search":
+				this.#handleChatSearch(frame.reqId, frame.query, frame.kind, frame.role, frame.date, frame.limit, fromPeer);
+				break;
+			case "speech-input":
+				void this.#handleSpeechInput(frame.action, fromPeer);
 				break;
 			case "fetch-image":
 				void this.#handleFetchImage(frame.reqId, frame.imageId, frame.variant, fromPeer);
@@ -741,6 +777,11 @@ export class CollabHost {
 
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
+		if (this.#speechPeer === peer) {
+			this.#speechCommitted = "";
+			this.#speechVolatile = "";
+			this.#speechController.cancel(this.#speechOptions(peer));
+		}
 		this.#peers.delete(peer);
 		const prefix = `${peer}:`;
 		for (const [key, pending] of this.#pendingManagedImages) {
@@ -926,6 +967,202 @@ export class CollabHost {
 			start--;
 		}
 		socket.send({ t: "history", reqId, entries: page, remaining: start }, fromPeer);
+	}
+
+	#handleChatSearch(
+		reqId: number,
+		query: unknown,
+		kind: unknown,
+		role: unknown,
+		date: unknown,
+		limit: unknown,
+		fromPeer: number,
+	): void {
+		const socket = this.#socket;
+		if (!socket || !this.#peers.has(fromPeer)) return;
+		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
+			socket.send(
+				{ t: "chat-search-results", reqId, results: [], total: 0, truncated: false, error: "session changed" },
+				fromPeer,
+			);
+			return;
+		}
+		const validKind = kind === "all" || kind === "text" || kind === "image" || kind === "file" || kind === "link";
+		const validRole = role === "all" || role === "user" || role === "assistant";
+		const validDate = date === undefined || (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date));
+		if (
+			typeof query !== "string" ||
+			!validKind ||
+			!validRole ||
+			!validDate ||
+			typeof limit !== "number" ||
+			!Number.isSafeInteger(limit)
+		) {
+			socket.send(
+				{
+					t: "chat-search-results",
+					reqId,
+					results: [],
+					total: 0,
+					truncated: false,
+					error: "invalid search request",
+				},
+				fromPeer,
+			);
+			return;
+		}
+		const response = searchChatEntries(this.#ctx.sessionManager.getEntries(), {
+			query,
+			kind: kind as ChatSearchKind,
+			role: role as ChatSearchRole,
+			date: date as string | undefined,
+			limit,
+		});
+		socket.send({ t: "chat-search-results", reqId, ...response }, fromPeer);
+	}
+
+	#speechText(): string {
+		return `${this.#speechCommitted}${this.#speechVolatile}`;
+	}
+
+	#localizedSpeechStatus(message: string): string {
+		if (message === "No speech detected.") return "未检测到语音。";
+		if (message === "Transcription in progress...") return "正在整理识别结果…";
+		const progress = /\((\d{1,3})%\)$/.exec(message);
+		if (message.startsWith("Downloading speech model")) {
+			return progress ? `正在下载中文语音识别模型… ${progress[1]}%` : "正在下载中文语音识别模型…";
+		}
+		return message;
+	}
+
+	#localizedSpeechError(message: string): string {
+		if (/0x80070490|GetDefaultAudioEndpoint.*failed/iu.test(message)) {
+			return "未检测到可用的麦克风，请连接或启用麦克风后重试。";
+		}
+		if (/0x80070005|access denied|permission denied/iu.test(message)) {
+			return "无法访问麦克风，请在 Windows 设置中允许 Grimoire Router App 使用麦克风。";
+		}
+		if (/0x8889000a|device.*in use/iu.test(message)) {
+			return "麦克风正被其他应用占用，请关闭占用麦克风的应用后重试。";
+		}
+		if (/0x88890004|device.*invalidated/iu.test(message)) {
+			return "麦克风已断开或不可用，请重新连接后重试。";
+		}
+		return message;
+	}
+
+	#sendSpeechState(
+		peer: number,
+		state: "idle" | "preparing" | SttState,
+		options: { final?: boolean; error?: string } = {},
+	): void {
+		this.#socket?.send(
+			{
+				t: "speech-input-state",
+				state,
+				text: this.#speechText(),
+				status: this.#speechStatus || undefined,
+				final: options.final,
+				error: options.error,
+			},
+			peer,
+		);
+	}
+
+	#speechOptions(peer: number): SttToggleOptions {
+		return {
+			// The desktop first release intentionally uses multilingual Whisper small
+			// in Chinese mode and never auto-sends recognized text.
+			modelName: "balanced",
+			language: "zh",
+			submitTrigger: "never",
+			showWarning: message => {
+				this.#speechStatus = "";
+				this.#sendSpeechState(peer, "idle", { final: true, error: this.#localizedSpeechError(message) });
+				if (this.#speechPeer === peer) this.#speechPeer = null;
+			},
+			showStatus: message => {
+				this.#speechStatus = this.#localizedSpeechStatus(message);
+				const state = this.#speechController.state === "idle" ? "preparing" : this.#speechController.state;
+				this.#sendSpeechState(peer, state);
+			},
+			onStateChange: state => {
+				if (state === "recording") this.#speechStatus = "正在听…";
+				if (state === "transcribing") this.#speechStatus = "正在整理识别结果…";
+				if (state === "idle") this.#speechStatus = "";
+				this.#sendSpeechState(peer, state, { final: state === "idle" });
+				if (state === "idle" && this.#speechPeer === peer) this.#speechPeer = null;
+			},
+			requestRender: () => {
+				const state = this.#speechController.state === "idle" ? "preparing" : this.#speechController.state;
+				this.#sendSpeechState(peer, state);
+			},
+		};
+	}
+
+	async #handleSpeechInput(action: "start" | "stop" | "cancel", fromPeer: number): Promise<void> {
+		const peer = this.#peers.get(fromPeer);
+		if (!peer?.canWrite) {
+			this.#socket?.send(
+				{
+					t: "speech-input-state",
+					state: "idle",
+					text: "",
+					final: true,
+					error: "当前会话为只读，无法使用语音录入。",
+				},
+				fromPeer,
+			);
+			return;
+		}
+		if (action === "start") {
+			if (this.#speechPeer !== null) {
+				if (this.#speechPeer === fromPeer) {
+					const state = this.#speechController.state === "idle" ? "preparing" : this.#speechController.state;
+					this.#sendSpeechState(fromPeer, state);
+					return;
+				}
+				this.#socket?.send(
+					{
+						t: "speech-input-state",
+						state: "idle",
+						text: "",
+						final: true,
+						error: "麦克风正被另一个窗口使用。",
+					},
+					fromPeer,
+				);
+				return;
+			}
+			if (this.#speechController.state !== "idle") {
+				this.#socket?.send(
+					{
+						t: "speech-input-state",
+						state: "idle",
+						text: "",
+						final: true,
+						error: "麦克风正在结束上一次录入，请稍后重试。",
+					},
+					fromPeer,
+				);
+				return;
+			}
+			this.#speechPeer = fromPeer;
+			this.#speechCommitted = "";
+			this.#speechVolatile = "";
+			this.#speechStatus = "正在准备中文语音识别…";
+			this.#sendSpeechState(fromPeer, "preparing");
+			await this.#speechController.toggle(this.#speechEditor, this.#speechOptions(fromPeer));
+			return;
+		}
+		if (this.#speechPeer !== fromPeer) return;
+		if (action === "cancel") {
+			this.#speechCommitted = "";
+			this.#speechVolatile = "";
+			this.#speechController.cancel(this.#speechOptions(fromPeer));
+			return;
+		}
+		await this.#speechController.toggle(this.#speechEditor, this.#speechOptions(fromPeer));
 	}
 
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {

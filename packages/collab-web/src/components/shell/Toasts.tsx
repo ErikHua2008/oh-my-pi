@@ -1,7 +1,9 @@
 import { CircleAlert, Info, type LucideIcon, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Notice } from "../../lib/client";
+import { desktopBridge } from "../../lib/desktop-bridge";
+import { useNativeTranscriptOcclusion } from "./useNativeTranscriptOcclusion";
 
 const INFO_TTL_MS = 1800;
 const WARNING_TTL_MS = 4000;
@@ -45,6 +47,14 @@ export function Toasts({ notices }: { notices: readonly Notice[] }): ReactNode {
 	const visible = notices.filter(n => !dismissed.has(n.id));
 	const transient = visible.filter(n => n.level !== "error").at(-1);
 	const errors = visible.filter(n => n.level === "error").slice(-MAX_VISIBLE_ERRORS);
+	const transientRef = useRef<HTMLDivElement | null>(null);
+	const errorsRef = useRef<HTMLDivElement | null>(null);
+	// The DirectWrite transcript is a native child HWND above WebView2. CSS
+	// z-index cannot place a Web toast over it, so punch out the exact toast
+	// rectangles while they are visible. The coordinator supports both stacks
+	// and any simultaneously-open menus/search panels.
+	useNativeTranscriptOcclusion(transient !== undefined, transientRef, desktopBridge, transient?.id);
+	useNativeTranscriptOcclusion(errors.length > 0, errorsRef);
 	if (transient == null && errors.length === 0) return null;
 
 	const close = (id: number): void => {
@@ -62,6 +72,7 @@ export function Toasts({ notices }: { notices: readonly Notice[] }): ReactNode {
 			{transient != null && TransientIcon != null && (
 				<div className="sh-toasts-transient" aria-live="polite" aria-relevant="additions">
 					<div
+						ref={transientRef}
 						key={transient.id}
 						className={`sh-toast sh-toast-transient sh-toast-${transient.level}`}
 						role="status"
@@ -72,7 +83,7 @@ export function Toasts({ notices }: { notices: readonly Notice[] }): ReactNode {
 				</div>
 			)}
 			{errors.length > 0 && (
-				<div className="sh-toasts-errors" aria-label="Error notifications" aria-live="assertive">
+				<div ref={errorsRef} className="sh-toasts-errors" aria-label="Error notifications" aria-live="assertive">
 					{errors.map(n => {
 						const Icon = NOTICE_ICON[n.level];
 						return (

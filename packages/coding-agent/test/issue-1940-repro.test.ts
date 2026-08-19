@@ -287,4 +287,30 @@ describe("issue #3939 — stt downloads keep the worker referenced", () => {
 			await client.terminate();
 		}
 	});
+
+	it("notifies an active live stream as soon as its model worker fails", async () => {
+		let streamRequestId = "";
+		let surfaced: Error | undefined;
+		const worker = new FakeSttWorker(message => {
+			if (message.type === "stream_start") streamRequestId = message.id;
+		});
+		const client = new SttClient(() => worker);
+
+		try {
+			const stream = client.startStream("turbo", {
+				onError: error => {
+					surfaced = error;
+				},
+			});
+			expect(streamRequestId).not.toBe("");
+
+			worker.emit({ type: "error", id: streamRequestId, error: "Error: speech model failed" });
+
+			expect(surfaced?.message).toBe("Error: speech model failed");
+			await expect(stream.stop()).rejects.toThrow("speech model failed");
+			expect(worker.unrefCalls).toBe(1);
+		} finally {
+			await client.terminate();
+		}
+	});
 });

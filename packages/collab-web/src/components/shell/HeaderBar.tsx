@@ -1,4 +1,4 @@
-import { ArrowLeft, LogOut, PanelRight, Settings } from "lucide-react";
+import { ArrowLeft, LogOut, PanelRight, Search, Settings } from "lucide-react";
 import type { ReactNode, RefObject } from "react";
 import type { GuestSnapshot } from "../../lib/client";
 import { fmtPercent, shortenPath } from "../../lib/format";
@@ -12,6 +12,8 @@ export interface HeaderBarProps {
 	onLeave(): void;
 	settingsOpen: boolean;
 	onToggleSettings(): void;
+	searchOpen: boolean;
+	onToggleSearch(): void;
 	/** Optional back entry on the header's left (control-mode session view). */
 	onBack?: () => void;
 }
@@ -25,6 +27,8 @@ export function HeaderBar({
 	onLeave,
 	settingsOpen,
 	onToggleSettings,
+	searchOpen,
+	onToggleSearch,
 	onBack,
 }: HeaderBarProps): ReactNode {
 	const { header, state, phase, readOnly } = snapshot;
@@ -94,6 +98,15 @@ export function HeaderBar({
 					</span>
 				)}
 				<span className={`sh-dot sh-dot-${phase}`} title={phase} />
+				<button
+					type="button"
+					className={searchOpen ? "sh-header-bar-action sh-header-bar-action-on" : "sh-header-bar-action"}
+					onClick={onToggleSearch}
+					title="查找聊天记录"
+					aria-label="查找聊天记录"
+				>
+					<Search size={14} />
+				</button>
 				<button
 					type="button"
 					className={settingsOpen ? "sh-header-bar-action sh-header-bar-action-on" : "sh-header-bar-action"}

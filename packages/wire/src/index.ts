@@ -344,6 +344,36 @@ export type CollabUiSelectItem = string | { label: string; description?: string 
 
 export type CollabUiResponseValue = string | undefined;
 
+/** Filters supported by the chat-history search panel. */
+export type ChatSearchKind = "all" | "text" | "image" | "file" | "link";
+export type ChatSearchRole = "all" | "user" | "assistant";
+
+/** One compact hit returned by the host without copying the full transcript entry. */
+export interface ChatSearchResult {
+	entryId: string;
+	/** Native/Web transcript row that should be revealed when the result is activated. */
+	rowId: string;
+	kind: Exclude<ChatSearchKind, "all">;
+	role: Exclude<ChatSearchRole, "all">;
+	timestamp: string;
+	snippet: string;
+	/** Zero-based position in the durable session, used only for progress/diagnostics. */
+	ordinal: number;
+}
+
+export type SpeechInputState = "idle" | "preparing" | "recording" | "transcribing";
+
+/** Incremental host-side microphone/STT state for the desktop composer. */
+export interface SpeechInputSnapshot {
+	state: SpeechInputState;
+	/** Full current utterance (committed segments plus the latest partial). */
+	text: string;
+	status?: string;
+	error?: string;
+	/** True only on the terminal frame whose text should remain in the composer. */
+	final?: boolean;
+}
+
 export type CollabUiRequestDraft =
 	| {
 			kind: "select";
@@ -395,6 +425,19 @@ export type GuestFrame =
 	| { t: "fetch-history"; reqId: number; beforeId: string; limit: number }
 	/** Fetch one image exposed through an `ImageContent.imageId`. */
 	| { t: "fetch-image"; reqId: number; imageId: string; variant: ImageVariant }
+	/** Search the durable current-session transcript without loading all history into the WebView. */
+	| {
+			t: "chat-search";
+			reqId: number;
+			query: string;
+			kind: ChatSearchKind;
+			role: ChatSearchRole;
+			/** Local calendar date (`YYYY-MM-DD`), or omitted for all dates. */
+			date?: string;
+			limit: number;
+	  }
+	/** Start/stop/cancel host-side local microphone transcription. */
+	| { t: "speech-input"; action: "start" | "stop" | "cancel" }
 	/** Persist a pathless clipboard/screenshot image in the host media library. */
 	| {
 			t: "media-import";
@@ -454,6 +497,17 @@ export type HostFrame =
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	/** Targeted page of session entries ordered oldest-to-newest. */
 	| { t: "history"; reqId: number; entries: SessionEntry[]; remaining: number; error?: string }
+	/** Targeted compact chat-search reply. */
+	| {
+			t: "chat-search-results";
+			reqId: number;
+			results: ChatSearchResult[];
+			total: number;
+			truncated: boolean;
+			error?: string;
+	  }
+	/** Targeted microphone/STT lifecycle and incremental transcript. */
+	| ({ t: "speech-input-state" } & SpeechInputSnapshot)
 	/** Targeted lazy-media reply. `error` replies omit `data` and `mimeType`. */
 	| {
 			t: "image";

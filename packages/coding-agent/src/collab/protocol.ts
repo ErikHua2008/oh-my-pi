@@ -10,6 +10,7 @@
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import type {
 	BusChannel,
+	ChatSearchResult,
 	CollabUiRequest,
 	ControlGuestFrame,
 	ControlHostFrame,
@@ -20,6 +21,7 @@ import type {
 	ParsedCollabLink,
 	Participant,
 	SessionState,
+	SpeechInputSnapshot,
 	AgentSnapshot as WireAgentSnapshot,
 	WireModel,
 } from "@oh-my-pi/pi-wire";
@@ -35,6 +37,9 @@ import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry, SessionHeader } from "../session/session-entries";
 
 export type {
+	ChatSearchKind,
+	ChatSearchResult,
+	ChatSearchRole,
 	CollabPromptDetails,
 	CollabUiRequest,
 	CollabUiRequestDraft,
@@ -51,6 +56,8 @@ export type {
 	RelayControlToHost,
 	SessionStatus,
 	SessionSummary,
+	SpeechInputSnapshot,
+	SpeechInputState,
 } from "@oh-my-pi/pi-wire";
 export { COLLAB_PROMPT_MESSAGE_TYPE, COLLAB_PROTO } from "@oh-my-pi/pi-wire";
 export { DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH, ROOM_ID_BYTES };
@@ -119,6 +126,17 @@ export type CollabFrame =
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	/** Targeted older-history page ordered oldest-to-newest. */
 	| { t: "history"; reqId: number; entries: SessionEntry[]; remaining: number; error?: string }
+	/** Targeted compact current-session search reply. */
+	| {
+			t: "chat-search-results";
+			reqId: number;
+			results: ChatSearchResult[];
+			total: number;
+			truncated: boolean;
+			error?: string;
+	  }
+	/** Targeted local microphone/STT lifecycle and incremental transcript. */
+	| ({ t: "speech-input-state" } & SpeechInputSnapshot)
 	/** Targeted lazy-media reply for guests that advertised `mediaRefs`. */
 	| {
 			t: "image";

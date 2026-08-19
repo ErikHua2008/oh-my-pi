@@ -139,6 +139,16 @@ Core has not emitted its local links after ten seconds, the startup page
 reports that it is still waiting instead of appearing frozen. The existing
 timeout and stderr diagnostics remain authoritative.
 
+Release builds also prepare the multilingual q8 Whisper Small speech model in
+`models/stt/onnx-community/whisper-small` beside the executable. The model is
+revision-pinned and its ONNX weights are SHA-256 verified while downloading;
+the matching Transformers/ONNX Windows x64 runtime is stored in
+`models/stt/runtime`. Distributed builds therefore support Chinese speech input
+without a first-use model or runtime download. Set
+`OMP_CPP_SHELL_BUNDLE_STT_MODEL=OFF` only for a deliberately thin developer
+build. `HF_ENDPOINT` may select an internal Hugging Face or ModelScope mirror
+when the official Hub is unavailable.
+
 `OMP_CPP_SHELL_INITIAL_PROJECT` selects a project on startup and is useful for
 repeatable integration tests. The persisted last project is used when the
 override is absent.
