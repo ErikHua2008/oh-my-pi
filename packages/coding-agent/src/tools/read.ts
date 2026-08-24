@@ -12,7 +12,7 @@ import type {
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { type SummaryResult, summarizeCode } from "@oh-my-pi/pi-natives";
 import { type ImageMetadata, isProbablyBinary, logger, prompt, readImageMetadata } from "@oh-my-pi/pi-utils";
-import { LRUCache } from "lru-cache/raw";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	canonicalSnapshotKey,
 	getFileSnapshotStore,

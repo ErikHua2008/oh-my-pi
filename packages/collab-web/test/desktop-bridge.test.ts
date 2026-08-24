@@ -38,6 +38,8 @@ describe("DesktopBridge browser fallback", () => {
 		await expect(
 			desktopBridge.saveSessionPreferences({ pinnedSessions: [], sessionReadThrough: {} }),
 		).resolves.toBeUndefined();
+		expect(await desktopBridge.loadModelVisibility()).toEqual({ showAllModels: true });
+		await expect(desktopBridge.saveModelVisibility({ showAllModels: false })).resolves.toBeUndefined();
 	});
 });
 
@@ -184,6 +186,21 @@ describe("DesktopBridge native transcript capability", () => {
 });
 
 describe("DesktopBridge Tauri capability probe", () => {
+	it("loads and persists the native shell model visibility setting", async () => {
+		const calls: InvokeCall[] = [];
+		const bridge = createDesktopBridge(async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
+			calls.push({ command, args });
+			return { show_all_models: true } as T;
+		});
+
+		expect(await bridge.loadModelVisibility()).toEqual({ showAllModels: true });
+		await bridge.saveModelVisibility({ showAllModels: false });
+		expect(calls).toEqual([
+			{ command: "model_visibility", args: undefined },
+			{ command: "model_visibility_update", args: { showAllModels: false } },
+		]);
+	});
+
 	it("selects original file paths and batches native availability checks without copying bytes", async () => {
 		const calls: InvokeCall[] = [];
 		const invoke: TauriInvoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {

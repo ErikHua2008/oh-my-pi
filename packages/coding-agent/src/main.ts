@@ -31,6 +31,7 @@ import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
+import { registerGrimoireRuntimeProvider } from "./config/grimoire-runtime-provider";
 import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
@@ -1332,6 +1333,7 @@ export async function runRootCommand(
 		process.exit(1);
 	}
 	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
+	await logger.time("modelRegistry:grimoire", registerGrimoireRuntimeProvider, modelRegistry);
 
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));

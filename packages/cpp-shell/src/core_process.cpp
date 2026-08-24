@@ -17,6 +17,7 @@ namespace {
 
 constexpr std::size_t kStderrTailBytes = 4096;
 constexpr wchar_t kNativeGuiHostEnvironment[] = L"OMP_NATIVE_GUI_HOST";
+constexpr wchar_t kGrimoireModeEnvironment[] = L"OMP_GRIMOIRE_MODE";
 constexpr wchar_t kBundledSttModelsEnvironment[] = L"OMP_BUNDLED_STT_MODELS";
 constexpr wchar_t kBundledSttRuntimeEnvironment[] = L"OMP_BUNDLED_STT_RUNTIME";
 
@@ -323,6 +324,21 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 		CloseIfValid(stderr_pipe.write);
 		return false;
 	}
+	const std::optional<std::wstring> previous_grimoire_mode = EnvironmentValue(kGrimoireModeEnvironment);
+	if (!SetEnvironmentVariableW(kGrimoireModeEnvironment, L"1")) {
+		error = "setting Grimoire mode environment failed: " +
+			std::system_category().message(static_cast<int>(GetLastError()));
+		static_cast<void>(SetEnvironmentVariableW(
+			kNativeGuiHostEnvironment, previous_gui_host ? previous_gui_host->c_str() : nullptr));
+		DeleteProcThreadAttributeList(startup.lpAttributeList);
+		CloseIfValid(job);
+		CloseIfValid(null_input);
+		CloseIfValid(stdout_pipe.read);
+		CloseIfValid(stdout_pipe.write);
+		CloseIfValid(stderr_pipe.read);
+		CloseIfValid(stderr_pipe.write);
+		return false;
+	}
 	const std::optional<std::wstring> previous_stt_models = EnvironmentValue(kBundledSttModelsEnvironment);
 	bool set_bundled_stt_models = false;
 	if ((!previous_stt_models || previous_stt_models->empty())) {
@@ -357,6 +373,8 @@ bool CoreProcess::Start(CoreLaunch launch, EventHandler handler, std::string& er
 	// descendant-only marker into unrelated programs opened later by the shell.
 	static_cast<void>(SetEnvironmentVariableW(
 		kNativeGuiHostEnvironment, previous_gui_host ? previous_gui_host->c_str() : nullptr));
+	static_cast<void>(SetEnvironmentVariableW(
+		kGrimoireModeEnvironment, previous_grimoire_mode ? previous_grimoire_mode->c_str() : nullptr));
 	if (set_bundled_stt_models) {
 		static_cast<void>(SetEnvironmentVariableW(kBundledSttModelsEnvironment,
 			previous_stt_models ? previous_stt_models->c_str() : nullptr));

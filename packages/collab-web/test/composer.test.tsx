@@ -12,6 +12,7 @@ import {
 import { ModelPicker } from "../src/components/shell/ModelPicker";
 import { createDesktopBridge } from "../src/lib/desktop-bridge";
 import { encodeBase64Url } from "../src/lib/link";
+import { filterModelsForGrimoire, selectDefaultGrimoireModel } from "../src/lib/model-visibility";
 
 const LINK = `roomroomroom1234#${encodeBase64Url(new Uint8Array(32))}`;
 const client = new GuestClient(LINK, "tester");
@@ -211,6 +212,35 @@ describe("Composer session metadata and controls", () => {
 });
 
 describe("ModelPicker model states", () => {
+	it("shows only Grimoire models by default and reveals all models when enabled", () => {
+		const models = [
+			{ provider: "amazon-bedrock", id: "claude" },
+			{ provider: "grimoire", id: "gpt-5.5" },
+			{ provider: "grimoire", id: "gpt-5.6-luna" },
+			{ provider: "bedrock-mantle", id: "gpt-5.5" },
+		];
+		expect(filterModelsForGrimoire(models, false)).toEqual([models[1], models[2]]);
+		expect(filterModelsForGrimoire(models, true)).toBe(models);
+	});
+
+	it("keeps regular OMP model lists unchanged when no Grimoire route exists", () => {
+		const models = [
+			{ provider: "anthropic", id: "sonnet" },
+			{ provider: "openai", id: "gpt" },
+		];
+		expect(filterModelsForGrimoire(models, false)).toBe(models);
+	});
+
+	it("prefers GPT-5.5 when correcting a stale or non-Grimoire session model", () => {
+		const models = [
+			{ provider: "grimoire", id: "gpt-5.4" },
+			{ provider: "grimoire", id: "gpt-5.5" },
+			{ provider: "grimoire", id: "gpt-5.6-luna" },
+		];
+		expect(selectDefaultGrimoireModel(models)).toBe(models[1]);
+		expect(selectDefaultGrimoireModel(models.filter(model => model.id !== "gpt-5.5"))).toBe(models[0]);
+	});
+
 	it("renders the unloaded model state without treating a missing fixture field as an empty list", () => {
 		const snap = snapshot(null);
 		const html = renderToStaticMarkup(

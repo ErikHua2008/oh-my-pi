@@ -1150,6 +1150,17 @@ void App::SwitchProject(std::wstring project_directory) {
 			dark_theme_);
 		return;
 	}
+	const auto grimoire_api_key = EnvironmentValue(L"GRIMOIRE_API_KEY");
+	const bool has_grimoire_api_key = grimoire_api_key && std::ranges::any_of(*grimoire_api_key, [](wchar_t value) {
+		return value != L' ' && value != L'\t' && value != L'\r' && value != L'\n';
+	});
+	if (!has_grimoire_api_key) {
+		pending_imported_session_id_.clear();
+		ShowCoreFailure(L"未配置 GRIMOIRE_API_KEY",
+			WideToUtf8(L"Grimoire Router App 只从环境变量 GRIMOIRE_API_KEY 读取凭据，不会在应用内保存 Key。"
+						L"请先设置用户环境变量，然后完全退出并重新打开本应用。"));
+		return;
+	}
 	if (core_.running() && ComparableProjectPath(canonical) == ComparableProjectPath(project_directory_)) {
 		return;
 	}
@@ -1174,6 +1185,8 @@ void App::SwitchProject(std::wstring project_directory) {
 	launch.arguments = ResolveOmpCommand(config_.omp_bin, config_.dev_repo.value_or(L""));
 	launch.arguments.emplace_back(L"--mode");
 	launch.arguments.emplace_back(L"core");
+	launch.arguments.emplace_back(L"--model");
+	launch.arguments.emplace_back(L"grimoire/gpt-5.5:xhigh");
 	launch.arguments.emplace_back(L"--no-open");
 	launch.arguments.emplace_back(L"--cwd");
 	launch.arguments.emplace_back(PathForCli(project_directory_));
@@ -1795,6 +1808,16 @@ void App::HandleDesktopRequest(std::string_view payload) {
 		if (command == "session_preferences") {
 			reply(true,
 				Json{{"pinned_sessions", config_.pinned_sessions}, {"session_read_through", config_.session_read_through}});
+			return;
+		}
+		if (command == "model_visibility") {
+			reply(true, Json{{"show_all_models", config_.show_all_models}});
+			return;
+		}
+		if (command == "model_visibility_update") {
+			config_.show_all_models = args.at("showAllModels").get<bool>();
+			SaveConfigFile();
+			reply(true, Json{{"show_all_models", config_.show_all_models}});
 			return;
 		}
 		if (command == "session_preferences_update") {

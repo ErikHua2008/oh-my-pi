@@ -202,6 +202,7 @@ ShellConfig LoadConfig(const std::filesystem::path& path) {
 		}
 		config.window_maximized = json.value("windowMaximized", false);
 		config.close_to_tray = json.value("closeToTray", true);
+		config.show_all_models = json.value("showAllModels", false);
 		return config;
 	} catch (const std::exception&) {
 		std::error_code ignored;
@@ -232,6 +233,7 @@ bool SaveConfig(const std::filesystem::path& path, const ShellConfig& config, st
 	json["darkTheme"] = config.dark_theme ? Json(*config.dark_theme) : Json(nullptr);
 	json["windowMaximized"] = config.window_maximized;
 	json["closeToTray"] = config.close_to_tray;
+	json["showAllModels"] = config.show_all_models;
 
 	std::error_code directory_error;
 	if (!path.parent_path().empty()) {

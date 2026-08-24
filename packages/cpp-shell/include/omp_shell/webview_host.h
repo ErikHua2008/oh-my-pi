@@ -31,8 +31,8 @@ public:
 	void ExecuteScript(std::wstring_view script) const;
 	void PostJson(std::wstring_view json) const;
 	void SetDarkTheme(bool dark);
-	void ShowWelcome() const;
-	void ShowStatus(std::wstring_view title, std::wstring_view detail, bool is_error) const;
+	void ShowWelcome();
+	void ShowStatus(std::wstring_view title, std::wstring_view detail, bool is_error);
 
 	[[nodiscard]] bool ready() const noexcept;
 
@@ -52,6 +52,8 @@ private:
 	// token in every callback so a quick application exit cannot dereference the
 	// host after its owning App has already been destroyed.
 	std::shared_ptr<std::atomic_bool> callback_alive_ = std::make_shared<std::atomic_bool>(true);
+	bool pending_inline_navigation_ = false;
+	std::wstring active_inline_uri_;
 	bool bridge_ready_ = false;
 	bool dark_theme_ = false;
 };

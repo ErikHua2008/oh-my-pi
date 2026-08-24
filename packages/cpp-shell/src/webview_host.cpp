@@ -109,6 +109,12 @@ bool IsTrustedWebViewUri(std::wstring_view uri) {
 	return uri == L"about:blank" || IsTrustedLoopbackHttpUri(uri);
 }
 
+bool IsInlineHtmlDataUri(std::wstring_view uri) {
+	// Recent WebView2 Runtime versions expose NavigateToString navigation as an
+	// internal base64 data URI instead of about:blank.
+	return uri.starts_with(L"data:text/html;charset=utf-8;base64,");
+}
+
 bool StartsWithAsciiCaseInsensitive(std::wstring_view value, std::wstring_view prefix) {
 	if (value.size() < prefix.size()) {
 		return false;
@@ -419,7 +425,7 @@ void WebViewHost::PostJson(std::wstring_view json) const {
 	webview_->PostWebMessageAsJson(owned.c_str());
 }
 
-void WebViewHost::ShowWelcome() const {
+void WebViewHost::ShowWelcome() {
 	if (!webview_ || !bridge_ready_) {
 		return;
 	}
@@ -432,10 +438,13 @@ void WebViewHost::ShowWelcome() const {
 	page.append(LR"html(<main class="card"><h1>从一个项目开始</h1>
 <p>选择本地项目后，Grimoire Router App 会在后台启动 Core，并在这个原生窗口中打开会话。模型凭据仍由 Core 管理。</p>
 <button onclick="chrome.webview.postMessage('open-project')">打开项目</button></main></body></html>)html");
-	webview_->NavigateToString(page.c_str());
+	pending_inline_navigation_ = true;
+	if (FAILED(webview_->NavigateToString(page.c_str()))) {
+		pending_inline_navigation_ = false;
+	}
 }
 
-void WebViewHost::ShowStatus(std::wstring_view title, std::wstring_view detail, bool is_error) const {
+void WebViewHost::ShowStatus(std::wstring_view title, std::wstring_view detail, bool is_error) {
 	if (!webview_ || !bridge_ready_) {
 		return;
 	}
@@ -461,7 +470,10 @@ void WebViewHost::ShowStatus(std::wstring_view title, std::wstring_view detail, 
 		page.append(L"<button onclick=\"chrome.webview.postMessage('open-project')\">选择其他项目</button>");
 	}
 	page.append(L"</main></body></html>");
-	webview_->NavigateToString(page.c_str());
+	pending_inline_navigation_ = true;
+	if (FAILED(webview_->NavigateToString(page.c_str()))) {
+		pending_inline_navigation_ = false;
+	}
 }
 
 bool WebViewHost::ready() const noexcept {
@@ -496,7 +508,14 @@ HRESULT WebViewHost::ConfigureController() {
 				}
 				const std::wstring uri(raw_uri);
 				CoTaskMemFree(raw_uri);
-				const bool trusted = IsTrustedWebViewUri(uri);
+				const bool expected_inline = pending_inline_navigation_ && IsInlineHtmlDataUri(uri);
+				pending_inline_navigation_ = false;
+				const bool trusted = expected_inline || IsTrustedWebViewUri(uri);
+				if (expected_inline) {
+					active_inline_uri_ = uri;
+				} else if (trusted) {
+					active_inline_uri_.clear();
+				}
 				if (!trusted) {
 					arguments->put_Cancel(TRUE);
 					BOOL user_initiated = FALSE;
@@ -550,8 +569,10 @@ HRESULT WebViewHost::ConfigureController() {
 				if (arguments == nullptr || FAILED(arguments->get_Source(&raw_source)) || raw_source == nullptr) {
 					return S_OK;
 				}
-				const bool trusted_source = IsTrustedWebViewUri(raw_source);
+				const std::wstring source(raw_source);
 				CoTaskMemFree(raw_source);
+				const bool trusted_source =
+					IsTrustedWebViewUri(source) || (!active_inline_uri_.empty() && source == active_inline_uri_);
 				if (!trusted_source) {
 					return S_OK;
 				}

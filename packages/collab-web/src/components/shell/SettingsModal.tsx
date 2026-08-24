@@ -17,6 +17,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { useModelVisibility } from "../../lib/model-visibility";
 import { blockNativeSurfaces } from "../../lib/native-surface-visibility";
 import { type ThemePreference, useThemePreference } from "../../lib/theme";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -105,6 +106,7 @@ export function SettingsModal({
 	onDeleteArchivedSession,
 }: SettingsModalProps): ReactNode {
 	const { preference, resolved, setPreference } = useThemePreference();
+	const { showAllModels, setShowAllModels, isGrimoireShell } = useModelVisibility();
 	const [section, setSection] = useState<SettingsSection>("general");
 	const [archivedSessions, setArchivedSessions] = useState<readonly SessionSummary[]>([]);
 	const [archivedLoading, setArchivedLoading] = useState(false);
@@ -211,15 +213,11 @@ export function SettingsModal({
 		}
 	};
 
-	const closeFromBackdrop = (): void => {
-		if (window.matchMedia("(max-width: 720px)").matches) onClose();
-	};
-
 	const access = readOnly == null ? UNAVAILABLE : readOnly ? "Read only" : "Read and write";
 	const activeLabel = section === "general" ? "General" : section === "appearance" ? "Appearance" : "Archived chats";
 
 	return (
-		<div className="sh-settings-backdrop" onClick={closeFromBackdrop}>
+		<div className="sh-settings-backdrop" onClick={onClose}>
 			<div
 				className="sh-settings-sheet"
 				role="dialog"
@@ -285,54 +283,72 @@ export function SettingsModal({
 						</header>
 
 						{section === "general" && (
-							<section
-								className="sh-settings-section"
-								id="sh-settings-panel-general"
-								aria-labelledby="sh-settings-general-title"
-							>
-								<div className="sh-settings-section-head">
-									<h2 id="sh-settings-general-title">Session information</h2>
-									<p>Read-only details supplied by the current session.</p>
-								</div>
-								<dl className="sh-settings-metadata">
-									<div className="sh-settings-metadata-row">
-										<dt>
-											<Folder size={16} aria-hidden="true" /> Current project
-										</dt>
-										<dd title={project ?? undefined}>{project ?? UNAVAILABLE}</dd>
+							<div id="sh-settings-panel-general" className="sh-settings-sections">
+								{isGrimoireShell && (
+									<section className="sh-settings-section" aria-labelledby="sh-settings-models-title">
+										<div className="sh-settings-section-head">
+											<h2 id="sh-settings-models-title">模型列表</h2>
+											<p>默认只显示魔法书提供的模型。</p>
+										</div>
+										<label className="sh-settings-switch-row">
+											<span>
+												<strong>显示全部模型</strong>
+												<small>打开后显示 OMP 已发现的其他 Provider 和模型。</small>
+											</span>
+											<input
+												type="checkbox"
+												role="switch"
+												checked={showAllModels}
+												onChange={event => setShowAllModels(event.currentTarget.checked)}
+											/>
+										</label>
+									</section>
+								)}
+								<section className="sh-settings-section" aria-labelledby="sh-settings-general-title">
+									<div className="sh-settings-section-head">
+										<h2 id="sh-settings-general-title">Session information</h2>
+										<p>Read-only details supplied by the current session.</p>
 									</div>
-									<div className="sh-settings-metadata-row">
-										<dt>
-											<PanelsTopLeft size={16} aria-hidden="true" /> Session
-										</dt>
-										<dd title={session ?? undefined}>{session ?? UNAVAILABLE}</dd>
-									</div>
-									<div className="sh-settings-metadata-row">
-										<dt>
-											<ShieldCheck size={16} aria-hidden="true" /> Access
-										</dt>
-										<dd>{access}</dd>
-									</div>
-									<div className="sh-settings-metadata-row">
-										<dt>
-											<Network size={16} aria-hidden="true" /> Connection
-										</dt>
-										<dd>{connection ?? UNAVAILABLE}</dd>
-									</div>
-									<div className="sh-settings-metadata-row">
-										<dt>
-											<Sparkles size={16} aria-hidden="true" /> Model
-										</dt>
-										<dd title={model ?? undefined}>{model ?? UNAVAILABLE}</dd>
-									</div>
-									<div className="sh-settings-metadata-row">
-										<dt>
-											<CircleGauge size={16} aria-hidden="true" /> Context
-										</dt>
-										<dd>{context ?? UNAVAILABLE}</dd>
-									</div>
-								</dl>
-							</section>
+									<dl className="sh-settings-metadata">
+										<div className="sh-settings-metadata-row">
+											<dt>
+												<Folder size={16} aria-hidden="true" /> Current project
+											</dt>
+											<dd title={project ?? undefined}>{project ?? UNAVAILABLE}</dd>
+										</div>
+										<div className="sh-settings-metadata-row">
+											<dt>
+												<PanelsTopLeft size={16} aria-hidden="true" /> Session
+											</dt>
+											<dd title={session ?? undefined}>{session ?? UNAVAILABLE}</dd>
+										</div>
+										<div className="sh-settings-metadata-row">
+											<dt>
+												<ShieldCheck size={16} aria-hidden="true" /> Access
+											</dt>
+											<dd>{access}</dd>
+										</div>
+										<div className="sh-settings-metadata-row">
+											<dt>
+												<Network size={16} aria-hidden="true" /> Connection
+											</dt>
+											<dd>{connection ?? UNAVAILABLE}</dd>
+										</div>
+										<div className="sh-settings-metadata-row">
+											<dt>
+												<Sparkles size={16} aria-hidden="true" /> Model
+											</dt>
+											<dd title={model ?? undefined}>{model ?? UNAVAILABLE}</dd>
+										</div>
+										<div className="sh-settings-metadata-row">
+											<dt>
+												<CircleGauge size={16} aria-hidden="true" /> Context
+											</dt>
+											<dd>{context ?? UNAVAILABLE}</dd>
+										</div>
+									</dl>
+								</section>
+							</div>
 						)}
 
 						{section === "appearance" && (

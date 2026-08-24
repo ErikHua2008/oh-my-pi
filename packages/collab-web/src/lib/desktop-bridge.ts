@@ -9,6 +9,10 @@ export interface DesktopSessionPreferences {
 	sessionReadThrough: Readonly<Record<string, string>>;
 }
 
+export interface DesktopModelVisibility {
+	showAllModels: boolean;
+}
+
 export interface DesktopAttachmentStatus {
 	path: string;
 	available: boolean;
@@ -161,6 +165,8 @@ export interface DesktopBridge {
 	checkAttachments(paths: readonly string[]): Promise<readonly DesktopAttachmentStatus[]>;
 	loadSessionPreferences(): Promise<DesktopSessionPreferences | null>;
 	saveSessionPreferences(preferences: DesktopSessionPreferences): Promise<void>;
+	loadModelVisibility(): Promise<DesktopModelVisibility | null>;
+	saveModelVisibility(preferences: DesktopModelVisibility): Promise<void>;
 	replaceNativeTranscript(snapshot: DesktopNativeTranscriptSnapshot): Promise<boolean>;
 	upsertNativeTranscript(row: DesktopNativeTranscriptRow): Promise<boolean>;
 	removeNativeTranscript(id: string): Promise<void>;
@@ -185,6 +191,10 @@ interface ProjectListResponse {
 interface SessionPreferencesResponse {
 	pinned_sessions: string[];
 	session_read_through: Record<string, string>;
+}
+
+interface ModelVisibilityResponse {
+	show_all_models: boolean;
 }
 
 const ATTACHMENT_STATUS_BATCH = 64;
@@ -325,6 +335,10 @@ function browserBridge(): DesktopBridge {
 			return null;
 		},
 		async saveSessionPreferences(_preferences: DesktopSessionPreferences) {},
+		async loadModelVisibility() {
+			return { showAllModels: true };
+		},
+		async saveModelVisibility(_preferences: DesktopModelVisibility) {},
 		async replaceNativeTranscript(_snapshot: DesktopNativeTranscriptSnapshot) {
 			return false;
 		},
@@ -579,6 +593,19 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 				authorization = "denied";
 				throw error;
 			}
+		},
+		async loadModelVisibility() {
+			try {
+				const value = await invoke<ModelVisibilityResponse>("model_visibility");
+				return { showAllModels: value.show_all_models === true };
+			} catch {
+				return null;
+			}
+		},
+		async saveModelVisibility(preferences: DesktopModelVisibility) {
+			await invoke<ModelVisibilityResponse>("model_visibility_update", {
+				showAllModels: preferences.showAllModels,
+			});
 		},
 		async replaceNativeTranscript(snapshot: DesktopNativeTranscriptSnapshot) {
 			return invokeNativeEnabled("native_transcript_replace", { snapshot });

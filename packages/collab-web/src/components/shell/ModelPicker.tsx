@@ -1,8 +1,9 @@
 import { Check, ChevronDown } from "lucide-react";
 import type { ReactNode } from "react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { GuestSnapshot } from "../../lib/client";
 import { type DesktopBridge, desktopBridge as defaultDesktopBridge } from "../../lib/desktop-bridge";
+import { filterModelsForGrimoire, selectDefaultGrimoireModel, useModelVisibility } from "../../lib/model-visibility";
 import { useNativeTranscriptOcclusion } from "./useNativeTranscriptOcclusion";
 
 export interface ModelPickerProps {
@@ -33,7 +34,27 @@ export function ModelPicker({
 	const models = snapshot.models;
 	const currentId = model?.id;
 	const currentProvider = model?.provider;
+	const { showAllModels } = useModelVisibility();
+	const visibleModels = useMemo(
+		() => (models === null ? null : filterModelsForGrimoire(models, showAllModels)),
+		[models, showAllModels],
+	);
+	const enforcedSelectionRef = useRef<string | null>(null);
 	useNativeTranscriptOcclusion(open, menuRef, desktop);
+
+	useEffect(() => {
+		const currentIsVisible = visibleModels?.some(item => item.provider === currentProvider && item.id === currentId);
+		if (showAllModels || snapshot.working || visibleModels === null || currentIsVisible) {
+			enforcedSelectionRef.current = null;
+			return;
+		}
+		const grimoire = selectDefaultGrimoireModel(visibleModels);
+		if (!grimoire) return;
+		const selection = `${currentProvider ?? ""}/${currentId ?? ""}->${grimoire.provider}/${grimoire.id}`;
+		if (enforcedSelectionRef.current === selection) return;
+		enforcedSelectionRef.current = selection;
+		onModelChange(grimoire.provider, grimoire.id);
+	}, [currentId, currentProvider, onModelChange, showAllModels, snapshot.working, visibleModels]);
 
 	useEffect(() => {
 		if (disabled) setOpen(false);
@@ -84,10 +105,10 @@ export function ModelPicker({
 						<div className="sh-model-picker-empty" role="status">
 							loading models…
 						</div>
-					) : models.length === 0 ? (
+					) : visibleModels?.length === 0 ? (
 						<div className="sh-model-picker-empty">no models available</div>
 					) : (
-						models.map(item => {
+						visibleModels?.map(item => {
 							const selected = item.id === currentId && item.provider === currentProvider;
 							return (
 								<button

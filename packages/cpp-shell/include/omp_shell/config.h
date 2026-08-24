@@ -23,6 +23,7 @@ struct ShellConfig {
 	std::optional<bool> dark_theme;
 	bool window_maximized = false;
 	bool close_to_tray = true;
+	bool show_all_models = false;
 
 	void RecordProject(std::wstring project_directory);
 	[[nodiscard]] bool RemoveProject(std::wstring_view project_directory);
