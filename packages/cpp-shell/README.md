@@ -139,6 +139,35 @@ Core has not emitted its local links after ten seconds, the startup page
 reports that it is still waiting instead of appearing frozen. The existing
 timeout and stderr diagnostics remain authoritative.
 
+## Grimoire provider configuration
+
+The Grimoire route is configured outside the Core bundle. Copy
+`config/config.toml` to the machine-wide path:
+
+```text
+C:\ProgramData\Grimoire Router App\config.toml
+```
+
+An optional per-user file has higher precedence:
+
+```text
+%APPDATA%\io.omp.cpp-shell\config.toml
+```
+
+In the Windows shell, open **Settings > General > Grimoire 配置** to edit the
+effective file in Notepad, inspect the machine-wide file, or reveal the user
+configuration directory. When `OMP_GRIMOIRE_CONFIG_PATH` is set, the effective
+action opens that final override; otherwise it opens the per-user file. The
+shell creates a comment-only per-user template on first use and never replaces
+an existing file. Restart the app after saving configuration changes.
+
+`OMP_GRIMOIRE_CONFIG_PATH` can select one final machine-local override. Project
+directories are never searched, so opening an untrusted repository cannot
+redirect the API key to another host. Configuration files may select the HTTPS
+base URL, key environment-variable name, live model discovery, default model,
+reasoning effort, exclusions, and offline fallbacks. Real credentials are
+rejected in TOML and remain environment-only.
+
 Release builds also prepare the multilingual q8 Whisper Small speech model in
 `models/stt/onnx-community/whisper-small` beside the executable. The model is
 revision-pinned and its ONNX weights are SHA-256 verified while downloading;

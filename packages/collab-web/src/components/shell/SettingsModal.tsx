@@ -2,8 +2,11 @@ import type { SessionSummary } from "@oh-my-pi/pi-wire";
 import {
 	Archive,
 	ArrowLeft,
+	Building2,
 	CircleGauge,
+	FilePenLine,
 	Folder,
+	FolderOpen,
 	Monitor,
 	Moon,
 	Network,
@@ -17,6 +20,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type DesktopGrimoireConfigTarget, desktopBridge } from "../../lib/desktop-bridge";
 import { useModelVisibility } from "../../lib/model-visibility";
 import { blockNativeSurfaces } from "../../lib/native-surface-visibility";
 import { type ThemePreference, useThemePreference } from "../../lib/theme";
@@ -114,6 +118,8 @@ export function SettingsModal({
 	const [restoringId, setRestoringId] = useState<string | null>(null);
 	const [deletingId, setDeletingId] = useState<string | null>(null);
 	const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+	const [configOpening, setConfigOpening] = useState<DesktopGrimoireConfigTarget | null>(null);
+	const [configFeedback, setConfigFeedback] = useState<{ error: boolean; text: string } | null>(null);
 	const surfaceRef = useRef<HTMLDivElement>(null);
 	const onCloseRef = useRef(onClose);
 	onCloseRef.current = onClose;
@@ -172,6 +178,36 @@ export function SettingsModal({
 			setArchivedError(error instanceof Error ? error.message : String(error));
 		} finally {
 			setDeletingId(null);
+		}
+	};
+
+	const openGrimoireConfig = async (target: DesktopGrimoireConfigTarget): Promise<void> => {
+		if (configOpening !== null) return;
+		setConfigOpening(target);
+		setConfigFeedback(null);
+		try {
+			const path = await desktopBridge.openGrimoireConfig(target);
+			if (!path) throw new Error("本机配置入口不可用");
+			setConfigFeedback({
+				error: false,
+				text: target === "folder" ? `已打开配置文件夹：${path}` : `已使用记事本打开：${path}`,
+			});
+		} catch (error) {
+			setConfigFeedback({ error: true, text: error instanceof Error ? error.message : String(error) });
+		} finally {
+			setConfigOpening(null);
+		}
+	};
+
+	const changeModelVisibility = async (next: boolean): Promise<void> => {
+		setConfigFeedback(null);
+		try {
+			await setShowAllModels(next);
+		} catch (error) {
+			setConfigFeedback({
+				error: true,
+				text: `保存模型显示设置失败：${error instanceof Error ? error.message : String(error)}`,
+			});
 		}
 	};
 
@@ -285,24 +321,87 @@ export function SettingsModal({
 						{section === "general" && (
 							<div id="sh-settings-panel-general" className="sh-settings-sections">
 								{isGrimoireShell && (
-									<section className="sh-settings-section" aria-labelledby="sh-settings-models-title">
-										<div className="sh-settings-section-head">
-											<h2 id="sh-settings-models-title">模型列表</h2>
-											<p>默认只显示魔法书提供的模型。</p>
-										</div>
-										<label className="sh-settings-switch-row">
-											<span>
-												<strong>显示全部模型</strong>
-												<small>打开后显示 OMP 已发现的其他 Provider 和模型。</small>
-											</span>
-											<input
-												type="checkbox"
-												role="switch"
-												checked={showAllModels}
-												onChange={event => setShowAllModels(event.currentTarget.checked)}
-											/>
-										</label>
-									</section>
+									<>
+										<section className="sh-settings-section" aria-labelledby="sh-settings-models-title">
+											<div className="sh-settings-section-head">
+												<h2 id="sh-settings-models-title">模型列表</h2>
+												<p>默认只显示魔法书提供的模型。</p>
+											</div>
+											<label className="sh-settings-switch-row">
+												<span>
+													<strong>显示全部模型</strong>
+													<small>打开后显示 OMP 已发现的其他 Provider 和模型。</small>
+												</span>
+												<input
+													type="checkbox"
+													role="switch"
+													checked={showAllModels}
+													onChange={event => void changeModelVisibility(event.currentTarget.checked)}
+												/>
+											</label>
+										</section>
+										<section
+											className="sh-settings-section"
+											aria-labelledby="sh-settings-grimoire-config-title"
+										>
+											<div className="sh-settings-section-head">
+												<h2 id="sh-settings-grimoire-config-title">Grimoire 配置</h2>
+												<p>生效配置优先于团队配置；保存后重启 Grimoire Router App 生效。</p>
+											</div>
+											<div className="sh-settings-config-actions">
+												<button
+													type="button"
+													disabled={configOpening !== null}
+													onClick={() => void openGrimoireConfig("effective")}
+												>
+													<FilePenLine size={18} aria-hidden="true" />
+													<span>
+														<strong>
+															{configOpening === "effective" ? "正在打开…" : "编辑生效配置"}
+														</strong>
+														<small>优先打开环境变量指定的最终覆盖，否则打开个人配置</small>
+													</span>
+												</button>
+												<button
+													type="button"
+													disabled={configOpening !== null}
+													onClick={() => void openGrimoireConfig("team")}
+												>
+													<Building2 size={18} aria-hidden="true" />
+													<span>
+														<strong>{configOpening === "team" ? "正在打开…" : "查看团队配置"}</strong>
+														<small>ProgramData 中的机器级配置</small>
+													</span>
+												</button>
+												<button
+													type="button"
+													disabled={configOpening !== null}
+													onClick={() => void openGrimoireConfig("folder")}
+												>
+													<FolderOpen size={18} aria-hidden="true" />
+													<span>
+														<strong>{configOpening === "folder" ? "正在打开…" : "打开配置文件夹"}</strong>
+														<small>在资源管理器中查看文件</small>
+													</span>
+												</button>
+											</div>
+											<p className="sh-settings-config-key-note">
+												API Key 不写入 TOML，仍从配置指定的环境变量读取。
+											</p>
+											{configFeedback && (
+												<p
+													className={
+														configFeedback.error
+															? "sh-settings-config-feedback is-error"
+															: "sh-settings-config-feedback"
+													}
+													role={configFeedback.error ? "alert" : "status"}
+												>
+													{configFeedback.text}
+												</p>
+											)}
+										</section>
+									</>
 								)}
 								<section className="sh-settings-section" aria-labelledby="sh-settings-general-title">
 									<div className="sh-settings-section-head">

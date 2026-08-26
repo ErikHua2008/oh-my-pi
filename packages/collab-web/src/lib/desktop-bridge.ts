@@ -13,6 +13,8 @@ export interface DesktopModelVisibility {
 	showAllModels: boolean;
 }
 
+export type DesktopGrimoireConfigTarget = "effective" | "team" | "folder";
+
 export interface DesktopAttachmentStatus {
 	path: string;
 	available: boolean;
@@ -167,6 +169,8 @@ export interface DesktopBridge {
 	saveSessionPreferences(preferences: DesktopSessionPreferences): Promise<void>;
 	loadModelVisibility(): Promise<DesktopModelVisibility | null>;
 	saveModelVisibility(preferences: DesktopModelVisibility): Promise<void>;
+	/** Open the effective editable config, the machine-wide config, or the user config directory. */
+	openGrimoireConfig(target: DesktopGrimoireConfigTarget): Promise<string | null>;
 	replaceNativeTranscript(snapshot: DesktopNativeTranscriptSnapshot): Promise<boolean>;
 	upsertNativeTranscript(row: DesktopNativeTranscriptRow): Promise<boolean>;
 	removeNativeTranscript(id: string): Promise<void>;
@@ -339,6 +343,9 @@ function browserBridge(): DesktopBridge {
 			return { showAllModels: true };
 		},
 		async saveModelVisibility(_preferences: DesktopModelVisibility) {},
+		async openGrimoireConfig(_target: DesktopGrimoireConfigTarget) {
+			return null;
+		},
 		async replaceNativeTranscript(_snapshot: DesktopNativeTranscriptSnapshot) {
 			return false;
 		},
@@ -606,6 +613,13 @@ function tauriBridge(invoke: TauriInvoke): DesktopBridge {
 			await invoke<ModelVisibilityResponse>("model_visibility_update", {
 				showAllModels: preferences.showAllModels,
 			});
+		},
+		async openGrimoireConfig(target: DesktopGrimoireConfigTarget) {
+			const value = await invoke<{ path?: unknown }>("grimoire_config_open", { target });
+			if (typeof value.path !== "string" || value.path.length === 0) {
+				throw new Error("native Grimoire config response is invalid");
+			}
+			return value.path;
 		},
 		async replaceNativeTranscript(snapshot: DesktopNativeTranscriptSnapshot) {
 			return invokeNativeEnabled("native_transcript_replace", { snapshot });

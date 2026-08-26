@@ -32,6 +32,9 @@ struct ShellConfig {
 };
 
 [[nodiscard]] std::filesystem::path DefaultConfigPath();
+[[nodiscard]] std::filesystem::path DefaultGrimoireUserConfigPath();
+[[nodiscard]] std::filesystem::path DefaultGrimoireTeamConfigPath();
+[[nodiscard]] bool EnsureGrimoireUserConfig(const std::filesystem::path& path, std::string& error);
 [[nodiscard]] ShellConfig LoadConfig(const std::filesystem::path& path);
 [[nodiscard]] bool SaveConfig(const std::filesystem::path& path, const ShellConfig& config, std::string& error);
 

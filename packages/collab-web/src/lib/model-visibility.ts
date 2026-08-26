@@ -2,7 +2,6 @@ import { useEffect, useSyncExternalStore } from "react";
 import { desktopBridge, isCppShellHost } from "./desktop-bridge";
 
 export const GRIMOIRE_PROVIDER = "grimoire";
-export const GRIMOIRE_DEFAULT_MODEL = "gpt-5.5";
 
 let showAllModels = !isCppShellHost();
 let loaded = !isCppShellHost();
@@ -35,11 +34,21 @@ async function loadModelVisibility(): Promise<void> {
 	await loading;
 }
 
-export function setShowAllModels(next: boolean): void {
-	revision++;
+export async function setShowAllModels(next: boolean): Promise<void> {
+	const previous = showAllModels;
+	const saveRevision = ++revision;
 	showAllModels = next;
 	emit();
-	if (isCppShellHost()) void desktopBridge.saveModelVisibility({ showAllModels: next }).catch(() => {});
+	if (!isCppShellHost()) return;
+	try {
+		await desktopBridge.saveModelVisibility({ showAllModels: next });
+	} catch (error) {
+		if (revision === saveRevision) {
+			showAllModels = previous;
+			emit();
+		}
+		throw error;
+	}
 }
 
 export function filterModelsForGrimoire<T extends { provider: string }>(
@@ -53,15 +62,13 @@ export function filterModelsForGrimoire<T extends { provider: string }>(
 export function selectDefaultGrimoireModel<T extends { provider: string; id: string }>(
 	models: readonly T[],
 ): T | undefined {
-	return (
-		models.find(model => model.provider === GRIMOIRE_PROVIDER && model.id === GRIMOIRE_DEFAULT_MODEL) ??
-		models.find(model => model.provider === GRIMOIRE_PROVIDER)
-	);
+	// Core orders the configured default first when it registers the provider.
+	return models.find(model => model.provider === GRIMOIRE_PROVIDER);
 }
 
 export function useModelVisibility(): {
 	showAllModels: boolean;
-	setShowAllModels: (next: boolean) => void;
+	setShowAllModels: (next: boolean) => Promise<void>;
 	isGrimoireShell: boolean;
 } {
 	const value = useSyncExternalStore(

@@ -2,30 +2,36 @@ import { Effort } from "@oh-my-pi/pi-ai";
 import { fetchOpenAICompatibleModels } from "@oh-my-pi/pi-catalog/discovery";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import {
+	type GrimoireConfig,
+	type GrimoireConfigEnvironment,
+	loadGrimoireConfig,
+	matchesGrimoireModelPattern,
+} from "./grimoire-config";
 import type { ModelRegistry, ProviderConfigInput } from "./model-registry";
 
 const GRIMOIRE_PROVIDER = "grimoire";
-const GRIMOIRE_BASE_URL = "https://router.hddev.top/v1";
 const GRIMOIRE_DISCOVERY_TIMEOUT_MS = 5_000;
-const GRIMOIRE_FALLBACK_MODEL_IDS = ["gpt-5.4", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] as const;
 
 type GrimoireModelConfig = NonNullable<ProviderConfigInput["models"]>[number];
 
-export interface GrimoireRuntimeEnvironment {
+export interface GrimoireRuntimeEnvironment extends GrimoireConfigEnvironment {
 	OMP_GRIMOIRE_MODE?: string;
-	GRIMOIRE_API_KEY?: string;
 }
 
 export interface GrimoireRuntimeProviderOptions {
 	fetch?: FetchImpl;
 	discoveryTimeoutMs?: number;
+	configPaths?: readonly string[];
 }
 
-function isAgentModel(model: ModelSpec<"openai-responses">): boolean {
-	// The shell's model picker selects the agent's chat model. Image-generation
-	// entries exposed by an OpenAI-compatible /models endpoint belong in the
-	// image tool, not in this picker.
-	return !model.id.toLowerCase().startsWith("gpt-image-");
+export interface GrimoireRuntimeProviderRegistration {
+	config: GrimoireConfig;
+	defaultSelector: string;
+}
+
+function isAgentModel(model: ModelSpec<"openai-responses">, config: GrimoireConfig): boolean {
+	return !config.models.exclude.some(pattern => matchesGrimoireModelPattern(model.id, pattern));
 }
 
 function toGrimoireModel(id: string, discoveredName?: string): GrimoireModelConfig {
@@ -66,8 +72,25 @@ function toGrimoireModel(id: string, discoveredName?: string): GrimoireModelConf
 	};
 }
 
-function fallbackModels(): GrimoireModelConfig[] {
-	return GRIMOIRE_FALLBACK_MODEL_IDS.map(id => toGrimoireModel(id));
+function orderedModels(models: readonly GrimoireModelConfig[], config: GrimoireConfig): GrimoireModelConfig[] {
+	const byId = new Map(models.map(model => [model.id, model]));
+	byId.set(
+		config.models.defaultModel,
+		byId.get(config.models.defaultModel) ?? toGrimoireModel(config.models.defaultModel),
+	);
+	return [
+		byId.get(config.models.defaultModel)!,
+		...[...byId.values()].filter(model => model.id !== config.models.defaultModel),
+	];
+}
+
+function fallbackModels(config: GrimoireConfig): GrimoireModelConfig[] {
+	return orderedModels(
+		config.models.fallback
+			.filter(id => !config.models.exclude.some(pattern => matchesGrimoireModelPattern(id, pattern)))
+			.map(id => toGrimoireModel(id)),
+		config,
+	);
 }
 
 /**
@@ -77,35 +100,42 @@ function fallbackModels(): GrimoireModelConfig[] {
  */
 export async function registerGrimoireRuntimeProvider(
 	modelRegistry: ModelRegistry,
-	environment: GrimoireRuntimeEnvironment = {
-		OMP_GRIMOIRE_MODE: process.env.OMP_GRIMOIRE_MODE,
-		GRIMOIRE_API_KEY: process.env.GRIMOIRE_API_KEY,
-	},
+	environment: GrimoireRuntimeEnvironment = process.env,
 	options: GrimoireRuntimeProviderOptions = {},
-): Promise<boolean> {
-	if (environment.OMP_GRIMOIRE_MODE !== "1") return false;
+): Promise<GrimoireRuntimeProviderRegistration | null> {
+	if (environment.OMP_GRIMOIRE_MODE !== "1") return null;
 
-	const apiKey = environment.GRIMOIRE_API_KEY?.trim();
+	const config = await loadGrimoireConfig(environment, { configPaths: options.configPaths });
+	const apiKey = environment[config.provider.envKey]?.trim();
 	if (!apiKey) {
-		throw new Error("GRIMOIRE_API_KEY is required when OMP_GRIMOIRE_MODE=1");
+		throw new Error(
+			`未配置 ${config.provider.envKey}。Grimoire Router App 只从该环境变量读取凭据，不会在配置文件中保存 Key。`,
+		);
 	}
 
-	const discovered = await fetchOpenAICompatibleModels({
-		api: "openai-responses",
-		provider: GRIMOIRE_PROVIDER,
-		baseUrl: GRIMOIRE_BASE_URL,
-		apiKey,
-		fetch: options.fetch,
-		timeoutMs: options.discoveryTimeoutMs ?? GRIMOIRE_DISCOVERY_TIMEOUT_MS,
-	});
-	const liveModels = discovered?.filter(isAgentModel).map(model => toGrimoireModel(model.id, model.name));
-	const models = liveModels && liveModels.length > 0 ? liveModels : fallbackModels();
+	const discovered = config.models.discover
+		? await fetchOpenAICompatibleModels({
+				api: config.provider.api,
+				provider: GRIMOIRE_PROVIDER,
+				baseUrl: config.provider.baseUrl,
+				apiKey,
+				fetch: options.fetch,
+				timeoutMs: options.discoveryTimeoutMs ?? GRIMOIRE_DISCOVERY_TIMEOUT_MS,
+			})
+		: null;
+	const liveModels = discovered
+		?.filter(model => isAgentModel(model, config))
+		.map(model => toGrimoireModel(model.id, model.name));
+	const models = liveModels && liveModels.length > 0 ? orderedModels(liveModels, config) : fallbackModels(config);
 
 	modelRegistry.registerProvider(GRIMOIRE_PROVIDER, {
-		baseUrl: GRIMOIRE_BASE_URL,
+		baseUrl: config.provider.baseUrl,
 		apiKey,
-		api: "openai-responses",
+		api: config.provider.api,
 		models,
 	});
-	return true;
+	return {
+		config,
+		defaultSelector: `${GRIMOIRE_PROVIDER}/${config.models.defaultModel}:${config.models.defaultEffort}`,
+	};
 }

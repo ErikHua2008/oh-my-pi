@@ -21,6 +21,34 @@ constexpr std::uintmax_t kMaximumConfigBytes = 8 * 1024 * 1024;
 constexpr std::size_t kMaximumPathBytes = 32 * 1024;
 constexpr std::size_t kMaximumSessionIdBytes = 512;
 constexpr std::size_t kMaximumTimestampBytes = 128;
+constexpr char kGrimoireUserConfigTemplate[] = R"toml(# Grimoire Router App personal overrides.
+# This file is loaded after C:\ProgramData\Grimoire Router App\config.toml.
+# Uncomment only the values you want to override, then restart the app.
+# Never store an API key here. The key is read from the environment variable
+# named by provider.env_key.
+
+# [provider]
+# base_url = "https://router.hddev.top/v1"
+# api = "openai-responses"
+# env_key = "GRIMOIRE_API_KEY"
+
+# [models]
+# discover = true
+# default = "gpt-5.5"
+# default_effort = "xhigh"
+# exclude = ["gpt-image-*"]
+# fallback = ["gpt-5.4", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]
+)toml";
+
+std::filesystem::path KnownFolderPath(const KNOWNFOLDERID& folder, DWORD flags) {
+	PWSTR value = nullptr;
+	if (FAILED(SHGetKnownFolderPath(folder, flags, nullptr, &value))) {
+		return {};
+	}
+	std::filesystem::path path(value);
+	CoTaskMemFree(value);
+	return path;
+}
 
 std::optional<std::wstring> OptionalWideString(const Json& json, const char* key) {
 	const auto item = json.find(key);
@@ -127,15 +155,98 @@ bool ShellConfig::SetProjectName(std::wstring project_directory, std::wstring na
 }
 
 std::filesystem::path DefaultConfigPath() {
-	PWSTR app_data = nullptr;
-	if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE, nullptr, &app_data))) {
+	std::filesystem::path path = KnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE);
+	if (path.empty()) {
 		return std::filesystem::path(L"config.json");
 	}
-	std::filesystem::path path(app_data);
-	CoTaskMemFree(app_data);
 	path /= L"io.omp.cpp-shell";
 	path /= L"config.json";
 	return path;
+}
+
+std::filesystem::path DefaultGrimoireUserConfigPath() {
+	std::filesystem::path path = KnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE);
+	if (path.empty()) {
+		return std::filesystem::path(L"config.toml");
+	}
+	path /= L"io.omp.cpp-shell";
+	path /= L"config.toml";
+	return path;
+}
+
+std::filesystem::path DefaultGrimoireTeamConfigPath() {
+	std::filesystem::path path = KnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT);
+	if (path.empty()) {
+		return {};
+	}
+	path /= L"Grimoire Router App";
+	path /= L"config.toml";
+	return path;
+}
+
+bool EnsureGrimoireUserConfig(const std::filesystem::path& path, std::string& error) {
+	if (path.empty()) {
+		error = "Grimoire user config path is unavailable";
+		return false;
+	}
+	std::error_code status_error;
+	if (std::filesystem::exists(path, status_error)) {
+		if (!std::filesystem::is_regular_file(path, status_error) || status_error) {
+			error = "Grimoire user config path is not a regular file";
+			return false;
+		}
+		return true;
+	}
+	if (status_error) {
+		error = "checking Grimoire user config failed: " + status_error.message();
+		return false;
+	}
+
+	std::error_code directory_error;
+	if (!path.parent_path().empty()) {
+		std::filesystem::create_directories(path.parent_path(), directory_error);
+	}
+	if (directory_error) {
+		error = "creating Grimoire user config directory failed: " + directory_error.message();
+		return false;
+	}
+
+	const HANDLE file = CreateFileW(path.c_str(),
+		GENERIC_WRITE,
+		FILE_SHARE_READ,
+		nullptr,
+		CREATE_NEW,
+		FILE_ATTRIBUTE_NORMAL,
+		nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		const DWORD open_error = GetLastError();
+		if (open_error == ERROR_FILE_EXISTS || open_error == ERROR_ALREADY_EXISTS) {
+			std::error_code existing_error;
+			if (std::filesystem::is_regular_file(path, existing_error) && !existing_error) {
+				return true;
+			}
+			error = "Grimoire user config path is not a regular file";
+			return false;
+		}
+		error = "creating Grimoire user config failed: " +
+			std::system_category().message(static_cast<int>(open_error));
+		return false;
+	}
+
+	DWORD written = 0;
+	const DWORD template_size = static_cast<DWORD>(sizeof(kGrimoireUserConfigTemplate) - 1);
+	const bool write_succeeded = WriteFile(file, kGrimoireUserConfigTemplate, template_size, &written, nullptr) != FALSE;
+	const DWORD write_error = write_succeeded ? ERROR_WRITE_FAULT : GetLastError();
+	const bool saved = write_succeeded && written == template_size;
+	CloseHandle(file);
+	if (!saved) {
+		error = "writing Grimoire user config failed: " +
+			std::system_category().message(static_cast<int>(write_error));
+		std::error_code ignored;
+		std::filesystem::remove(path, ignored);
+		return false;
+	}
+	return true;
 }
 
 ShellConfig LoadConfig(const std::filesystem::path& path) {

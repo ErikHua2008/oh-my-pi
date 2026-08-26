@@ -75,6 +75,30 @@ OMP_TEST("shell config round trips Unicode projects and window state without cre
 	OMP_CHECK(serialized.find("token") == std::string::npos);
 }
 
+OMP_TEST("Grimoire user config creation writes an inert editable template without replacing user changes") {
+	TemporaryDirectory directory;
+	const auto path = directory.path() / L"nested" / L"config.toml";
+	std::string error;
+	OMP_CHECK(omp::shell::EnsureGrimoireUserConfig(path, error));
+
+	std::ifstream input(path, std::ios::binary);
+	const std::string created((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+	OMP_CHECK(created.find("# [provider]") != std::string::npos);
+	OMP_CHECK(created.find("# [models]") != std::string::npos);
+	OMP_CHECK(created.find("GRIMOIRE_API_KEY") != std::string::npos);
+	OMP_CHECK(created.find("api_key =") == std::string::npos);
+
+	{
+		std::ofstream output(path, std::ios::binary | std::ios::trunc);
+		output << "# keep my changes\n";
+	}
+	OMP_CHECK(omp::shell::EnsureGrimoireUserConfig(path, error));
+	std::ifstream preserved_input(path, std::ios::binary);
+	const std::string preserved(
+		(std::istreambuf_iterator<char>(preserved_input)), std::istreambuf_iterator<char>());
+	OMP_CHECK(preserved == "# keep my changes\n");
+}
+
 OMP_TEST("project aliases reject blank and oversized names") {
 	omp::shell::ShellConfig config;
 	OMP_CHECK(!config.SetProjectName(L"", L"Name"));

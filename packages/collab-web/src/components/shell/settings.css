@@ -328,6 +328,81 @@
 	outline-offset: 2px;
 }
 
+.sh-settings-config-actions {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 10px;
+}
+
+.sh-settings-config-actions button {
+	min-width: 0;
+	min-height: 82px;
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 14px;
+	text-align: left;
+	color: var(--fg);
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	cursor: pointer;
+	transition:
+		background var(--dur-fast) var(--ease),
+		border-color var(--dur-fast) var(--ease);
+}
+
+.sh-settings-config-actions button:hover:not(:disabled) {
+	background: var(--bg-hover);
+	border-color: var(--border-strong);
+}
+
+.sh-settings-config-actions button:disabled {
+	cursor: default;
+	opacity: 0.58;
+}
+
+.sh-settings-config-actions button > svg {
+	flex: none;
+	color: var(--accent);
+}
+
+.sh-settings-config-actions span,
+.sh-settings-config-actions strong,
+.sh-settings-config-actions small {
+	min-width: 0;
+	display: block;
+}
+
+.sh-settings-config-actions strong {
+	font-size: 12px;
+	font-weight: 650;
+}
+
+.sh-settings-config-actions small {
+	margin-top: 5px;
+	font-size: 10px;
+	font-weight: 400;
+	line-height: 1.35;
+	color: var(--fg-muted);
+}
+
+.sh-settings-config-key-note,
+.sh-settings-config-feedback {
+	font-size: 11px;
+	line-height: 1.5;
+	color: var(--fg-muted);
+	overflow-wrap: anywhere;
+}
+
+.sh-settings-config-feedback {
+	color: var(--ok);
+}
+
+.sh-settings-config-feedback.is-error {
+	color: var(--err);
+}
+
 .sh-settings-archived-groups {
 	display: flex;
 	flex-direction: column;
@@ -606,6 +681,10 @@
 	}
 
 	.sh-settings-themes {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.sh-settings-config-actions {
 		grid-template-columns: minmax(0, 1fr);
 	}
 

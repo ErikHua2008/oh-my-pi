@@ -40,6 +40,7 @@ describe("DesktopBridge browser fallback", () => {
 		).resolves.toBeUndefined();
 		expect(await desktopBridge.loadModelVisibility()).toEqual({ showAllModels: true });
 		await expect(desktopBridge.saveModelVisibility({ showAllModels: false })).resolves.toBeUndefined();
+		expect(await desktopBridge.openGrimoireConfig("effective")).toBeNull();
 	});
 });
 
@@ -198,6 +199,24 @@ describe("DesktopBridge Tauri capability probe", () => {
 		expect(calls).toEqual([
 			{ command: "model_visibility", args: undefined },
 			{ command: "model_visibility_update", args: { showAllModels: false } },
+		]);
+	});
+
+	it("opens each native Grimoire config destination and returns the host path", async () => {
+		const calls: InvokeCall[] = [];
+		const bridge = createDesktopBridge(async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
+			calls.push({ command, args });
+			const target = args?.target;
+			return { path: `C:\\config\\${String(target)}` } as T;
+		});
+
+		expect(await bridge.openGrimoireConfig("effective")).toBe("C:\\config\\effective");
+		expect(await bridge.openGrimoireConfig("team")).toBe("C:\\config\\team");
+		expect(await bridge.openGrimoireConfig("folder")).toBe("C:\\config\\folder");
+		expect(calls).toEqual([
+			{ command: "grimoire_config_open", args: { target: "effective" } },
+			{ command: "grimoire_config_open", args: { target: "team" } },
+			{ command: "grimoire_config_open", args: { target: "folder" } },
 		]);
 	});
 

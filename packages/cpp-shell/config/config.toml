@@ -1,0 +1,18 @@
+# Grimoire Router App team configuration.
+# Install this file as:
+#   C:\ProgramData\Grimoire Router App\config.toml
+# Optional per-user overrides live at:
+#   %APPDATA%\io.omp.cpp-shell\config.toml
+# Never place an API key in this file. `env_key` names the environment variable.
+
+[provider]
+base_url = "https://router.hddev.top/v1"
+api = "openai-responses"
+env_key = "GRIMOIRE_API_KEY"
+
+[models]
+discover = true
+default = "gpt-5.5"
+default_effort = "xhigh"
+exclude = ["gpt-image-*"]
+fallback = ["gpt-5.4", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]

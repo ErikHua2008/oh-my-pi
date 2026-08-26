@@ -231,14 +231,13 @@ describe("ModelPicker model states", () => {
 		expect(filterModelsForGrimoire(models, false)).toBe(models);
 	});
 
-	it("prefers GPT-5.5 when correcting a stale or non-Grimoire session model", () => {
+	it("uses the host-ordered Grimoire default when correcting a stale session model", () => {
 		const models = [
+			{ provider: "grimoire", id: "gpt-5.6-terra" },
 			{ provider: "grimoire", id: "gpt-5.4" },
-			{ provider: "grimoire", id: "gpt-5.5" },
 			{ provider: "grimoire", id: "gpt-5.6-luna" },
 		];
-		expect(selectDefaultGrimoireModel(models)).toBe(models[1]);
-		expect(selectDefaultGrimoireModel(models.filter(model => model.id !== "gpt-5.5"))).toBe(models[0]);
+		expect(selectDefaultGrimoireModel(models)).toBe(models[0]);
 	});
 
 	it("renders the unloaded model state without treating a missing fixture field as an empty list", () => {

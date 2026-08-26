@@ -1333,7 +1333,10 @@ export async function runRootCommand(
 		process.exit(1);
 	}
 	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
-	await logger.time("modelRegistry:grimoire", registerGrimoireRuntimeProvider, modelRegistry);
+	const grimoireProvider = await logger.time("modelRegistry:grimoire", registerGrimoireRuntimeProvider, modelRegistry);
+	if (grimoireProvider && parsedArgs.model === undefined && parsedArgs.provider === undefined) {
+		parsedArgs.model = grimoireProvider.defaultSelector;
+	}
 
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));

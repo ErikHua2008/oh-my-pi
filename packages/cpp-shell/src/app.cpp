@@ -217,6 +217,37 @@ std::wstring DirectoryName(std::wstring_view directory) {
 	return name.empty() ? std::wstring(kBaseWindowTitle) : name;
 }
 
+bool OpenTextFileInNotepad(HWND owner, const std::filesystem::path& path, std::string& error) {
+	std::wstring parameters = L"\"";
+	parameters.append(path.wstring());
+	parameters.push_back(L'\"');
+	const std::wstring working_directory = path.parent_path().wstring();
+	const HINSTANCE opened = ShellExecuteW(owner,
+		L"open",
+		L"notepad.exe",
+		parameters.c_str(),
+		working_directory.empty() ? nullptr : working_directory.c_str(),
+		SW_SHOWNORMAL);
+	const INT_PTR result = reinterpret_cast<INT_PTR>(opened);
+	if (result <= 32) {
+		error = "Windows failed to open the Grimoire config in Notepad (ShellExecute code " +
+			std::to_string(result) + ")";
+		return false;
+	}
+	return true;
+}
+
+bool OpenDirectoryInExplorer(HWND owner, const std::filesystem::path& path, std::string& error) {
+	const HINSTANCE opened = ShellExecuteW(owner, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+	const INT_PTR result = reinterpret_cast<INT_PTR>(opened);
+	if (result <= 32) {
+		error = "Windows Explorer failed to open the Grimoire config directory (ShellExecute code " +
+			std::to_string(result) + ")";
+		return false;
+	}
+	return true;
+}
+
 std::optional<NativeTranscriptRowKind> ParseNativeRowKind(std::string_view kind) noexcept {
 	if (kind == "user") return NativeTranscriptRowKind::User;
 	if (kind == "assistant") return NativeTranscriptRowKind::Assistant;
@@ -1150,17 +1181,6 @@ void App::SwitchProject(std::wstring project_directory) {
 			dark_theme_);
 		return;
 	}
-	const auto grimoire_api_key = EnvironmentValue(L"GRIMOIRE_API_KEY");
-	const bool has_grimoire_api_key = grimoire_api_key && std::ranges::any_of(*grimoire_api_key, [](wchar_t value) {
-		return value != L' ' && value != L'\t' && value != L'\r' && value != L'\n';
-	});
-	if (!has_grimoire_api_key) {
-		pending_imported_session_id_.clear();
-		ShowCoreFailure(L"未配置 GRIMOIRE_API_KEY",
-			WideToUtf8(L"Grimoire Router App 只从环境变量 GRIMOIRE_API_KEY 读取凭据，不会在应用内保存 Key。"
-						L"请先设置用户环境变量，然后完全退出并重新打开本应用。"));
-		return;
-	}
 	if (core_.running() && ComparableProjectPath(canonical) == ComparableProjectPath(project_directory_)) {
 		return;
 	}
@@ -1185,8 +1205,6 @@ void App::SwitchProject(std::wstring project_directory) {
 	launch.arguments = ResolveOmpCommand(config_.omp_bin, config_.dev_repo.value_or(L""));
 	launch.arguments.emplace_back(L"--mode");
 	launch.arguments.emplace_back(L"core");
-	launch.arguments.emplace_back(L"--model");
-	launch.arguments.emplace_back(L"grimoire/gpt-5.5:xhigh");
 	launch.arguments.emplace_back(L"--no-open");
 	launch.arguments.emplace_back(L"--cwd");
 	launch.arguments.emplace_back(PathForCli(project_directory_));
@@ -1624,6 +1642,72 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			reply(true, nullptr);
 			return;
 		}
+		if (command == "grimoire_config_open") {
+			const std::string target = args.at("target").get<std::string>();
+			const bool open_directory = target == "folder";
+			std::filesystem::path path;
+			if (target == "effective") {
+				const auto configured_override = EnvironmentValue(L"OMP_GRIMOIRE_CONFIG_PATH");
+				const std::size_t first = configured_override
+					? configured_override->find_first_not_of(L" \t\r\n")
+					: std::wstring::npos;
+				if (first != std::wstring::npos) {
+					const std::size_t last = configured_override->find_last_not_of(L" \t\r\n");
+					path = configured_override->substr(first, last - first + 1);
+					if (path.is_relative()) {
+						std::error_code absolute_error;
+						const std::filesystem::path base = project_directory_.empty()
+							? std::filesystem::current_path(absolute_error)
+							: std::filesystem::path(project_directory_);
+						if (absolute_error) {
+							reply(false, nullptr, "resolving OMP_GRIMOIRE_CONFIG_PATH failed: " + absolute_error.message());
+							return;
+						}
+						path = (base / path).lexically_normal();
+					}
+					std::error_code status_error;
+					if (!std::filesystem::is_regular_file(path, status_error) || status_error) {
+						reply(false, nullptr, "OMP_GRIMOIRE_CONFIG_PATH does not name a readable config file");
+						return;
+					}
+				} else {
+					path = DefaultGrimoireUserConfigPath();
+					std::string create_error;
+					if (!EnsureGrimoireUserConfig(path, create_error)) {
+						reply(false, nullptr, std::move(create_error));
+						return;
+					}
+				}
+			} else if (open_directory) {
+				path = DefaultGrimoireUserConfigPath();
+				std::string create_error;
+				if (!EnsureGrimoireUserConfig(path, create_error)) {
+					reply(false, nullptr, std::move(create_error));
+					return;
+				}
+				if (open_directory) path = path.parent_path();
+			} else if (target == "team") {
+				path = DefaultGrimoireTeamConfigPath();
+				std::error_code status_error;
+				if (path.empty() || !std::filesystem::is_regular_file(path, status_error) || status_error) {
+					reply(false, nullptr, "the machine-wide Grimoire config does not exist");
+					return;
+				}
+			} else {
+				throw std::invalid_argument("unsupported Grimoire config target");
+			}
+
+			std::string open_error;
+			const bool opened = open_directory
+				? OpenDirectoryInExplorer(window_, path, open_error)
+				: OpenTextFileInNotepad(window_, path, open_error);
+			if (!opened) {
+				reply(false, nullptr, std::move(open_error));
+				return;
+			}
+			reply(true, Json{{"path", WideToUtf8(path.wstring())}});
+			return;
+		}
 		if (command == "project_list") {
 			Json projects = Json::array();
 			for (const auto& project : config_.recent_projects) {
@@ -1815,8 +1899,13 @@ void App::HandleDesktopRequest(std::string_view payload) {
 			return;
 		}
 		if (command == "model_visibility_update") {
+			const bool previous = config_.show_all_models;
 			config_.show_all_models = args.at("showAllModels").get<bool>();
-			SaveConfigFile();
+			if (!SaveConfigFile()) {
+				config_.show_all_models = previous;
+				reply(false, nullptr, "saving the model visibility preference failed");
+				return;
+			}
 			reply(true, Json{{"show_all_models", config_.show_all_models}});
 			return;
 		}
