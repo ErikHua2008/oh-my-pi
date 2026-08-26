@@ -699,7 +699,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	): AgentToolResult<ReadToolDetails> {
 		const displayMode = resolveFileDisplayMode(this.session, { raw: options.raw, immutable: options.immutable });
 		const details = options.details ?? {};
-		const allLines = text.split("\n");
+		const allLines = splitAddressableFileLines(text);
 		const totalLines = allLines.length;
 		details.totalLines = totalLines;
 		// User-requested 0-indexed range start. Lines BEFORE this are leading
@@ -898,7 +898,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	): AgentToolResult<ReadToolDetails> {
 		const displayMode = resolveFileDisplayMode(this.session, { raw: options.raw, immutable: options.immutable });
 		const details = options.details ?? {};
-		const allLines = text.split("\n");
+		const allLines = splitAddressableFileLines(text);
 		const totalLines = allLines.length;
 		details.totalLines = totalLines;
 		const shouldAddHashLines = displayMode.hashLines;
