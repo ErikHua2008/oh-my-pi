@@ -95,9 +95,12 @@ async function downloadFile(endpoint: string, file: ModelFile, destination: stri
 	const partial = `${destination}.part`;
 	const writer = Bun.file(partial).writer();
 	const hash = file.sha256 ? new Bun.CryptoHasher("sha256") : undefined;
+	const reader = response.body.getReader();
 	let written = 0;
 	try {
-		for await (const chunk of response.body) {
+		while (true) {
+			const { done, value: chunk } = await reader.read();
+			if (done) break;
 			written += chunk.byteLength;
 			hash?.update(chunk);
 			writer.write(chunk);
@@ -115,6 +118,8 @@ async function downloadFile(endpoint: string, file: ModelFile, destination: stri
 		}
 		await fs.rm(partial, { force: true });
 		throw error;
+	} finally {
+		reader.releaseLock();
 	}
 }
 

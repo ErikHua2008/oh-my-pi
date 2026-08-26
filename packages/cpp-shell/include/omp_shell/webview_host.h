@@ -26,7 +26,7 @@ public:
 
 	void Initialize(HWND window, ReadyHandler ready_handler, MessageHandler message_handler);
 	void Resize() const;
-	void Navigate(std::wstring_view url) const;
+	void Navigate(std::wstring_view url);
 	void Reload() const;
 	void ExecuteScript(std::wstring_view script) const;
 	void PostJson(std::wstring_view json) const;
@@ -54,6 +54,7 @@ private:
 	std::shared_ptr<std::atomic_bool> callback_alive_ = std::make_shared<std::atomic_bool>(true);
 	bool pending_inline_navigation_ = false;
 	std::wstring active_inline_uri_;
+	std::wstring trusted_loopback_origin_;
 	bool bridge_ready_ = false;
 	bool dark_theme_ = false;
 };

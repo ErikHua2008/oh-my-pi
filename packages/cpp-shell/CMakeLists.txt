@@ -95,6 +95,7 @@ add_library(
 	src/path_utils.cpp
 	src/screenshot_geometry.cpp
 	src/text_utils.cpp
+	src/webview_security.cpp
 	src/window_layout.cpp
 	src/windows_command_line.cpp
 )

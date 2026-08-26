@@ -140,7 +140,11 @@ int RunCoreProcessFixtureIfRequested(int argc, char** argv) {
 	if (mode == "native-gui-host") {
 		wchar_t value[8]{};
 		const DWORD length = GetEnvironmentVariableW(L"OMP_NATIVE_GUI_HOST", value, static_cast<DWORD>(std::size(value)));
-		if (length != 1 || value[0] != L'1' || GetConsoleWindow() != nullptr) return 8;
+		wchar_t grimoire[8]{};
+		const DWORD grimoire_length =
+			GetEnvironmentVariableW(L"OMP_GRIMOIRE_MODE", grimoire, static_cast<DWORD>(std::size(grimoire)));
+		if (length != 1 || value[0] != L'1' || grimoire_length != 1 || grimoire[0] != L'1' ||
+			GetConsoleWindow() != nullptr) return 8;
 		WriteFixtureLinks();
 		Sleep(60'000);
 		return 0;
@@ -195,6 +199,7 @@ OMP_TEST("CoreProcess reports ready and synchronously reaps a stopped child tree
 
 OMP_TEST("CoreProcess marks its descendant tree as a hidden native GUI host") {
 	ScopedEnvironmentVariable existing_marker(L"OMP_NATIVE_GUI_HOST", L"parent-value");
+	ScopedEnvironmentVariable existing_grimoire_mode(L"OMP_GRIMOIRE_MODE", L"parent-grimoire");
 	omp::shell::CoreProcess process;
 	EventCollector events;
 	std::string error;
@@ -206,6 +211,11 @@ OMP_TEST("CoreProcess marks its descendant tree as a hidden native GUI host") {
 		GetEnvironmentVariableW(L"OMP_NATIVE_GUI_HOST", parent_value, static_cast<DWORD>(std::size(parent_value)));
 	OMP_CHECK(parent_length == 12);
 	OMP_CHECK(std::wstring_view(parent_value, parent_length) == L"parent-value");
+	wchar_t parent_grimoire[32]{};
+	const DWORD parent_grimoire_length = GetEnvironmentVariableW(
+		L"OMP_GRIMOIRE_MODE", parent_grimoire, static_cast<DWORD>(std::size(parent_grimoire)));
+	OMP_CHECK(parent_grimoire_length == 15);
+	OMP_CHECK(std::wstring_view(parent_grimoire, parent_grimoire_length) == L"parent-grimoire");
 	OMP_CHECK(events.WaitFor(omp::shell::CoreEventKind::Ready, 5s).has_value());
 	process.Stop();
 }

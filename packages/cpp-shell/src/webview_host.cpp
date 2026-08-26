@@ -1,12 +1,12 @@
 #include "omp_shell/webview_host.h"
 
 #include "omp_shell/text_utils.h"
+#include "omp_shell/webview_security.h"
 
 #include <ShlObj.h>
 #include <shellapi.h>
 
 #include <algorithm>
-#include <cstdint>
 #include <filesystem>
 #include <nlohmann/json.hpp>
 #include <utility>
@@ -60,53 +60,6 @@ std::wstring HtmlEscape(std::wstring_view value) {
 		}
 	}
 	return escaped;
-}
-
-bool IsDecimalPort(std::wstring_view value) {
-	if (value.empty() || value.size() > 5) {
-		return false;
-	}
-	std::uint32_t port = 0;
-	for (const wchar_t ch : value) {
-		if (ch < L'0' || ch > L'9') {
-			return false;
-		}
-		port = port * 10U + static_cast<std::uint32_t>(ch - L'0');
-	}
-	return port != 0U && port <= 65535U;
-}
-
-bool IsLoopbackAuthority(std::wstring_view authority) {
-	if (authority.find(L'@') != std::wstring_view::npos) {
-		return false;
-	}
-	const auto separator = authority.rfind(L':');
-	if (separator == std::wstring_view::npos) {
-		return false;
-	}
-	const std::wstring_view host = authority.substr(0, separator);
-	return (host == L"127.0.0.1" || host == L"localhost") && IsDecimalPort(authority.substr(separator + 1));
-}
-
-bool IsTrustedLoopbackHttpUri(std::wstring_view uri) {
-	constexpr std::wstring_view scheme = L"http://";
-	if (uri.size() > 8U * 1024U || !uri.starts_with(scheme)) {
-		return false;
-	}
-	for (const wchar_t ch : uri) {
-		if (ch <= 0x20 || ch == 0x7F || ch == L'\\' || ch == L'"' || ch == L'<' || ch == L'>') {
-			return false;
-		}
-	}
-	const auto authority_end = uri.find_first_of(L"/?#", scheme.size());
-	const std::wstring_view authority = authority_end == std::wstring_view::npos
-		? uri.substr(scheme.size())
-		: uri.substr(scheme.size(), authority_end - scheme.size());
-	return IsLoopbackAuthority(authority);
-}
-
-bool IsTrustedWebViewUri(std::wstring_view uri) {
-	return uri == L"about:blank" || IsTrustedLoopbackHttpUri(uri);
 }
 
 bool IsInlineHtmlDataUri(std::wstring_view uri) {
@@ -395,12 +348,17 @@ void WebViewHost::Resize() const {
 	controller_->put_Bounds(bounds);
 }
 
-void WebViewHost::Navigate(std::wstring_view url) const {
-	if (!webview_ || !bridge_ready_ || !IsTrustedLoopbackHttpUri(url)) {
+void WebViewHost::Navigate(std::wstring_view url) {
+	const auto origin = TrustedLoopbackOrigin(url);
+	if (!webview_ || !bridge_ready_ || !origin) {
 		return;
 	}
+	const std::wstring previous_origin = trusted_loopback_origin_;
+	trusted_loopback_origin_ = *origin;
 	const std::wstring owned(url);
-	webview_->Navigate(owned.c_str());
+	if (FAILED(webview_->Navigate(owned.c_str()))) {
+		trusted_loopback_origin_ = previous_origin;
+	}
 }
 
 void WebViewHost::Reload() const {
@@ -508,12 +466,15 @@ HRESULT WebViewHost::ConfigureController() {
 				}
 				const std::wstring uri(raw_uri);
 				CoTaskMemFree(raw_uri);
-				const bool expected_inline = pending_inline_navigation_ && IsInlineHtmlDataUri(uri);
+				const bool expected_inline = pending_inline_navigation_ &&
+					(uri == L"about:blank" || IsInlineHtmlDataUri(uri));
 				pending_inline_navigation_ = false;
-				const bool trusted = expected_inline || IsTrustedWebViewUri(uri);
+				const auto loopback_origin = TrustedLoopbackOrigin(uri);
+				const bool trusted_loopback = loopback_origin && *loopback_origin == trusted_loopback_origin_;
+				const bool trusted = expected_inline || trusted_loopback;
 				if (expected_inline) {
 					active_inline_uri_ = uri;
-				} else if (trusted) {
+				} else if (trusted_loopback) {
 					active_inline_uri_.clear();
 				}
 				if (!trusted) {
@@ -571,8 +532,10 @@ HRESULT WebViewHost::ConfigureController() {
 				}
 				const std::wstring source(raw_source);
 				CoTaskMemFree(raw_source);
+				const auto source_origin = TrustedLoopbackOrigin(source);
 				const bool trusted_source =
-					IsTrustedWebViewUri(source) || (!active_inline_uri_.empty() && source == active_inline_uri_);
+					(source_origin && *source_origin == trusted_loopback_origin_) ||
+					(!active_inline_uri_.empty() && source == active_inline_uri_);
 				if (!trusted_source) {
 					return S_OK;
 				}

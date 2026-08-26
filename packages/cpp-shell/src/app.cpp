@@ -1809,8 +1809,13 @@ void App::HandleDesktopRequest(std::string_view payload) {
 				reply(false, nullptr, "the active project cannot be removed");
 				return;
 			}
+			ShellConfig previous_config = config_;
 			static_cast<void>(config_.RemoveProject(path));
-			SaveConfigFile();
+			if (!SaveConfigFile()) {
+				config_ = std::move(previous_config);
+				reply(false, nullptr, "saving the recent project list failed");
+				return;
+			}
 			reply(true, nullptr);
 			return;
 		}
@@ -1929,9 +1934,16 @@ void App::HandleDesktopRequest(std::string_view payload) {
 				reply(false, nullptr, "session preference entries are invalid");
 				return;
 			}
+			auto previous_pinned = std::move(config_.pinned_sessions);
+			auto previous_read_through = std::move(config_.session_read_through);
 			config_.pinned_sessions = std::move(pinned);
 			config_.session_read_through = std::move(read_through);
-			SaveConfigFile();
+			if (!SaveConfigFile()) {
+				config_.pinned_sessions = std::move(previous_pinned);
+				config_.session_read_through = std::move(previous_read_through);
+				reply(false, nullptr, "saving the session preferences failed");
+				return;
+			}
 			reply(true, nullptr);
 			return;
 		}

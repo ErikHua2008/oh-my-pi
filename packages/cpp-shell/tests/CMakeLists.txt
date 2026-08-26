@@ -13,6 +13,7 @@ add_executable(
 	screenshot_geometry_test.cpp
 	test_main.cpp
 	text_utils_test.cpp
+	webview_security_test.cpp
 	window_layout_test.cpp
 	windows_command_line_test.cpp
 )
