@@ -24,4 +24,26 @@ describe("StreamEndpointer", () => {
 		expect([...segment.audio.slice(0, 10)]).toEqual([...silence]);
 		expect([...segment.audio.slice(10)]).toEqual([...onset]);
 	});
+
+	it("keeps a continuous 13-second phrase intact instead of hard-splitting at 12 seconds", () => {
+		const endpointer = new StreamEndpointer({ sampleRate: 1_000, frameMs: 10 });
+		const liveEvents = endpointer.push(new Float32Array(13_000).fill(0.5));
+		const finalEvents = endpointer.flush();
+
+		expect(liveEvents.filter(event => event.kind === "segment")).toHaveLength(0);
+		expect(finalEvents).toHaveLength(1);
+		expect(finalEvents[0]?.kind).toBe("segment");
+	});
+
+	it("does not split a sentence at a short 700-millisecond pause", () => {
+		const endpointer = new StreamEndpointer({ sampleRate: 1_000, frameMs: 10 });
+		const first = endpointer.push(new Float32Array(1_000).fill(0.5));
+		const pause = endpointer.push(new Float32Array(700));
+		const second = endpointer.push(new Float32Array(1_000).fill(0.5));
+		const finalEvents = endpointer.flush();
+
+		expect([...first, ...pause, ...second].filter(event => event.kind === "segment")).toHaveLength(0);
+		expect(finalEvents).toHaveLength(1);
+		expect(finalEvents[0]?.kind).toBe("segment");
+	});
 });

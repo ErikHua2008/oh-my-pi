@@ -287,4 +287,23 @@ describe("STTController preflight", () => {
 		expect(editor.clearVolatileText).toHaveBeenCalledTimes(1);
 		expect(options.showWarning).toHaveBeenCalledWith("speech model failed to load");
 	});
+
+	it("does not resurrect recording after a synchronous microphone failure", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
+		const stopCapture = vi.fn();
+		const editor = makeEditor();
+		const options = makeOptions();
+		controller = new STTController(callback => {
+			callback(new Error("microphone initialization failed"), new Float32Array());
+			return { stop: stopCapture };
+		});
+
+		await controller.toggle(editor, options);
+
+		expect(controller.state).toBe("idle");
+		expect(stopCapture).toHaveBeenCalledTimes(1);
+		expect(options.onStateChange).not.toHaveBeenCalledWith("recording");
+		expect(options.showWarning).toHaveBeenCalledWith("microphone initialization failed");
+	});
 });
