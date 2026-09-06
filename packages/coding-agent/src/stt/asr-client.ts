@@ -22,6 +22,8 @@ type PendingRequest =
 
 export interface SttTranscribeOptions {
 	language?: string;
+	/** Project vocabulary used by the Chinese precision mode. */
+	hotwords?: readonly string[];
 	signal?: AbortSignal;
 }
 
@@ -163,7 +165,14 @@ export class SttClient {
 		};
 		options.signal?.addEventListener("abort", abort, { once: true });
 		try {
-			worker.send({ type: "transcribe", id, modelKey, audio, language: options.language });
+			worker.send({
+				type: "transcribe",
+				id,
+				modelKey,
+				audio,
+				language: options.language,
+				hotwords: options.hotwords ? [...options.hotwords] : undefined,
+			});
 			return await promise;
 		} finally {
 			options.signal?.removeEventListener("abort", abort);

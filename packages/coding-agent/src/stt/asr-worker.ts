@@ -28,15 +28,25 @@ import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDevice
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
 import type { SttTransport, SttWorkerInbound } from "./asr-protocol";
 import { type EndpointerEvent, StreamEndpointer } from "./endpointer";
+import { applyProjectHotwords, normalizeProjectHotwords } from "./hotwords";
 import { getBundledSttModelsDir, getBundledSttRuntimeDir } from "./model-paths";
 import {
 	getSttModelSpec,
+	type SherpaParaformerSttModelSpec,
+	type SherpaSenseVoiceSttModelSpec,
 	type SherpaSttModelSpec,
+	type SherpaTransducerSttModelSpec,
 	type SttModel,
 	type SttModelKey,
 	type TransformersSttModelSpec,
 } from "./models";
-import { loadSourceSherpaRuntime, type SherpaOfflineRecognizer, type SherpaRuntime } from "./sherpa-runtime";
+import {
+	loadSourceSherpaRuntime,
+	type SherpaOfflineConfig,
+	type SherpaOfflineRecognizer,
+	type SherpaRuntime,
+	type SherpaVad,
+} from "./sherpa-runtime";
 
 const ASR_TASK = "automatic-speech-recognition";
 const SHERPA_PACKAGE = "sherpa-onnx-node";
@@ -47,11 +57,30 @@ const STRIDE_LENGTH_S = 5;
 // The client always resamples to 16 kHz mono float32 before sending; sherpa-onnx
 // is told the true input rate (it resamples internally to its feature config).
 const ASR_SAMPLE_RATE = 16_000;
-// Hub origin for raw sherpa-onnx model files (encoder/decoder/joiner/tokens).
-const HF_RESOLVE_BASE = "https://huggingface.co";
+const LONG_FORM_MIN_SAMPLES = ASR_SAMPLE_RATE * 12;
+const VAD_CHUNK_SAMPLES = ASR_SAMPLE_RATE / 5;
+const VAD_CONTEXT_SAMPLES = Math.round(ASR_SAMPLE_RATE * 0.3);
+const VAD_MODEL_RELATIVE_PATH = path.join("_vad", "silero_vad.onnx");
+const VAD_MODEL_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx";
+const VAD_MODEL_SIZE = 643_854;
+const VAD_MODEL_SHA256 = "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6";
 // Coalesce download progress so streaming a multi-hundred-MB model file doesn't
 // flood the IPC channel with one event per chunk.
 const PROGRESS_EMIT_BYTES = 4_000_000;
+let vadModelPromise: Promise<string> | undefined;
+
+function sherpaHubEndpoints(): string[] {
+	const configured = process.env.HF_ENDPOINT?.trim();
+	return [...new Set([configured, "https://huggingface.co", "https://hf-mirror.com"].filter(Boolean))] as string[];
+}
+
+function sherpaModelUrl(endpoint: string, repo: string, revision: string | undefined, filename: string): string {
+	const encoded = filename
+		.split("/")
+		.map(part => encodeURIComponent(part))
+		.join("/");
+	return `${endpoint.replace(/\/$/, "")}/${repo}/resolve/${revision ?? "main"}/${encoded}`;
+}
 
 const sttModelDevicePreference = resolveTinyModelDevicePreference();
 const sttModelDtypeOverride = resolveTinyModelDtypeOverride();
@@ -131,13 +160,13 @@ function getSherpaVersionSpec(): string {
 }
 
 function getSttRuntimeDir(): string {
-	const bundledRuntime = getBundledSttRuntimeDir();
-	if (bundledRuntime) return bundledRuntime;
 	const key = getTransformersVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_");
 	return path.join(path.dirname(getTinyModelsCacheDir()), "stt-runtime", `transformers-${key}`);
 }
 
 function getSherpaRuntimeDir(): string {
+	const bundledRuntime = getBundledSttRuntimeDir();
+	if (bundledRuntime) return bundledRuntime;
 	const key = getSherpaVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_");
 	return path.join(path.dirname(getTinyModelsCacheDir()), "stt-runtime", `sherpa-${key}`);
 }
@@ -308,16 +337,34 @@ async function loadTransformersModel(
  */
 async function downloadSherpaFile(
 	repo: string,
+	revision: string | undefined,
 	filename: string,
 	dest: string,
 	modelKey: SttModelKey,
 	transport: SttTransport,
 	requestId: string,
 ): Promise<void> {
-	const url = `${HF_RESOLVE_BASE}/${repo}/resolve/main/${filename}`;
-	const response = await fetch(url, { redirect: "follow" });
-	if (!response.ok || !response.body) {
-		throw new Error(`Failed to download ${filename} (${repo}): HTTP ${response.status}`);
+	let response: Response | undefined;
+	let lastError: unknown;
+	for (const endpoint of sherpaHubEndpoints()) {
+		try {
+			const candidate = await fetch(sherpaModelUrl(endpoint, repo, revision, filename), {
+				redirect: "follow",
+				signal: AbortSignal.timeout(10 * 60_000),
+			});
+			if (candidate.ok && candidate.body) {
+				response = candidate;
+				break;
+			}
+			lastError = new Error(`HTTP ${candidate.status}`);
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	if (!response?.body) {
+		throw new Error(
+			`Failed to download ${filename} (${repo})${lastError ? `: ${errorMessage(lastError)}` : ". Check your network connection."}`,
+		);
 	}
 	const total = Number(response.headers.get("content-length") ?? 0);
 	transport.send({
@@ -330,6 +377,7 @@ async function downloadSherpaFile(
 	let loaded = 0;
 	let lastEmitted = 0;
 	const reader = response.body.getReader();
+	let failure: unknown;
 	try {
 		for (;;) {
 			const { done, value } = await reader.read();
@@ -353,9 +401,22 @@ async function downloadSherpaFile(
 				});
 			}
 		}
+		if (total > 0 && loaded !== total) {
+			throw new Error(`Incomplete download for ${filename}: expected ${total} bytes, received ${loaded}`);
+		}
+	} catch (error) {
+		failure = error;
 	} finally {
+		reader.releaseLock();
 		await handle.close();
 	}
+	if (failure !== undefined) {
+		await fs.rm(part, { force: true });
+		throw failure;
+	}
+	// Windows rename does not replace an existing zero-byte/corrupt destination.
+	// Remove it only after the complete sidecar has safely landed.
+	await fs.rm(dest, { force: true });
 	await fs.rename(part, dest);
 }
 
@@ -363,15 +424,29 @@ async function downloadSherpaFile(
  * Ensure all sherpa-onnx model files for a tier are present in the cache,
  * downloading any that are missing, and return their absolute paths.
  */
-async function ensureSherpaModelFiles(
-	spec: SherpaSttModelSpec,
+async function ensureSherpaModelFiles<T extends SherpaSttModelSpec>(
+	spec: T,
 	modelKey: SttModelKey,
 	transport: SttTransport,
 	requestId: string,
-): Promise<{ encoder: string; decoder: string; joiner: string; tokens: string }> {
-	const dir = path.join(getTinyModelsCacheDir(), spec.repo);
-	await fs.mkdir(dir, { recursive: true });
-	const resolved = {} as { encoder: string; decoder: string; joiner: string; tokens: string };
+): Promise<T["files"]> {
+	const bundledRoot = getBundledSttModelsDir();
+	const bundledDir = bundledRoot ? path.join(bundledRoot, spec.repo) : undefined;
+	const bundledComplete =
+		bundledDir !== undefined &&
+		(
+			await Promise.all(
+				Object.values(spec.files).map(relative =>
+					fs
+						.stat(path.join(bundledDir, relative))
+						.then(stat => stat.isFile() && stat.size > 0)
+						.catch(() => false),
+				),
+			)
+		).every(Boolean);
+	const dir = bundledComplete ? bundledDir! : path.join(getTinyModelsCacheDir(), spec.repo);
+	if (!bundledComplete) await fs.mkdir(dir, { recursive: true });
+	const resolved = {} as T["files"];
 	for (const role in spec.files) {
 		const key = role as keyof typeof spec.files;
 		const filename = spec.files[key];
@@ -380,10 +455,55 @@ async function ensureSherpaModelFiles(
 			.stat(dest)
 			.then(stats => stats.size > 0)
 			.catch(() => false);
-		if (!present) await downloadSherpaFile(spec.repo, filename, dest, modelKey, transport, requestId);
+		if (!present) await downloadSherpaFile(spec.repo, spec.revision, filename, dest, modelKey, transport, requestId);
 		resolved[key] = dest;
 	}
 	return resolved;
+}
+
+/** Build the native sherpa configuration while preserving each model family's file shape. */
+export function createSherpaModelConfig<T extends SherpaSttModelSpec>(
+	spec: T,
+	files: T["files"],
+	numThreads: number,
+): SherpaOfflineConfig["modelConfig"] {
+	if (spec.family === "sense_voice") {
+		const senseVoiceFiles = files as SherpaSenseVoiceSttModelSpec["files"];
+		return {
+			senseVoice: {
+				model: senseVoiceFiles.model,
+				language: spec.language,
+				useInverseTextNormalization: spec.useInverseTextNormalization ? 1 : 0,
+			},
+			tokens: senseVoiceFiles.tokens,
+			numThreads,
+			provider: "cpu",
+			debug: 0,
+		};
+	}
+	if (spec.family === "paraformer") {
+		const paraformerFiles = files as SherpaParaformerSttModelSpec["files"];
+		return {
+			paraformer: { model: paraformerFiles.model },
+			tokens: paraformerFiles.tokens,
+			numThreads,
+			provider: "cpu",
+			debug: 0,
+		};
+	}
+	const transducerFiles = files as SherpaTransducerSttModelSpec["files"];
+	return {
+		transducer: {
+			encoder: transducerFiles.encoder,
+			decoder: transducerFiles.decoder,
+			joiner: transducerFiles.joiner,
+		},
+		tokens: transducerFiles.tokens,
+		modelType: spec.modelType,
+		numThreads,
+		provider: "cpu",
+		debug: 0,
+	};
 }
 
 async function loadSherpaModel(
@@ -393,18 +513,12 @@ async function loadSherpaModel(
 	requestId: string,
 ): Promise<LoadedModel> {
 	const runtime = await loadSherpaRuntime(transport, requestId, modelKey);
-	const files = await ensureSherpaModelFiles(spec, modelKey, transport, requestId);
 	const startedAt = performance.now();
 	const numThreads = Math.max(1, Math.min(4, os.availableParallelism()));
+	const files = await ensureSherpaModelFiles(spec, modelKey, transport, requestId);
+	const modelConfig: SherpaOfflineConfig["modelConfig"] = createSherpaModelConfig(spec, files, numThreads);
 	const recognizer = await runtime.OfflineRecognizer.createAsync({
-		modelConfig: {
-			transducer: { encoder: files.encoder, decoder: files.decoder, joiner: files.joiner },
-			tokens: files.tokens,
-			modelType: spec.modelType,
-			numThreads,
-			provider: "cpu",
-			debug: 0,
-		},
+		modelConfig,
 		decodingMethod: "greedy_search",
 	});
 	sendLog(transport, "debug", "stt: local model loaded", {
@@ -416,6 +530,136 @@ async function loadSherpaModel(
 		elapsedMs: Math.round(performance.now() - startedAt),
 	});
 	return { engine: "sherpa", recognizer };
+}
+
+async function fileMatchesDigest(filePath: string, size: number, sha256: string): Promise<boolean> {
+	const exactSize = await fs
+		.stat(filePath)
+		.then(stat => stat.isFile() && stat.size === size)
+		.catch(() => false);
+	if (!exactSize) return false;
+	const hash = new Bun.CryptoHasher("sha256");
+	try {
+		for await (const chunk of Bun.file(filePath).stream()) hash.update(chunk);
+		return hash.digest("hex") === sha256;
+	} catch {
+		return false;
+	}
+}
+
+async function prepareVadModel(): Promise<string> {
+	const bundledRoot = getBundledSttModelsDir();
+	if (bundledRoot) {
+		const bundled = path.join(bundledRoot, VAD_MODEL_RELATIVE_PATH);
+		if (await fileMatchesDigest(bundled, VAD_MODEL_SIZE, VAD_MODEL_SHA256)) return bundled;
+	}
+	const destination = path.join(path.dirname(getTinyModelsCacheDir()), "stt-vad", "silero_vad.onnx");
+	if (await fileMatchesDigest(destination, VAD_MODEL_SIZE, VAD_MODEL_SHA256)) return destination;
+	await fs.mkdir(path.dirname(destination), { recursive: true });
+	await fs.rm(destination, { force: true });
+	const response = await fetch(VAD_MODEL_URL, {
+		redirect: "follow",
+		signal: AbortSignal.timeout(2 * 60_000),
+	});
+	if (!response.ok || !response.body) throw new Error(`Failed to download neural VAD model: HTTP ${response.status}`);
+	const partial = `${destination}.part`;
+	const handle = await fs.open(partial, "w");
+	const reader = response.body.getReader();
+	const hash = new Bun.CryptoHasher("sha256");
+	let written = 0;
+	let failure: unknown;
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (value) {
+				written += value.byteLength;
+				hash.update(value);
+				await handle.write(value);
+			}
+		}
+	} catch (error) {
+		failure = error;
+	} finally {
+		reader.releaseLock();
+		await handle.close();
+	}
+	if (failure !== undefined) {
+		await fs.rm(partial, { force: true });
+		throw failure;
+	}
+	if (written !== VAD_MODEL_SIZE || hash.digest("hex") !== VAD_MODEL_SHA256) {
+		await fs.rm(partial, { force: true });
+		throw new Error("Downloaded neural VAD model failed its integrity check");
+	}
+	await fs.rm(destination, { force: true });
+	await fs.rename(partial, destination);
+	return destination;
+}
+
+async function ensureVadModel(): Promise<string> {
+	if (!vadModelPromise) {
+		vadModelPromise = prepareVadModel().catch(error => {
+			vadModelPromise = undefined;
+			throw error;
+		});
+	}
+	return vadModelPromise;
+}
+
+function createNeuralVad(runtime: SherpaRuntime, model: string, audioSamples: number): SherpaVad {
+	return new runtime.Vad(
+		{
+			sileroVad: {
+				model,
+				threshold: 0.35,
+				minSilenceDuration: 0.5,
+				minSpeechDuration: 0.15,
+				windowSize: 512,
+				maxSpeechDuration: 20,
+			},
+			sampleRate: ASR_SAMPLE_RATE,
+			numThreads: 1,
+			provider: "cpu",
+			debug: 0,
+		},
+		Math.max(30, Math.ceil(audioSamples / ASR_SAMPLE_RATE) + 2),
+	);
+}
+
+/** Segment long-form audio with Silero's neural speech detector. */
+export function segmentLongAudioWithVad(runtime: SherpaRuntime, model: string, audio: Float32Array): Float32Array[] {
+	const vad = createNeuralVad(runtime, model, audio.length);
+	for (let offset = 0; offset < audio.length; offset += VAD_CHUNK_SAMPLES) {
+		vad.acceptWaveform(audio.subarray(offset, Math.min(audio.length, offset + VAD_CHUNK_SAMPLES)));
+	}
+	vad.flush();
+	const intervals: Array<{ start: number; end: number }> = [];
+	while (!vad.isEmpty()) {
+		const segment = vad.front();
+		if (segment.samples.length >= ASR_SAMPLE_RATE / 5) {
+			intervals.push({
+				start: Math.max(0, segment.start - VAD_CONTEXT_SAMPLES),
+				end: Math.min(audio.length, segment.start + segment.samples.length + VAD_CONTEXT_SAMPLES),
+			});
+		}
+		vad.pop();
+	}
+	// Silence-free clips make acoustic models lose boundary phonemes. Keep 300 ms
+	// of original context around each neural segment, splitting overlapping pads
+	// at their midpoint so no word is decoded twice.
+	for (let index = 1; index < intervals.length; index += 1) {
+		const previous = intervals[index - 1]!;
+		const current = intervals[index]!;
+		if (current.start < previous.end) {
+			const boundary = Math.floor((current.start + previous.end) / 2);
+			previous.end = boundary;
+			current.start = boundary;
+		}
+	}
+	return intervals
+		.filter(interval => interval.end > interval.start)
+		.map(interval => audio.slice(interval.start, interval.end));
 }
 
 async function loadModel(modelKey: SttModelKey, transport: SttTransport, requestId: string): Promise<LoadedModel> {
@@ -451,12 +695,14 @@ async function decodeSegment(
 	spec: SttModel,
 	audio: Float32Array,
 	language: string | undefined,
+	hotwords: readonly string[] = [],
 ): Promise<string> {
 	if (model.engine === "sherpa") {
 		const stream = model.recognizer.createStream();
 		stream.acceptWaveform({ samples: audio, sampleRate: ASR_SAMPLE_RATE });
 		const result = await model.recognizer.decodeAsync(stream);
-		return (result.text ?? "").trim();
+		const text = (result.text ?? "").trim();
+		return spec.engine === "sherpa" && spec.family === "paraformer" ? applyProjectHotwords(text, hotwords) : text;
 	}
 	const options: AsrCallOptions = {
 		chunk_length_s: CHUNK_LENGTH_S,
@@ -479,11 +725,34 @@ async function transcribeAudio(
 	modelKey: SttModelKey,
 	audio: Float32Array,
 	language: string | undefined,
+	hotwords: readonly string[] = [],
 ): Promise<string> {
 	const spec = getSttModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown stt model: ${modelKey}`);
 	const model = await loadModel(modelKey, transport, requestId);
-	return runOnModel(() => decodeSegment(model, spec, audio, language));
+	if (audio.length < LONG_FORM_MIN_SAMPLES) {
+		return runOnModel(() => decodeSegment(model, spec, audio, language, hotwords));
+	}
+	const runtime = await loadSherpaRuntime(transport, requestId, modelKey);
+	const vadModel = await ensureVadModel();
+	const segments = segmentLongAudioWithVad(runtime, vadModel, audio);
+	if (segments.length === 0) return "";
+	const terms = normalizeProjectHotwords(hotwords);
+	const decoded: string[] = [];
+	for (const segment of segments) {
+		const text = await runOnModel(() => decodeSegment(model, spec, segment, language, terms));
+		if (text) decoded.push(text);
+	}
+	sendLog(transport, "debug", "stt: neural VAD long-form decode completed", {
+		modelKey,
+		durationMs: Math.round((audio.length / ASR_SAMPLE_RATE) * 1000),
+		segmentCount: segments.length,
+		segmentDurationMs: Math.round(
+			(segments.reduce((total, segment) => total + segment.length, 0) / ASR_SAMPLE_RATE) * 1000,
+		),
+		hotwordCount: terms.length,
+	});
+	return decoded.join(" ");
 }
 
 async function handleBatchRequest(
@@ -496,7 +765,14 @@ async function handleBatchRequest(
 			transport.send({ type: "downloaded", id: request.id });
 			return;
 		}
-		const text = await transcribeAudio(transport, request.id, request.modelKey, request.audio, request.language);
+		const text = await transcribeAudio(
+			transport,
+			request.id,
+			request.modelKey,
+			request.audio,
+			request.language,
+			request.hotwords,
+		);
 		transport.send({ type: "transcription", id: request.id, text });
 	} catch (error) {
 		transport.send({ type: "error", id: request.id, error: errorText(error) });

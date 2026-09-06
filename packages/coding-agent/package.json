@@ -74,6 +74,7 @@
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
     "mupdf": "catalog:",
+    "pinyin-pro": "catalog:",
     "puppeteer-core": "catalog:"
   },
   "optionalDependencies": {

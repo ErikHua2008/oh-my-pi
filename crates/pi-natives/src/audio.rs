@@ -12,9 +12,34 @@ use napi::{
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
-use pi_voice::audio::{CaptureStream, PlaybackState, PlaybackStream};
+use pi_voice::audio::{CaptureStream, PlaybackState, PlaybackStream, audio_input_devices};
 
 type CaptureCallback = ThreadsafeFunction<Float32Array, UnknownReturnValue>;
+
+/// One selectable microphone endpoint.
+#[napi(object)]
+pub struct AudioInputDevice {
+	pub id:         String,
+	pub name:       String,
+	pub is_default: bool,
+}
+
+/// Enumerate active microphones without opening a capture stream.
+#[napi]
+pub fn list_audio_input_devices() -> Result<Vec<AudioInputDevice>> {
+	audio_input_devices()
+		.map(|devices| {
+			devices
+				.into_iter()
+				.map(|device| AudioInputDevice {
+					id:         device.id,
+					name:       device.name,
+					is_default: device.is_default,
+				})
+				.collect()
+		})
+		.map_err(napi::Error::from_reason)
+}
 
 /// Default-microphone capture converted to mono `f32` at the requested sample
 /// rate.
@@ -25,14 +50,16 @@ pub struct AudioCapture {
 
 #[napi]
 impl AudioCapture {
-	/// Open the default microphone and deliver low-latency mono PCM chunks.
+	/// Open the selected microphone (or the system default when omitted) and
+	/// deliver low-latency mono PCM chunks.
 	#[napi(constructor)]
 	pub fn new(
 		sample_rate: u32,
 		#[napi(ts_arg_type = "(error: Error | null, samples: Float32Array) => void")]
 		on_audio: CaptureCallback,
+		device_id: Option<String>,
 	) -> Result<Self> {
-		let stream = CaptureStream::start(sample_rate, move |samples| {
+		let stream = CaptureStream::start_selected(sample_rate, device_id, move |samples| {
 			on_audio
 				.call(Ok(Float32Array::new(samples.to_vec())), ThreadsafeFunctionCallMode::NonBlocking);
 		})

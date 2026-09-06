@@ -43,21 +43,23 @@ export interface SttDownloadProgress {
  * transformers.js Whisper tiers a complete download leaves `config.json` plus
  * matching `encoder*.onnx` and `decoder*.onnx` shards under `onnx/` (a partial
  * fetch with only one shard, or a bare `config.json`, reads as not-cached); for
- * sherpa-onnx tiers every model file (encoder/decoder/joiner + tokens) must be
+ * sherpa-onnx tiers every model file declared by the model (transducer
+ * encoder/decoder/joiner + tokens, or SenseVoice model + tokens) must be
  * present (`.part` sidecars from an interrupted fetch are ignored).
  */
 async function isSttModelCompleteAt(spec: SttModelSpec, modelRoot: string): Promise<boolean> {
 	const repoDir = path.join(modelRoot, spec.repo);
 	if (spec.engine === "sherpa") {
-		try {
-			const root = new Set(await fs.readdir(repoDir));
-			for (const role in spec.files) {
-				if (!root.has(spec.files[role as keyof typeof spec.files])) return false;
-			}
-			return true;
-		} catch {
-			return false;
-		}
+		return (
+			await Promise.all(
+				Object.values(spec.files).map(relative =>
+					fs
+						.stat(path.join(repoDir, relative))
+						.then(stat => stat.isFile() && stat.size > 0)
+						.catch(() => false),
+				),
+			)
+		).every(Boolean);
 	}
 	try {
 		const root = await fs.readdir(repoDir);
@@ -84,7 +86,7 @@ export async function isSttModelCached(key: string): Promise<boolean> {
 }
 
 /**
- * Download (or warm from cache) the selected ONNX Whisper model via the speech
+ * Download (or warm from cache) the selected local speech model via the speech
  * worker, resolving once the model is fully present and loaded. Streams real
  * Hub progress with an aggregated integer percent. Rejects if the worker cannot
  * obtain the model. Safe to call non-interactively.

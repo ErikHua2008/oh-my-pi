@@ -10,18 +10,53 @@ interface SherpaOfflineResult {
 
 interface SherpaOfflineStream {
 	acceptWaveform(audio: { samples: Float32Array; sampleRate: number }): void;
+	setOption(key: string, value: string): void;
 }
 
-interface SherpaOfflineConfig {
+export interface SherpaOfflineConfig {
 	modelConfig: {
-		transducer: { encoder: string; decoder: string; joiner: string };
+		transducer?: { encoder: string; decoder: string; joiner: string };
+		paraformer?: { model: string };
+		senseVoice?: {
+			model: string;
+			language: string;
+			useInverseTextNormalization: number;
+		};
 		tokens: string;
-		modelType: string;
+		modelType?: string;
 		numThreads: number;
 		provider: string;
 		debug: number;
 	};
 	decodingMethod: string;
+}
+
+export interface SherpaVadConfig {
+	sileroVad: {
+		model: string;
+		threshold: number;
+		minSilenceDuration: number;
+		minSpeechDuration: number;
+		windowSize: number;
+		maxSpeechDuration: number;
+	};
+	sampleRate: number;
+	numThreads: number;
+	provider: string;
+	debug: number;
+}
+
+export interface SherpaSpeechSegment {
+	start: number;
+	samples: Float32Array;
+}
+
+export interface SherpaVad {
+	acceptWaveform(samples: Float32Array): void;
+	flush(): void;
+	isEmpty(): boolean;
+	front(enableExternalBuffer?: boolean): SherpaSpeechSegment;
+	pop(): void;
 }
 
 /** A sherpa-onnx recognizer instance used by the STT worker. */
@@ -35,6 +70,7 @@ export interface SherpaRuntime {
 	OfflineRecognizer: {
 		createAsync(config: SherpaOfflineConfig): Promise<SherpaOfflineRecognizer>;
 	};
+	Vad: new (config: SherpaVadConfig, bufferSizeInSeconds: number) => SherpaVad;
 }
 
 /** Loads the nearest working source-workspace sherpa wrapper, including hoisted fallbacks. */

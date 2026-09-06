@@ -13,6 +13,7 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 
 const WHISPER_BASE_REPO = "onnx-community/whisper-base";
 const PARAKEET_REPO = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+const SENSEVOICE_REPO = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17";
 
 async function touch(file: string): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true });
@@ -69,6 +70,15 @@ describe("isSttModelCached completeness", () => {
 		expect(await downloader.isSttModelCached("parakeet")).toBe(true);
 	});
 
+	it("requires both SenseVoice files to be present", async () => {
+		const repoDir = path.join(cacheDir, SENSEVOICE_REPO);
+		await touch(path.join(repoDir, "model.int8.onnx"));
+		expect(await downloader.isSttModelCached("sensevoice")).toBe(false);
+
+		await touch(path.join(repoDir, "tokens.txt"));
+		expect(await downloader.isSttModelCached("sensevoice")).toBe(true);
+	});
+
 	it("recognizes a complete read-only model shipped by the desktop app", async () => {
 		const bundledRoot = path.join(tmp, "bundled-stt");
 		const repoDir = path.join(bundledRoot, WHISPER_BASE_REPO);
@@ -78,6 +88,16 @@ describe("isSttModelCached completeness", () => {
 		await touch(path.join(repoDir, "onnx", "decoder_model_merged_quantized.onnx"));
 
 		expect(await downloader.isSttModelCached("fast")).toBe(true);
+	});
+
+	it("recognizes the bundled SenseVoice model shipped by the desktop app", async () => {
+		const bundledRoot = path.join(tmp, "bundled-sensevoice");
+		const repoDir = path.join(bundledRoot, SENSEVOICE_REPO);
+		process.env[BUNDLED_STT_MODELS_ENV] = bundledRoot;
+		await touch(path.join(repoDir, "model.int8.onnx"));
+		await touch(path.join(repoDir, "tokens.txt"));
+
+		expect(await downloader.isSttModelCached("sensevoice")).toBe(true);
 	});
 });
 

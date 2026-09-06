@@ -41,11 +41,16 @@ constexpr wchar_t kBundledSttRuntimeEnvironment[] = L"OMP_BUNDLED_STT_RUNTIME";
 	const std::filesystem::path executable = CurrentExecutablePath();
 	if (executable.empty()) return std::nullopt;
 	const std::filesystem::path root = executable.parent_path() / L"models" / L"stt";
-	const std::filesystem::path model = root / L"onnx-community" / L"whisper-small";
+	const std::filesystem::path sense_voice =
+		root / L"csukuangfj" / L"sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17";
+	const std::filesystem::path paraformer =
+		root / L"csukuangfj" / L"sherpa-onnx-paraformer-zh-2024-03-09";
 	const std::array required{
-		model / L"config.json",
-		model / L"onnx" / L"encoder_model_quantized.onnx",
-		model / L"onnx" / L"decoder_model_merged_quantized.onnx",
+		sense_voice / L"model.int8.onnx",
+		sense_voice / L"tokens.txt",
+		paraformer / L"model.int8.onnx",
+		paraformer / L"tokens.txt",
+		root / L"_vad" / L"silero_vad.onnx",
 	};
 	std::error_code error;
 	for (const auto& file : required) {
@@ -59,8 +64,13 @@ constexpr wchar_t kBundledSttRuntimeEnvironment[] = L"OMP_BUNDLED_STT_RUNTIME";
 	if (executable.empty()) return std::nullopt;
 	const std::filesystem::path runtime = executable.parent_path() / L"models" / L"stt" / L"runtime";
 	std::error_code error;
+	if (!std::filesystem::is_regular_file(runtime / L"node_modules" / L"sherpa-onnx-node" / L"package.json", error) ||
+		error) {
+		return std::nullopt;
+	}
+	error.clear();
 	if (!std::filesystem::is_regular_file(
-			runtime / L"node_modules" / L"@huggingface" / L"transformers" / L"package.json", error) ||
+			runtime / L"node_modules" / L"sherpa-onnx-win-x64" / L"sherpa-onnx.node", error) ||
 		error) {
 		return std::nullopt;
 	}

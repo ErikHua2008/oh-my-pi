@@ -65,6 +65,7 @@
       "onnxruntime-node": "1.26.0",
       "postcss": "^8.5.16",
       "prettier": "^3.9.5",
+      "pinyin-pro": "3.29.3",
       "puppeteer-core": "25.3.0",
       "react": "19.2.7",
       "react-chartjs-2": "^5.3.1",

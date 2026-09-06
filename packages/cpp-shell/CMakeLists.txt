@@ -24,7 +24,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(OMP_CPP_SHELL_BUILD_TESTS "Build cpp-shell unit tests" ON)
 option(OMP_CPP_SHELL_BUILD_WEB_ASSETS "Rebuild collab-web assets with the native shell" ON)
 option(OMP_CPP_SHELL_BUILD_CORE_BUNDLE "Rebuild the single-file coding-agent Core bundle" ON)
-option(OMP_CPP_SHELL_BUNDLE_STT_MODEL "Bundle the offline Whisper Small model beside the shell" ON)
+option(OMP_CPP_SHELL_BUNDLE_STT_MODEL "Bundle offline SenseVoice/Paraformer models and Silero VAD beside the shell" ON)
 
 get_filename_component(OMP_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 

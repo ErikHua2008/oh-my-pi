@@ -63,6 +63,7 @@ export const isoProbe = nativeBindings.isoProbe;
 export const isoResolve = nativeBindings.isoResolve;
 export const isoStart = nativeBindings.isoStart;
 export const isoStop = nativeBindings.isoStop;
+export const listAudioInputDevices = nativeBindings.listAudioInputDevices;
 export const listWorkspace = nativeBindings.listWorkspace;
 export const matchesKey = nativeBindings.matchesKey;
 export const matchesKittySequence = nativeBindings.matchesKittySequence;

@@ -168,12 +168,14 @@ base URL, key environment-variable name, live model discovery, default model,
 reasoning effort, exclusions, and offline fallbacks. Real credentials are
 rejected in TOML and remain environment-only.
 
-Release builds also prepare the multilingual q8 Whisper Small speech model in
-`models/stt/onnx-community/whisper-small` beside the executable. The model is
-revision-pinned and its ONNX weights are SHA-256 verified while downloading;
-the matching Transformers/ONNX Windows x64 runtime is stored in
-`models/stt/runtime`. Distributed builds therefore support Chinese speech input
-without a first-use model or runtime download. Set
+Release builds prepare both the multilingual SenseVoice fast model and the
+Mandarin Paraformer precision model under `models/stt/csukuangfj`, plus the
+Silero neural VAD at `models/stt/_vad/silero_vad.onnx`. Every weight is
+revision-pinned and SHA-256 verified while downloading; the matching
+sherpa-onnx Windows x64 runtime is stored in `models/stt/runtime`. Distributed
+builds therefore support selectable fast/precision offline speech input,
+neural long-recording segmentation, and project vocabulary without a first-use
+model or runtime download. Set
 `OMP_CPP_SHELL_BUNDLE_STT_MODEL=OFF` only for a deliberately thin developer
 build. `HF_ENDPOINT` may select an internal Hugging Face or ModelScope mirror
 when the official Hub is unavailable.

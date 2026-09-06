@@ -15,7 +15,9 @@ use std::{
 
 use windows_sys::{
 	Win32::{
-		Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+		Foundation::{
+			CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+		},
 		Media::{
 			Audio::{
 				AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
@@ -26,15 +28,18 @@ use windows_sys::{
 		},
 		System::{
 			Com::{
-				CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+				CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+				CoUninitialize,
+				StructuredStorage::{PROPVARIANT, PropVariantClear},
 			},
 			Threading::{CreateEventW, SetEvent, WaitForSingleObject},
+			Variant::VT_LPWSTR,
 		},
 	},
 	core::{GUID, HRESULT, IUnknown_Vtbl},
 };
 
-use super::{CaptureSink, DeviceConfig, PlaybackFill};
+use super::{AudioInputDevice, CaptureSink, DeviceConfig, PlaybackFill};
 use crate::VoiceResult;
 
 const WAIT_TIMEOUT_MS: u32 = 2_000;
@@ -45,6 +50,10 @@ const IID_IMMDEVICE_ENUMERATOR: GUID = GUID::from_u128(0xa956_64d2_9614_4f35_a74
 const IID_IAUDIO_CLIENT: GUID = GUID::from_u128(0x1cb9_ad4c_dbfa_4c32_b178_c2f5_68a7_03b2);
 const IID_IAUDIO_RENDER_CLIENT: GUID = GUID::from_u128(0xf294_acfc_3146_4483_a7bf_addc_a7c2_60e2);
 const IID_IAUDIO_CAPTURE_CLIENT: GUID = GUID::from_u128(0xc8ad_bd64_e71e_48a0_a4de_185c_395c_d317);
+const DEVICE_STATE_ACTIVE: u32 = 0x0000_0001;
+const STGM_READ: u32 = 0;
+const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY =
+	PROPERTYKEY { fmtid: GUID::from_u128(0xa45c_254e_df1c_4efd_8020_67d1_46a8_50e0), pid: 14 };
 
 #[repr(C)]
 struct RawComInterface<V> {
@@ -90,6 +99,39 @@ struct MmDeviceVtable {
 	open_property_store: unsafe extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> HRESULT,
 	get_id:              unsafe extern "system" fn(*mut c_void, *mut *mut u16) -> HRESULT,
 	get_state:           unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT,
+}
+
+#[repr(C)]
+#[allow(dead_code, reason = "all slots are required to preserve the COM vtable layout")]
+struct MmDeviceCollectionVtable {
+	base:      IUnknown_Vtbl,
+	get_count: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT,
+	item:      unsafe extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> HRESULT,
+}
+
+impl ComVtable for MmDeviceCollectionVtable {
+	fn unknown(&self) -> &IUnknown_Vtbl {
+		&self.base
+	}
+}
+
+#[repr(C)]
+#[allow(dead_code, reason = "all slots are required to preserve the COM vtable layout")]
+struct PropertyStoreVtable {
+	base:      IUnknown_Vtbl,
+	get_count: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT,
+	get_at:    unsafe extern "system" fn(*mut c_void, u32, *mut PROPERTYKEY) -> HRESULT,
+	get_value:
+		unsafe extern "system" fn(*mut c_void, *const PROPERTYKEY, *mut PROPVARIANT) -> HRESULT,
+	set_value:
+		unsafe extern "system" fn(*mut c_void, *const PROPERTYKEY, *const PROPVARIANT) -> HRESULT,
+	commit:    unsafe extern "system" fn(*mut c_void) -> HRESULT,
+}
+
+impl ComVtable for PropertyStoreVtable {
+	fn unknown(&self) -> &IUnknown_Vtbl {
+		&self.base
+	}
 }
 
 impl ComVtable for MmDeviceVtable {
@@ -241,23 +283,175 @@ impl Drop for OwnedEvent {
 	}
 }
 
-struct ComApartment;
+struct ComApartment {
+	should_uninitialize: bool,
+}
 
 impl ComApartment {
 	fn initialize() -> VoiceResult<Self> {
-		// SAFETY: this dedicated worker has not initialized COM yet; the reserved
-		// pointer is required to be null.
+		// The capture/playback workers are normally fresh MTA threads. Device
+		// enumeration can also be called through the native binding on a thread
+		// that the host already initialized as STA. COM is usable in that case,
+		// but changing its apartment model is not, so do not claim ownership of
+		// that thread's initialization or call CoUninitialize for it.
+		// SAFETY: the reserved pointer is required to be null.
 		let hr = unsafe { CoInitializeEx(null(), COINIT_MULTITHREADED as u32) };
+		if hr == RPC_E_CHANGED_MODE {
+			return Ok(Self { should_uninitialize: false });
+		}
 		check_hresult(hr, "CoInitializeEx")?;
-		Ok(Self)
+		Ok(Self { should_uninitialize: true })
 	}
 }
 
 impl Drop for ComApartment {
 	fn drop(&mut self) {
-		// SAFETY: paired with the successful `CoInitializeEx` on this same thread.
-		unsafe { CoUninitialize() };
+		if self.should_uninitialize {
+			// SAFETY: paired with the successful `CoInitializeEx` on this same thread.
+			unsafe { CoUninitialize() };
+		}
 	}
+}
+
+fn create_device_enumerator() -> VoiceResult<ComPtr<MmDeviceEnumeratorVtable>> {
+	let mut raw = null_mut();
+	// SAFETY: all pointers are valid for the call and `raw` receives the
+	// requested endpoint-enumerator interface.
+	let hr = unsafe {
+		CoCreateInstance(
+			&CLSID_MMDEVICE_ENUMERATOR,
+			null_mut(),
+			CLSCTX_ALL,
+			&IID_IMMDEVICE_ENUMERATOR,
+			&mut raw,
+		)
+	};
+	check_hresult(hr, "CoCreateInstance(MMDeviceEnumerator)")?;
+	ComPtr::new(raw, "CoCreateInstance(MMDeviceEnumerator)")
+}
+
+fn wide_string(ptr: *const u16) -> String {
+	if ptr.is_null() {
+		return String::new();
+	}
+	let mut len = 0;
+	// SAFETY: callers pass a live, NUL-terminated COM string. The loop stops at
+	// its terminator before constructing the borrowed slice.
+	unsafe {
+		while *ptr.add(len) != 0 {
+			len += 1;
+		}
+		String::from_utf16_lossy(slice::from_raw_parts(ptr, len))
+	}
+}
+
+fn device_id(device: &ComPtr<MmDeviceVtable>) -> VoiceResult<String> {
+	let mut raw = null_mut();
+	// SAFETY: the live endpoint writes a CoTaskMem-allocated NUL-terminated id.
+	let hr = unsafe { (device.vtable().get_id)(device.as_void(), &mut raw) };
+	check_hresult(hr, "IMMDevice::GetId")?;
+	if raw.is_null() {
+		return Err("IMMDevice::GetId returned null".to_owned());
+	}
+	let id = wide_string(raw);
+	// SAFETY: `IMMDevice::GetId` allocates the returned string with CoTaskMem.
+	unsafe { CoTaskMemFree(raw.cast()) };
+	Ok(id)
+}
+
+fn device_name(device: &ComPtr<MmDeviceVtable>) -> VoiceResult<String> {
+	let mut store_raw = null_mut();
+	// SAFETY: the endpoint is live and `store_raw` receives a read-only property
+	// store.
+	let hr =
+		unsafe { (device.vtable().open_property_store)(device.as_void(), STGM_READ, &mut store_raw) };
+	check_hresult(hr, "IMMDevice::OpenPropertyStore")?;
+	let store: ComPtr<PropertyStoreVtable> = ComPtr::new(store_raw, "IMMDevice::OpenPropertyStore")?;
+	let mut value = PROPVARIANT::default();
+	// SAFETY: the property store and property key are live, and `value` is
+	// writable.
+	let hr = unsafe {
+		(store.vtable().get_value)(store.as_void(), &PKEY_DEVICE_FRIENDLY_NAME, &mut value)
+	};
+	if let Err(error) = check_hresult(hr, "IPropertyStore::GetValue(PKEY_Device_FriendlyName)") {
+		// A failed property read may still have initialized the variant. Clearing a
+		// zero-initialized VT_EMPTY value is also valid, so this closes both paths.
+		// SAFETY: `value` was zero initialized before the property-store call.
+		unsafe { PropVariantClear(&mut value) };
+		return Err(error);
+	}
+	// SAFETY: the property store initialized the PROPVARIANT discriminant.
+	let value_data = unsafe { value.Anonymous.Anonymous };
+	let name = if value_data.vt == VT_LPWSTR {
+		// SAFETY: VT_LPWSTR makes this union arm active until PropVariantClear.
+		wide_string(unsafe { value_data.Anonymous.pwszVal })
+	} else {
+		String::new()
+	};
+	// SAFETY: `value` was initialized by IPropertyStore and must be cleared once.
+	let clear_hr = unsafe { PropVariantClear(&mut value) };
+	check_hresult(clear_hr, "PropVariantClear")?;
+	Ok(name)
+}
+
+fn default_capture_device(
+	enumerator: &ComPtr<MmDeviceEnumeratorVtable>,
+) -> VoiceResult<ComPtr<MmDeviceVtable>> {
+	let mut raw = null_mut();
+	// SAFETY: the enumerator is live and the output pointer is writable.
+	let hr = unsafe {
+		(enumerator.vtable().get_default_audio_endpoint)(
+			enumerator.as_void(),
+			eCapture,
+			eConsole,
+			&mut raw,
+		)
+	};
+	check_hresult(hr, "IMMDeviceEnumerator::GetDefaultAudioEndpoint")?;
+	ComPtr::new(raw, "IMMDeviceEnumerator::GetDefaultAudioEndpoint")
+}
+
+/// Enumerate active Windows capture endpoints and mark the current console
+/// default.
+pub fn list_audio_input_devices() -> VoiceResult<Vec<AudioInputDevice>> {
+	let _apartment = ComApartment::initialize()?;
+	let enumerator = create_device_enumerator()?;
+	let default_id = default_capture_device(&enumerator)
+		.and_then(|device| device_id(&device))
+		.ok();
+	let mut collection_raw = null_mut();
+	// SAFETY: the enumerator is live and `collection_raw` receives a collection.
+	let hr = unsafe {
+		(enumerator.vtable().enum_audio_endpoints)(
+			enumerator.as_void(),
+			eCapture,
+			DEVICE_STATE_ACTIVE,
+			&mut collection_raw,
+		)
+	};
+	check_hresult(hr, "IMMDeviceEnumerator::EnumAudioEndpoints")?;
+	let collection: ComPtr<MmDeviceCollectionVtable> =
+		ComPtr::new(collection_raw, "IMMDeviceEnumerator::EnumAudioEndpoints")?;
+	let mut count = 0;
+	// SAFETY: the collection is live and `count` is writable.
+	let hr = unsafe { (collection.vtable().get_count)(collection.as_void(), &mut count) };
+	check_hresult(hr, "IMMDeviceCollection::GetCount")?;
+	let mut devices = Vec::with_capacity(count as usize);
+	for index in 0..count {
+		let mut raw = null_mut();
+		// SAFETY: `index` is within the count returned above and `raw` is writable.
+		let hr = unsafe { (collection.vtable().item)(collection.as_void(), index, &mut raw) };
+		check_hresult(hr, "IMMDeviceCollection::Item")?;
+		let device: ComPtr<MmDeviceVtable> = ComPtr::new(raw, "IMMDeviceCollection::Item")?;
+		let id = device_id(&device)?;
+		let name = device_name(&device).unwrap_or_else(|_| format!("Microphone {}", index + 1));
+		devices.push(AudioInputDevice {
+			is_default: default_id.as_deref() == Some(id.as_str()),
+			id,
+			name,
+		});
+	}
+	Ok(devices)
 }
 
 struct BaseStream {
@@ -282,38 +476,35 @@ impl BaseStream {
 		config: DeviceConfig,
 		data_flow: i32,
 		event: Option<Arc<OwnedEvent>>,
+		device_id: Option<&str>,
 	) -> VoiceResult<Self> {
 		let apartment = ComApartment::initialize()?;
-
-		let mut enumerator_raw = null_mut();
-		// SAFETY: all pointers are valid for the call, and `enumerator_raw` is an
-		// out parameter for the requested interface.
-		let hr = unsafe {
-			CoCreateInstance(
-				&CLSID_MMDEVICE_ENUMERATOR,
-				null_mut(),
-				CLSCTX_ALL,
-				&IID_IMMDEVICE_ENUMERATOR,
-				&mut enumerator_raw,
-			)
-		};
-		check_hresult(hr, "CoCreateInstance(MMDeviceEnumerator)")?;
-		let enumerator: ComPtr<MmDeviceEnumeratorVtable> =
-			ComPtr::new(enumerator_raw, "CoCreateInstance(MMDeviceEnumerator)")?;
+		let enumerator = create_device_enumerator()?;
 
 		let mut device_raw = null_mut();
-		// SAFETY: the enumerator is live and the output pointer is writable.
-		let hr = unsafe {
-			(enumerator.vtable().get_default_audio_endpoint)(
-				enumerator.as_void(),
-				data_flow,
-				eConsole,
-				&mut device_raw,
-			)
+		let device_label;
+		let hr = if let Some(selected_id) = device_id {
+			let wide = selected_id.encode_utf16().chain([0]).collect::<Vec<_>>();
+			device_label = "IMMDeviceEnumerator::GetDevice";
+			// SAFETY: the endpoint id is NUL-terminated for this synchronous call,
+			// the enumerator is live, and `device_raw` is writable.
+			unsafe {
+				(enumerator.vtable().get_device)(enumerator.as_void(), wide.as_ptr(), &mut device_raw)
+			}
+		} else {
+			device_label = "IMMDeviceEnumerator::GetDefaultAudioEndpoint";
+			// SAFETY: the enumerator is live and the output pointer is writable.
+			unsafe {
+				(enumerator.vtable().get_default_audio_endpoint)(
+					enumerator.as_void(),
+					data_flow,
+					eConsole,
+					&mut device_raw,
+				)
+			}
 		};
-		check_hresult(hr, "IMMDeviceEnumerator::GetDefaultAudioEndpoint")?;
-		let device: ComPtr<MmDeviceVtable> =
-			ComPtr::new(device_raw, "IMMDeviceEnumerator::GetDefaultAudioEndpoint")?;
+		check_hresult(hr, device_label)?;
+		let device: ComPtr<MmDeviceVtable> = ComPtr::new(device_raw, device_label)?;
 
 		let mut client_raw = null_mut();
 		// SAFETY: the device is live, activation parameters are optional and null,
@@ -428,7 +619,7 @@ struct PlaybackStream {
 
 impl PlaybackStream {
 	fn open(config: DeviceConfig, event: Option<Arc<OwnedEvent>>) -> VoiceResult<Self> {
-		let base = BaseStream::open(config, eRender, event)?;
+		let base = BaseStream::open(config, eRender, event, None)?;
 		let period_frames = u32::try_from(config.period_samples())
 			.map_err(|_| "WASAPI playback period is too large".to_owned())?;
 		if period_frames > base.buffer_size {
@@ -472,8 +663,12 @@ struct CaptureStream {
 }
 
 impl CaptureStream {
-	fn open(config: DeviceConfig, event: Option<Arc<OwnedEvent>>) -> VoiceResult<Self> {
-		let base = BaseStream::open(config, eCapture, event)?;
+	fn open(
+		config: DeviceConfig,
+		event: Option<Arc<OwnedEvent>>,
+		device_id: Option<&str>,
+	) -> VoiceResult<Self> {
+		let base = BaseStream::open(config, eCapture, event, device_id)?;
 		let mut capture_raw = null_mut();
 		// SAFETY: the initialized client is live and `capture_raw` receives the
 		// requested service interface.
@@ -551,14 +746,19 @@ pub struct CaptureDevice {
 }
 
 impl CaptureDevice {
-	/// Open and start shared-mode capture on the default console endpoint.
-	pub fn start(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
+	/// Open and start shared-mode capture on a selected endpoint, or on the
+	/// default console endpoint when `device_id` is omitted.
+	pub fn start(
+		config: DeviceConfig,
+		device_id: Option<String>,
+		sink: CaptureSink,
+	) -> VoiceResult<Self> {
 		let stop = Arc::new(AtomicBool::new(false));
 		let worker_stop = Arc::clone(&stop);
 		let (startup_tx, startup_rx) = mpsc::channel();
 		let thread = thread::Builder::new()
 			.name("pi-voice-wasapi-capture".to_owned())
-			.spawn(move || capture_thread(config, sink, worker_stop, startup_tx))
+			.spawn(move || capture_thread(config, device_id, sink, worker_stop, startup_tx))
 			.map_err(|error| format!("failed to spawn WASAPI capture thread: {error}"))?;
 
 		match startup_rx.recv() {
@@ -708,11 +908,12 @@ fn run_playback(
 
 fn capture_thread(
 	config: DeviceConfig,
+	device_id: Option<String>,
 	mut sink: CaptureSink,
 	stop: Arc<AtomicBool>,
 	startup: Sender<VoiceResult<Arc<OwnedEvent>>>,
 ) -> VoiceResult<()> {
-	let mut stream = match CaptureStream::open(config, None) {
+	let mut stream = match CaptureStream::open(config, None, device_id.as_deref()) {
 		Ok(stream) => stream,
 		Err(error) => {
 			let _ = startup.send(Err(error.clone()));
@@ -730,7 +931,8 @@ fn capture_thread(
 			Err(RunError::Other(error)) => return Err(error),
 			Err(RunError::DeviceInvalidated) => {
 				drop(stream);
-				let Some(reopened) = reopen_capture(config, &event, &stop)? else {
+				let Some(reopened) = reopen_capture(config, device_id.as_deref(), &event, &stop)?
+				else {
 					return Ok(());
 				};
 				stream = reopened;
@@ -865,10 +1067,11 @@ fn reopen_playback(
 
 fn reopen_capture(
 	config: DeviceConfig,
+	device_id: Option<&str>,
 	event: &Arc<OwnedEvent>,
 	stop: &AtomicBool,
 ) -> VoiceResult<Option<CaptureStream>> {
-	let mut last_error = "default endpoint remained unavailable".to_owned();
+	let mut last_error = "capture endpoint remained unavailable".to_owned();
 	for attempt in 0..REOPEN_ATTEMPTS {
 		if stop.load(Ordering::Acquire) {
 			return Ok(None);
@@ -879,7 +1082,7 @@ fn reopen_capture(
 				return Ok(None);
 			}
 		}
-		match CaptureStream::open(config, Some(Arc::clone(event))) {
+		match CaptureStream::open(config, Some(Arc::clone(event)), device_id) {
 			Ok(stream) => return Ok(Some(stream)),
 			Err(error) => last_error = error,
 		}

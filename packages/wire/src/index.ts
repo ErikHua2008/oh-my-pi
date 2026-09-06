@@ -362,6 +362,22 @@ export interface ChatSearchResult {
 }
 
 export type SpeechInputState = "idle" | "preparing" | "recording" | "transcribing";
+export type SpeechInputMode = "sensevoice-fast" | "paraformer-zh";
+export type SpeechAudioQuality = "good" | "quiet" | "clipping" | "unavailable";
+
+export interface SpeechInputDevice {
+	id: string;
+	name: string;
+	isDefault: boolean;
+}
+
+export interface SpeechInputConfig {
+	devices: SpeechInputDevice[];
+	/** Empty means follow the current system default. */
+	deviceId: string;
+	mode: SpeechInputMode;
+	hotwords: string[];
+}
 
 /** Incremental host-side microphone/STT state for the desktop composer. */
 export interface SpeechInputSnapshot {
@@ -370,6 +386,11 @@ export interface SpeechInputSnapshot {
 	text: string;
 	status?: string;
 	error?: string;
+	/** Real microphone level/quality, updated about five times per second. */
+	level?: number;
+	peak?: number;
+	quality?: SpeechAudioQuality;
+	deviceName?: string;
 	/** True only on the terminal frame whose text should remain in the composer. */
 	final?: boolean;
 }
@@ -438,6 +459,9 @@ export type GuestFrame =
 	  }
 	/** Start/stop/cancel host-side local microphone transcription. */
 	| { t: "speech-input"; action: "start" | "stop" | "cancel" }
+	/** Read or update desktop microphone/model preferences. */
+	| { t: "speech-config-get" }
+	| { t: "speech-config-set"; deviceId?: string; mode?: SpeechInputMode; hotwords?: string[] }
 	/** Persist a pathless clipboard/screenshot image in the host media library. */
 	| {
 			t: "media-import";
@@ -508,6 +532,7 @@ export type HostFrame =
 	  }
 	/** Targeted microphone/STT lifecycle and incremental transcript. */
 	| ({ t: "speech-input-state" } & SpeechInputSnapshot)
+	| { t: "speech-config"; config: SpeechInputConfig; error?: string }
 	/** Targeted lazy-media reply. `error` replies omit `data` and `mimeType`. */
 	| {
 			t: "image";

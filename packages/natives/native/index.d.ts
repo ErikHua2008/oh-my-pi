@@ -5,8 +5,11 @@
  * rate.
  */
 export declare class AudioCapture {
-  /** Open the default microphone and deliver low-latency mono PCM chunks. */
-  constructor(sampleRate: number, onAudio: (error: Error | null, samples: Float32Array) => void)
+  /**
+   * Open the selected microphone (or the system default when omitted) and
+   * deliver low-latency mono PCM chunks.
+   */
+  constructor(sampleRate: number, onAudio: (error: Error | null, samples: Float32Array) => void, deviceId?: string | undefined | null)
   /** Stop capture immediately and release the microphone. */
   stop(): void
 }
@@ -518,6 +521,13 @@ export interface AstReplaceResult {
   limitReached: boolean
   /** Parse or pattern errors when not failing the whole operation. */
   parseErrors?: Array<string>
+}
+
+/** One selectable microphone endpoint. */
+export interface AudioInputDevice {
+  id: string
+  name: string
+  isDefault: boolean
 }
 
 export interface AxNode {
@@ -1335,6 +1345,9 @@ export interface LineRange {
   /** 1-indexed inclusive last visible line. */
   endLine: number
 }
+
+/** Enumerate active microphones without opening a capture stream. */
+export declare function listAudioInputDevices(): Array<AudioInputDevice>
 
 /**
  * Walk the workspace once and return tree entries plus AGENTS.md candidates.

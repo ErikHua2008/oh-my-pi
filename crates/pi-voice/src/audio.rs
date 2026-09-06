@@ -16,8 +16,15 @@ use tokio::sync::Notify;
 
 use crate::{
 	VoiceResult,
-	device::{CaptureDevice, DeviceConfig, PlaybackDevice},
+	device::{
+		AudioInputDevice, CaptureDevice, DeviceConfig, PlaybackDevice, list_audio_input_devices,
+	},
 };
+
+/// Return active microphone endpoints available to native capture.
+pub fn audio_input_devices() -> VoiceResult<Vec<AudioInputDevice>> {
+	list_audio_input_devices()
+}
 
 // PulseAudio TCP playback stutters with a 20 ms target buffer; 50 ms absorbs
 // transport jitter while preserving interactive latency.
@@ -293,17 +300,31 @@ impl CaptureStream {
 	where
 		C: FnMut(&[f32]) + Send + 'static,
 	{
+		Self::start_selected(sample_rate, None, move |samples| on_audio(samples))
+	}
+
+	/// Open a selected microphone endpoint. `None` follows the current system
+	/// default; a stale or unavailable endpoint id returns a descriptive error.
+	pub fn start_selected<C>(
+		sample_rate: u32,
+		device_id: Option<String>,
+		mut on_audio: C,
+	) -> VoiceResult<Self>
+	where
+		C: FnMut(&[f32]) + Send + 'static,
+	{
 		let sample_rate = audio_sample_rate(sample_rate)?;
 		let config = DeviceConfig { sample_rate, period_ms: CAPTURE_PERIOD_MS };
-		let device = CaptureDevice::start(
+		let device = CaptureDevice::start_selected(
 			config,
+			device_id,
 			Box::new(move |samples| {
 				if !samples.is_empty() {
 					on_audio(samples);
 				}
 			}),
 		)
-		.map_err(|error| format!("Failed to open the default microphone: {error}"))?;
+		.map_err(|error| format!("Failed to open the microphone: {error}"))?;
 		Ok(Self { device: Some(device) })
 	}
 

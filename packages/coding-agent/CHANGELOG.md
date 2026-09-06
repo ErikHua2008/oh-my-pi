@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added selectable microphones with real input-quality metering, a SenseVoice fast mode, and a Paraformer Chinese precision mode with per-project hotwords and Silero neural-VAD segmentation for long recordings. The C++ shell bundles both revision-pinned models, the VAD, and the Windows x64 runtime for fully offline use.
 - Added write-gated collab thinking controls, with model-supported selectors published in session state and authoritative changes broadcast to every guest.
 - Added session-room model frames to the collab host: guests can request the available models (`model-list`, answered after background discovery settles) and switch the session model (`model-change`, write-gated with the RPC `set_model` lookup semantics); the new model reaches every guest through the existing `state` broadcast.
 - Evolved `omp --mode core` into a multi-session engine: a process-wide `SessionRegistry` holds any number of concurrent sessions (created/resumed/dropped through a new `ctrl-` control room), `CollabHost` scopes agent snapshots and agent-cmd/transcript access to each session's own agent tree, and the core process now prints two deep links (`ctrl:` for the session sidebar, `session:` for the unchanged join/connect contract). Browser guests get a 260px session sidebar with list/create/resume/drop, live streaming dots, and an auto-return to the list when a session ends.
@@ -38,6 +39,7 @@
 
 ### Changed
 
+- Changed C++ desktop speech input from Whisper Small to selectable SenseVoice/Paraformer modes, preserving the existing Whisper and Parakeet choices elsewhere.
 - Provider-native (remote) compaction failures no longer block the session: when every compaction candidate fails remote compaction (V2 streaming and V1 fallback), auto-compaction and manual `/compact` now warn with a notice and produce a local summary instead of aborting.
 - Changed completed-run collapsing to retain the full persisted display transcript across compaction, so older requests remain reachable through terminal scrollback and Alt+O while provider context stays compacted.
 - Changed tool routing prompts to call built-in tools and batched `task` directly by default, reserving `eval` JavaScript orchestration for complex value-dependent loops, branching, pipelines, and structured aggregation.

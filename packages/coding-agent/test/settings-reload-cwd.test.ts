@@ -281,6 +281,21 @@ describe("Settings.reloadForCwd", () => {
 			const reloaded = await Settings.loadIsolated({ cwd: startDir, agentDir });
 			expect(reloaded.getProjectModelRole("default")).toBe("anthropic/claude-sonnet-4-5");
 		});
+		it("keeps speech hotwords in the project that owns them", async () => {
+			const settings = await Settings.init({ cwd: startDir, agentDir });
+			settings.setProjectSttHotwords(["宇宙魔方", "霍华德"]);
+			await settings.flush();
+
+			expect(YAML.parse(await Bun.file(path.join(startDir, ".omp", "config.yml")).text())).toEqual({
+				stt: { projectHotwords: ["宇宙魔方", "霍华德"] },
+			});
+			expect(await Bun.file(path.join(agentDir, "config.yml")).exists()).toBe(false);
+
+			const reloaded = await Settings.loadIsolated({ cwd: startDir, agentDir });
+			expect(reloaded.get("stt.projectHotwords")).toEqual(["宇宙魔方", "霍华德"]);
+			await reloaded.reloadForCwd(bareProject);
+			expect(reloaded.get("stt.projectHotwords")).toEqual([]);
+		});
 		it("does not copy unedited roles from other project settings providers", async () => {
 			await Bun.write(
 				path.join(scopedProject, ".omp", "settings.json"),

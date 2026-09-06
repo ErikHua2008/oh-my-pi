@@ -7,6 +7,7 @@ import {
 	FilePenLine,
 	Folder,
 	FolderOpen,
+	Mic2,
 	Monitor,
 	Moon,
 	Network,
@@ -20,10 +21,12 @@ import {
 	Trash2,
 } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import type { GuestClient } from "../../lib/client";
 import { type DesktopGrimoireConfigTarget, desktopBridge } from "../../lib/desktop-bridge";
 import { useModelVisibility } from "../../lib/model-visibility";
 import { blockNativeSurfaces } from "../../lib/native-surface-visibility";
 import { type ThemePreference, useThemePreference } from "../../lib/theme";
+import { useGuestSnapshot } from "../../lib/use-guest";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 export interface SettingsModalProps {
@@ -38,9 +41,11 @@ export interface SettingsModalProps {
 	loadArchivedSessions?(): Promise<readonly SessionSummary[]>;
 	onRestoreArchivedSession?(id: string): Promise<void>;
 	onDeleteArchivedSession?(id: string): Promise<void>;
+	/** Active session transport used for host-side microphone preferences. */
+	speechClient?: GuestClient;
 }
 
-type SettingsSection = "general" | "appearance" | "archived";
+type SettingsSection = "general" | "speech" | "appearance" | "archived";
 
 const THEME_OPTIONS: readonly {
 	preference: ThemePreference;
@@ -68,6 +73,150 @@ function archivedSessionTitle(session: SessionSummary): string {
 			.split(/[\\/]+/)
 			.filter(Boolean)
 			.pop() || "Untitled chat"
+	);
+}
+
+function normalizeSpeechHotwords(text: string): string[] {
+	const result: string[] = [];
+	const seen = new Set<string>();
+	for (const raw of text.split(/[,，\n]/u)) {
+		const word = raw.trim().replace(/\s+/g, " ");
+		const key = word.toLocaleLowerCase();
+		if (word.length < 2 || word.length > 32 || seen.has(key)) continue;
+		seen.add(key);
+		result.push(word);
+		if (result.length >= 64) break;
+	}
+	return result;
+}
+
+function SpeechSettings({ client }: { client: GuestClient }): ReactNode {
+	const snapshot = useGuestSnapshot(client);
+	const config = snapshot.speechConfig;
+	const [hotwords, setHotwords] = useState("");
+	const [saved, setSaved] = useState(false);
+	const [saving, setSaving] = useState(false);
+	const pendingHotwords = useRef<readonly string[] | null>(null);
+	const seenSpeechConfigRevision = useRef(snapshot.speechConfigRevision);
+
+	useEffect(() => {
+		client.requestSpeechConfig();
+	}, [client]);
+	useEffect(() => {
+		if (seenSpeechConfigRevision.current === snapshot.speechConfigRevision) return;
+		seenSpeechConfigRevision.current = snapshot.speechConfigRevision;
+		if (!config) return;
+		setHotwords(config.hotwords.join("\n"));
+		if (pendingHotwords.current) {
+			const pending = pendingHotwords.current;
+			const confirmed =
+				pending.length === config.hotwords.length &&
+				pending.every((word, index) => word === config.hotwords[index]);
+			setSaved(confirmed && !snapshot.speechConfigError);
+			setSaving(false);
+			pendingHotwords.current = null;
+		}
+	}, [config, snapshot.speechConfigError, snapshot.speechConfigRevision]);
+
+	const qualityLabel =
+		snapshot.speech.quality === "clipping"
+			? "输入削波，请降低麦克风增益或离麦克风远一些"
+			: snapshot.speech.quality === "quiet"
+				? "输入音量偏低，请靠近麦克风或提高输入音量"
+				: snapshot.speech.quality === "good"
+					? "录音电平正常"
+					: "开始语音录入后，这里会显示真实输入质量";
+
+	return (
+		<section className="sh-settings-section sh-settings-speech" aria-labelledby="sh-settings-speech-title">
+			<div className="sh-settings-section-head">
+				<h2 id="sh-settings-speech-title">语音录入</h2>
+				<p>麦克风选择保存在本机；识别和质量检测均离线完成，不保存原始录音。</p>
+			</div>
+			{snapshot.speechConfigError && (
+				<p className="sh-settings-config-feedback is-error" role="alert">
+					{snapshot.speechConfigError}
+				</p>
+			)}
+			<label className="sh-settings-field">
+				<span>麦克风</span>
+				<select
+					value={config?.deviceId ?? ""}
+					disabled={!config || snapshot.speech.state !== "idle"}
+					onChange={event => client.updateSpeechConfig({ deviceId: event.target.value })}
+				>
+					<option value="">跟随 Windows 默认麦克风</option>
+					{config?.devices.map(device => (
+						<option value={device.id} key={device.id}>
+							{device.name}
+							{device.isDefault ? "（当前默认）" : ""}
+						</option>
+					))}
+				</select>
+			</label>
+			<div className="sh-settings-mic-quality" data-quality={snapshot.speech.quality ?? "unavailable"}>
+				<div className="sh-settings-mic-meter" aria-hidden="true">
+					<span style={{ width: `${Math.round((snapshot.speech.level ?? 0) * 100)}%` }} />
+				</div>
+				<span>{snapshot.speech.deviceName ? `${snapshot.speech.deviceName} · ${qualityLabel}` : qualityLabel}</span>
+			</div>
+			<fieldset className="sh-settings-speech-modes" disabled={!config || snapshot.speech.state !== "idle"}>
+				<legend>识别模式</legend>
+				<label>
+					<input
+						type="radio"
+						name="speech-mode"
+						checked={config?.mode === "paraformer-zh"}
+						onChange={() => client.updateSpeechConfig({ mode: "paraformer-zh" })}
+					/>
+					<span>
+						<strong>中文精准</strong>
+						<small>Paraformer + 神经网络 VAD + 项目热词</small>
+					</span>
+				</label>
+				<label>
+					<input
+						type="radio"
+						name="speech-mode"
+						checked={config?.mode === "sensevoice-fast"}
+						onChange={() => client.updateSpeechConfig({ mode: "sensevoice-fast" })}
+					/>
+					<span>
+						<strong>快速通用</strong>
+						<small>SenseVoice，多语言、低内存、响应快</small>
+					</span>
+				</label>
+			</fieldset>
+			<label className="sh-settings-field">
+				<span>项目热词</span>
+				<textarea
+					value={hotwords}
+					disabled={!config || snapshot.speech.state !== "idle"}
+					onChange={event => {
+						setHotwords(event.target.value);
+						setSaved(false);
+					}}
+					rows={5}
+					placeholder={"每行一个中文词，例如：\n宇宙魔方\n霍华德\n项目成员姓名"}
+				/>
+			</label>
+			<div className="sh-settings-config-actions">
+				<button
+					type="button"
+					disabled={!config || saving || snapshot.speech.state !== "idle"}
+					onClick={() => {
+						const next = normalizeSpeechHotwords(hotwords);
+						pendingHotwords.current = next;
+						setSaved(false);
+						setSaving(true);
+						client.updateSpeechConfig({ hotwords: next });
+					}}
+				>
+					{saving ? "正在保存…" : "保存项目热词"}
+				</button>
+				{saved && <span className="sh-settings-config-feedback">已保存</span>}
+			</div>
+		</section>
 	);
 }
 
@@ -108,6 +257,7 @@ export function SettingsModal({
 	loadArchivedSessions,
 	onRestoreArchivedSession,
 	onDeleteArchivedSession,
+	speechClient,
 }: SettingsModalProps): ReactNode {
 	const { preference, resolved, setPreference } = useThemePreference();
 	const { showAllModels, setShowAllModels, isGrimoireShell } = useModelVisibility();
@@ -235,7 +385,7 @@ export function SettingsModal({
 	const trapFocus = (event: KeyboardEvent<HTMLDivElement>): void => {
 		if (event.key !== "Tab") return;
 		const focusable = surfaceRef.current?.querySelectorAll<HTMLElement>(
-			'button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+			'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
 		);
 		if (!focusable || focusable.length === 0) return;
 		const first = focusable.item(0);
@@ -250,7 +400,14 @@ export function SettingsModal({
 	};
 
 	const access = readOnly == null ? UNAVAILABLE : readOnly ? "Read only" : "Read and write";
-	const activeLabel = section === "general" ? "General" : section === "appearance" ? "Appearance" : "Archived chats";
+	const activeLabel =
+		section === "general"
+			? "General"
+			: section === "speech"
+				? "Speech"
+				: section === "appearance"
+					? "Appearance"
+					: "Archived chats";
 
 	return (
 		<div className="sh-settings-backdrop" onClick={onClose}>
@@ -271,6 +428,18 @@ export function SettingsModal({
 					</button>
 					<div className="sh-settings-sidebar-title">Settings</div>
 					<nav className="sh-settings-nav" aria-label="Settings sections">
+						{speechClient && (
+							<button
+								type="button"
+								className={section === "speech" ? "sh-settings-nav-item is-active" : "sh-settings-nav-item"}
+								aria-current={section === "speech" ? "page" : undefined}
+								aria-controls="sh-settings-panel-speech"
+								onClick={() => setSection("speech")}
+							>
+								<Mic2 size={18} aria-hidden="true" />
+								<span>Speech</span>
+							</button>
+						)}
 						<button
 							type="button"
 							className={section === "general" ? "sh-settings-nav-item is-active" : "sh-settings-nav-item"}
@@ -447,6 +616,11 @@ export function SettingsModal({
 										</div>
 									</dl>
 								</section>
+							</div>
+						)}
+						{section === "speech" && speechClient && (
+							<div id="sh-settings-panel-speech" className="sh-settings-sections">
+								<SpeechSettings client={speechClient} />
 							</div>
 						)}
 

@@ -2,6 +2,7 @@ import { AudioCapture } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
+import { analyzeAudioQuality, type SttAudioQuality } from "./audio-quality";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger, type SttSubmitTrigger } from "./submit-trigger";
@@ -18,6 +19,12 @@ export interface SttToggleOptions {
 	modelName?: string;
 	language?: string;
 	submitTrigger?: SttSubmitTrigger;
+	/** Stable native endpoint id. Omit or pass an empty string for system default. */
+	inputDeviceId?: string;
+	/** Project vocabulary applied by the Chinese precision model. */
+	hotwords?: readonly string[];
+	/** Throttled live microphone-quality measurements. */
+	onAudioQuality?(quality: SttAudioQuality): void;
 }
 
 /** The slice of the composer editor the controller drives. */
@@ -34,7 +41,12 @@ interface CaptureHandle {
 	stop(): void;
 }
 
-type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => void) => CaptureHandle;
+type CaptureFactory = (
+	onAudio: (error: Error | null, samples: Float32Array) => void,
+	deviceId?: string,
+) => CaptureHandle;
+
+const QUALITY_WINDOW_SAMPLES = 3_200;
 
 /** Coordinates native microphone capture with incremental local transcription. */
 export class STTController {
@@ -60,9 +72,12 @@ export class STTController {
 	#streamAudioSamples = 0;
 	#streamModelKey: SttModelKey | null = null;
 	#streamLanguage: string | undefined;
+	#streamHotwords: readonly string[] = [];
+	#qualityAudio: Float32Array[] = [];
+	#qualitySamples = 0;
 
 	/** Creates a controller; tests may replace the hardware capture boundary. */
-	constructor(createCapture: CaptureFactory = onAudio => new AudioCapture(16_000, onAudio)) {
+	constructor(createCapture: CaptureFactory = (onAudio, deviceId) => new AudioCapture(16_000, onAudio, deviceId)) {
 		this.#createCapture = createCapture;
 	}
 
@@ -252,6 +267,9 @@ export class STTController {
 		this.#streamAudioSamples = 0;
 		this.#streamModelKey = modelKey;
 		this.#streamLanguage = language || undefined;
+		this.#streamHotwords = options.hotwords ?? [];
+		this.#qualityAudio = [];
+		this.#qualitySamples = 0;
 		this.#streamAbort = new AbortController();
 		const stream = sttClient.startStream(modelKey, {
 			language: language || undefined,
@@ -299,8 +317,21 @@ export class STTController {
 				const captured = samples.slice();
 				this.#streamAudio.push(captured);
 				this.#streamAudioSamples += captured.length;
+				this.#qualityAudio.push(captured);
+				this.#qualitySamples += captured.length;
+				if (this.#qualitySamples >= QUALITY_WINDOW_SAMPLES) {
+					const window = new Float32Array(this.#qualitySamples);
+					let offset = 0;
+					for (const chunk of this.#qualityAudio) {
+						window.set(chunk, offset);
+						offset += chunk.length;
+					}
+					this.#qualityAudio = [];
+					this.#qualitySamples = 0;
+					options.onAudioQuality?.(analyzeAudioQuality(window));
+				}
 				stream.pushAudio(samples);
-			});
+			}, options.inputDeviceId || undefined);
 		} catch (err) {
 			this.#streamAcceptingAudio = false;
 			stream.cancel();
@@ -372,16 +403,28 @@ export class STTController {
 			// Segmented live decoding is useful as a preview, but its independent
 			// short windows lose Chinese context and can split a word at a hard
 			// endpoint. Cancel that provisional stream and decode the owned complete
-			// waveform once, using Whisper's overlapping long-form windows.
+			// waveform once with the selected model's long-form decoder.
 			stream.cancel();
 			const audio = this.#capturedAudio();
 			if (audio.length > 0 && this.#streamModelKey) {
 				finalText = this.#normalized(
 					await sttClient.transcribe(this.#streamModelKey, audio, {
 						language: this.#streamLanguage,
+						hotwords: this.#streamHotwords,
 						signal: this.#streamAbort?.signal,
 					}),
 				);
+				const quality = analyzeAudioQuality(audio);
+				logger.debug("stt: captured microphone quality", {
+					deviceId: options.inputDeviceId || "default",
+					modelKey: this.#streamModelKey,
+					durationMs: Math.round(quality.durationMs),
+					rms: Number(quality.rms.toFixed(5)),
+					peak: Number(quality.peak.toFixed(5)),
+					clippingRatio: Number(quality.clippingRatio.toFixed(5)),
+					nearSilenceRatio: Number(quality.nearSilenceRatio.toFixed(5)),
+					quality: quality.quality,
+				});
 			}
 		} catch (err) {
 			failed = true;
@@ -435,6 +478,9 @@ export class STTController {
 		this.#streamAudioSamples = 0;
 		this.#streamModelKey = null;
 		this.#streamLanguage = undefined;
+		this.#streamHotwords = [];
+		this.#qualityAudio = [];
+		this.#qualitySamples = 0;
 	}
 
 	dispose(): void {

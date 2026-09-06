@@ -2145,6 +2145,22 @@ export const SETTINGS_SCHEMA = {
 		default: "en",
 	},
 
+	"stt.inputDeviceId": {
+		type: "string",
+		default: "",
+	},
+
+	"stt.desktopMode": {
+		type: "enum",
+		values: ["sensevoice-fast", "paraformer-zh"] as const,
+		default: "sensevoice-fast",
+	},
+
+	"stt.projectHotwords": {
+		type: "array",
+		default: [] as string[],
+	},
+
 	"stt.modelName": {
 		type: "enum",
 		values: STT_MODEL_VALUES,
@@ -5869,6 +5885,9 @@ export interface SttSettings {
 	language: string | undefined;
 	modelName: string;
 	streaming: boolean;
+	inputDeviceId: string;
+	desktopMode: "sensevoice-fast" | "paraformer-zh";
+	projectHotwords: string[];
 }
 
 export interface BashInterceptorRule {

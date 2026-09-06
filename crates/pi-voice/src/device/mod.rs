@@ -47,6 +47,34 @@ use unsupported as imp;
 
 use crate::VoiceResult;
 
+/// One selectable microphone endpoint exposed to application clients.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AudioInputDevice {
+	/// Stable platform endpoint id. `default` is used on backends that do not
+	/// expose per-device selection yet.
+	pub id:         String,
+	/// Human-readable device name supplied by the operating system.
+	pub name:       String,
+	/// Whether this endpoint is the current system default microphone.
+	pub is_default: bool,
+}
+
+/// Enumerate active microphone endpoints.
+pub fn list_audio_input_devices() -> VoiceResult<Vec<AudioInputDevice>> {
+	#[cfg(target_os = "windows")]
+	{
+		imp::list_audio_input_devices()
+	}
+	#[cfg(not(target_os = "windows"))]
+	{
+		Ok(vec![AudioInputDevice {
+			id:         "default".to_owned(),
+			name:       "Default microphone".to_owned(),
+			is_default: true,
+		}])
+	}
+}
+
 /// Render callback: fill the whole output buffer with mono `f32` samples.
 pub type PlaybackFill = Box<dyn FnMut(&mut [f32]) + Send + 'static>;
 
@@ -93,9 +121,26 @@ pub struct CaptureDevice {
 }
 
 impl CaptureDevice {
-	/// Open and start the default microphone; `sink` runs on the audio thread.
-	pub fn start(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
-		Ok(Self { inner: imp::CaptureDevice::start(config, sink)? })
+	/// Open and start a selected microphone endpoint. `None` follows the system
+	/// default. Backends without endpoint enumeration accept only `default`.
+	pub fn start_selected(
+		config: DeviceConfig,
+		device_id: Option<String>,
+		sink: CaptureSink,
+	) -> VoiceResult<Self> {
+		#[cfg(target_os = "windows")]
+		{
+			Ok(Self { inner: imp::CaptureDevice::start(config, device_id, sink)? })
+		}
+		#[cfg(not(target_os = "windows"))]
+		{
+			if device_id.as_deref().is_some_and(|id| id != "default") {
+				return Err(
+					"Selecting a non-default microphone is not supported on this platform".to_owned(),
+				);
+			}
+			Ok(Self { inner: imp::CaptureDevice::start(config, sink)? })
+		}
 	}
 
 	/// Stop capture and release the device. Idempotent; no callback runs

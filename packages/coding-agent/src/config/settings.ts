@@ -351,6 +351,8 @@ export class Settings {
 	#modified = new Set<string>();
 	/** Individual project model roles modified during this session */
 	#modifiedProjectModelRoles = new Set<string>();
+	/** Non-model settings that are explicitly owned by the current project. */
+	#modifiedProjectPaths = new Set<SettingPath>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
 	/**
@@ -599,7 +601,7 @@ export class Settings {
 		if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
 			await this.#saveNow();
 		}
-		if (this.#modifiedProjectModelRoles.size > 0) {
+		if (this.#modifiedProjectModelRoles.size > 0 || this.#modifiedProjectPaths.size > 0) {
 			await this.#saveProjectNow();
 		}
 	}
@@ -942,6 +944,17 @@ export class Settings {
 		this.#updateRuntimeModelRoleOverride(role, undefined);
 	}
 
+	/** Persist speech-recognition vocabulary in the active project's `.omp/config.yml`. */
+	setProjectSttHotwords(value: SettingValue<"stt.projectHotwords">): void {
+		const settingPath = "stt.projectHotwords" as const;
+		const prev = this.get(settingPath);
+		setByPath(this.#project, [...SETTING_PATH_SEGMENTS[settingPath]], value);
+		this.#modifiedProjectPaths.add(settingPath);
+		this.#rebuildMerged();
+		this.#fireEffectiveSettingChanged(settingPath, this.get(settingPath), prev);
+		this.#queueProjectSave();
+	}
+
 	/**
 	 * Get a model role (helper for modelRoles record).
 	 */
@@ -1251,6 +1264,10 @@ export class Settings {
 		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
 		if (nativeModelRoles !== undefined) {
 			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
+		}
+		const nativeProjectHotwords = getByPath(nativeProject, ["stt", "projectHotwords"]);
+		if (nativeProjectHotwords !== undefined) {
+			merged = this.#deepMerge(merged, { stt: { projectHotwords: nativeProjectHotwords } });
 		}
 		return this.#migrateRawSettings(merged);
 	}
@@ -2157,11 +2174,18 @@ export class Settings {
 	}
 
 	async #saveProjectNow(): Promise<void> {
-		if (this.#savesCancelled || !this.#persist || this.#modifiedProjectModelRoles.size === 0) return;
+		if (
+			this.#savesCancelled ||
+			!this.#persist ||
+			(this.#modifiedProjectModelRoles.size === 0 && this.#modifiedProjectPaths.size === 0)
+		)
+			return;
 
 		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
+		const modifiedPaths = [...this.#modifiedProjectPaths];
 		this.#modifiedProjectModelRoles.clear();
+		this.#modifiedProjectPaths.clear();
 
 		try {
 			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
@@ -2176,6 +2200,10 @@ export class Settings {
 					const value = isRecord(projectRoles) ? projectRoles[role] : undefined;
 					setByPath(projectSettings, ["modelRoles", role], value);
 				}
+				for (const modifiedPath of modifiedPaths) {
+					const segments = SETTING_PATH_SEGMENTS[modifiedPath];
+					setByPath(projectSettings, [...segments], getByPath(this.#project, segments));
+				}
 
 				await this.#writeYamlAtomically(writePath, projectSettings);
 				this.#projectFileSettings = structuredClone(projectSettings);
@@ -2185,6 +2213,9 @@ export class Settings {
 		} catch (error) {
 			for (const role of modifiedModelRoles) {
 				this.#modifiedProjectModelRoles.add(role);
+			}
+			for (const modifiedPath of modifiedPaths) {
+				this.#modifiedProjectPaths.add(modifiedPath);
 			}
 			throw error;
 		}
@@ -2427,6 +2458,11 @@ export function resetSettingsForTest(): void {
 		ref.deref()?.cancelPendingSaves();
 	}
 	liveSettingsInstances.clear();
+	// Persistent Settings instances share AgentStorage's path-keyed SQLite
+	// singleton. Closing it here is required on Windows before a test can remove
+	// its temporary agent directory; cancelling debounced YAML writes alone does
+	// not release the database handle.
+	AgentStorage.resetInstance();
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();

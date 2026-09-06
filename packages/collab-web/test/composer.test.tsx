@@ -37,6 +37,9 @@ function snapshot(uiRequest: GuestSnapshot["uiRequest"]): GuestSnapshot {
 		historyRemaining: 0,
 		historyLoading: false,
 		speech: { state: "idle", text: "" },
+		speechConfig: null,
+		speechConfigError: null,
+		speechConfigRevision: 0,
 		notices: [],
 	};
 }

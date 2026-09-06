@@ -612,6 +612,56 @@ describe("GuestClient frame apply", () => {
 		}
 	});
 
+	it("round-trips microphone, recognition mode, and project hotword settings", () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const client = liveClient();
+			client.requestSpeechConfig();
+			client.updateSpeechConfig({
+				deviceId: "wasapi:microphone-2",
+				mode: "paraformer-zh",
+				hotwords: ["宇宙魔方", "霍华德"],
+			});
+			expect(sent).toEqual([
+				{ t: "speech-config-get" },
+				{
+					t: "speech-config-set",
+					deviceId: "wasapi:microphone-2",
+					mode: "paraformer-zh",
+					hotwords: ["宇宙魔方", "霍华德"],
+				},
+			]);
+
+			client.applyFrameForTest({
+				t: "speech-config",
+				config: {
+					devices: [
+						{ id: "wasapi:microphone-1", name: "内置麦克风", isDefault: true },
+						{ id: "wasapi:microphone-2", name: "USB 麦克风", isDefault: false },
+					],
+					deviceId: "wasapi:microphone-2",
+					mode: "paraformer-zh",
+					hotwords: ["宇宙魔方", "霍华德"],
+				},
+			});
+			expect(client.getSnapshot().speechConfigRevision).toBe(1);
+			expect(client.getSnapshot().speechConfig).toEqual({
+				devices: [
+					{ id: "wasapi:microphone-1", name: "内置麦克风", isDefault: true },
+					{ id: "wasapi:microphone-2", name: "USB 麦克风", isDefault: false },
+				],
+				deviceId: "wasapi:microphone-2",
+				mode: "paraformer-zh",
+				hotwords: ["宇宙魔方", "霍华德"],
+			});
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+
 	it("snapshot reference is stable between frames and replaced per frame", () => {
 		const client = liveClient();
 		const before = client.getSnapshot();

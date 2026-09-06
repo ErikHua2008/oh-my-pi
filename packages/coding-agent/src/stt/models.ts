@@ -6,9 +6,8 @@ import type { TinyModelDtype } from "../tiny/dtype";
  *
  * - `transformers` — a transformers.js / ONNX Whisper repo, loaded by the
  *   `@huggingface/transformers` `automatic-speech-recognition` pipeline.
- * - `sherpa` — a sherpa-onnx (Next-gen Kaldi) offline model, loaded by the
- *   native `sherpa-onnx-node` addon. Used for NVIDIA Parakeet, the Open ASR
- *   Leaderboard accuracy/speed leader.
+ * - `sherpa` — a sherpa-onnx offline model, loaded by the native
+ *   `sherpa-onnx-node` addon. Used for NVIDIA Parakeet and SenseVoice.
  *
  * The worker resolves the spec by key and loads the model lazily (kept warm
  * afterwards). Both engines run inside the hard-killed subprocess worker.
@@ -23,6 +22,8 @@ interface SttModelBase {
 	engine: SttEngine;
 	/** Hugging Face repo id (transformers.js ONNX repo, or sherpa-onnx model repo). */
 	repo: string;
+	/** Optional immutable Hub revision used for reproducible native model downloads. */
+	revision?: string;
 	/** English-only checkpoint: rejects a configured source `language`. */
 	englishOnly: boolean;
 	label: string;
@@ -38,22 +39,47 @@ export interface TransformersSttModelSpec extends SttModelBase {
 	dtype: TinyModelDtype;
 }
 
-/** A sherpa-onnx offline tier (e.g. NeMo Parakeet transducer) loaded natively. */
-export interface SherpaSttModelSpec extends SttModelBase {
+/** A sherpa-onnx NeMo/CTC transducer model loaded natively. */
+export interface SherpaTransducerSttModelSpec extends SttModelBase {
 	engine: "sherpa";
-	/** sherpa-onnx offline model family (e.g. `nemo_transducer`). */
+	family: "transducer";
+	/** sherpa-onnx model type (e.g. `nemo_transducer`). */
 	modelType: string;
 	/** Model files (relative to the repo root) fetched into the local cache. */
 	files: { encoder: string; decoder: string; joiner: string; tokens: string };
 }
+
+/** A sherpa-onnx SenseVoice model loaded natively for multilingual dictation. */
+export interface SherpaSenseVoiceSttModelSpec extends SttModelBase {
+	engine: "sherpa";
+	family: "sense_voice";
+	/** Model files (relative to the repo root) fetched into the local cache. */
+	files: { model: string; tokens: string };
+	/** Language passed to SenseVoice's language-aware decoder. */
+	language: string;
+	/** Keep spoken numbers and dates in the user's original form for dictation. */
+	useInverseTextNormalization: boolean;
+}
+
+/** A sherpa-onnx offline Paraformer model optimized for Mandarin dictation. */
+export interface SherpaParaformerSttModelSpec extends SttModelBase {
+	engine: "sherpa";
+	family: "paraformer";
+	files: { model: string; tokens: string };
+}
+
+export type SherpaSttModelSpec =
+	| SherpaTransducerSttModelSpec
+	| SherpaSenseVoiceSttModelSpec
+	| SherpaParaformerSttModelSpec;
 
 export type SttModelSpec = TransformersSttModelSpec | SherpaSttModelSpec;
 
 /**
  * Speech model tiers, ordered light → SoTA. Defaults to {@link DEFAULT_STT_MODEL_KEY}.
  * `fast`/`balanced`/`turbo` are multilingual Whisper checkpoints on transformers.js;
- * `parakeet` is NVIDIA Parakeet TDT 0.6B v3 on sherpa-onnx — the Open ASR
- * Leaderboard leader (lower WER and far higher throughput than Whisper).
+ * `parakeet` is NVIDIA Parakeet TDT 0.6B v3 and `sensevoice` is SenseVoice on
+ * sherpa-onnx. The desktop host uses SenseVoice for fast multilingual dictation.
  */
 export const STT_MODELS = [
 	{
@@ -89,6 +115,7 @@ export const STT_MODELS = [
 	{
 		key: "parakeet",
 		engine: "sherpa",
+		family: "transducer",
 		repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
 		modelType: "nemo_transducer",
 		files: {
@@ -103,6 +130,38 @@ export const STT_MODELS = [
 			"NVIDIA Parakeet TDT 0.6B v3, 25 languages. Open ASR Leaderboard leader — best accuracy and far fastest decoding. Default.",
 		sizeHint: "~680 MB",
 	},
+	{
+		key: "sensevoice",
+		engine: "sherpa",
+		family: "sense_voice",
+		repo: "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+		revision: "2365baeacb507f821a0c8120fcee3d484dba7a07",
+		files: {
+			model: "model.int8.onnx",
+			tokens: "tokens.txt",
+		},
+		language: "auto",
+		useInverseTextNormalization: false,
+		englishOnly: false,
+		label: "SenseVoice（快速通用）",
+		description: "SenseVoice 多语言离线语音识别，自动识别中文、英文、日文、韩文和粤语，速度快、内存低。",
+		sizeHint: "~229 MB",
+	},
+	{
+		key: "paraformer-zh",
+		engine: "sherpa",
+		family: "paraformer",
+		repo: "csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09",
+		revision: "906992d326ebf0c5171cde675aa0902be9e5bc6c",
+		files: {
+			model: "model.int8.onnx",
+			tokens: "tokens.txt",
+		},
+		englishOnly: false,
+		label: "Paraformer（中文精准）",
+		description: "Paraformer 中文离线识别，配合项目热词纠正，适合普通话长语音和技术词汇。",
+		sizeHint: "~217 MB",
+	},
 ] as const satisfies readonly SttModelSpec[];
 
 /**
@@ -116,7 +175,14 @@ export type SttModelKey = (typeof STT_MODELS)[number]["key"];
 /** A concrete entry from {@link STT_MODELS}; `key` is the literal tier union. */
 export type SttModel = (typeof STT_MODELS)[number];
 
-export const STT_MODEL_VALUES = ["fast", "balanced", "turbo", "parakeet"] as const satisfies readonly SttModelKey[];
+export const STT_MODEL_VALUES = [
+	"fast",
+	"balanced",
+	"turbo",
+	"parakeet",
+	"sensevoice",
+	"paraformer-zh",
+] as const satisfies readonly SttModelKey[];
 
 type MissingSttModelValue = Exclude<SttModelKey, (typeof STT_MODEL_VALUES)[number]>;
 type ExtraSttModelValue = Exclude<(typeof STT_MODEL_VALUES)[number], SttModelKey>;

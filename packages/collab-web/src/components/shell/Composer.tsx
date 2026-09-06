@@ -685,6 +685,28 @@ export function Composer({
 										? "可拖入文件 · Ctrl+V 粘贴图片"
 										: "点击麦克风开始语音录入"}
 							</span>
+							{speechActive && snapshot.speech.level !== undefined && (
+								<span
+									className="sh-composer-audio-quality"
+									data-quality={snapshot.speech.quality ?? "unavailable"}
+									title={
+										snapshot.speech.quality === "clipping"
+											? "麦克风输入过大，已经削波"
+											: snapshot.speech.quality === "quiet"
+												? "麦克风输入音量偏低"
+												: `正在使用 ${snapshot.speech.deviceName ?? "麦克风"}`
+									}
+								>
+									<i aria-hidden="true">
+										<b style={{ width: `${Math.round(snapshot.speech.level * 100)}%` }} />
+									</i>
+									{snapshot.speech.quality === "clipping"
+										? "输入过大"
+										: snapshot.speech.quality === "quiet"
+											? "音量偏低"
+											: "音质正常"}
+								</span>
+							)}
 						</div>
 					)}
 					{localFiles.length > 0 && (

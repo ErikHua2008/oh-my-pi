@@ -22,7 +22,14 @@ export interface SttProgressEvent {
 
 export type SttWorkerInbound =
 	| { type: "ping"; id: string }
-	| { type: "transcribe"; id: string; modelKey: SttModelKey; audio: Float32Array; language?: string }
+	| {
+			type: "transcribe";
+			id: string;
+			modelKey: SttModelKey;
+			audio: Float32Array;
+			language?: string;
+			hotwords?: string[];
+	  }
 	| { type: "download"; id: string; modelKey: SttModelKey }
 	// ── Live streaming session ──
 	// `stream_start` warms the model and opens a session; `stream_audio` feeds

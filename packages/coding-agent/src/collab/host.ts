@@ -13,6 +13,7 @@ import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
+import { type AudioInputDevice, listAudioInputDevices } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
@@ -22,6 +23,8 @@ import type {
 	CollabUiRequestDraft,
 	CollabUiResponseValue,
 	LocalFileReference,
+	SpeechInputConfig,
+	SpeechInputMode,
 	AgentEvent as WireAgentEvent,
 	WireModel,
 	SessionEntry as WireSessionEntry,
@@ -32,7 +35,8 @@ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
-import { STTController, type SttEditor, type SttState, type SttToggleOptions } from "../stt";
+import { STTController, type SttAudioQuality, type SttEditor, type SttState, type SttToggleOptions } from "../stt";
+import { normalizeProjectHotwords } from "../stt/hotwords";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
 import { resizeImage } from "../utils/image-resize";
@@ -240,6 +244,9 @@ export class CollabHost {
 	#speechCommitted = "";
 	#speechVolatile = "";
 	#speechStatus = "";
+	#speechQuality: SttAudioQuality | undefined;
+	#speechDeviceName = "";
+	#speechConfigUpdates: Promise<void> = Promise.resolve();
 	readonly #speechEditor: SttEditor = {
 		insertText: text => {
 			this.#speechCommitted += text;
@@ -493,6 +500,12 @@ export class CollabHost {
 				break;
 			case "speech-input":
 				void this.#handleSpeechInput(frame.action, fromPeer);
+				break;
+			case "speech-config-get":
+				this.#sendSpeechConfig(fromPeer);
+				break;
+			case "speech-config-set":
+				this.#queueSpeechConfigUpdate(frame, fromPeer);
 				break;
 			case "fetch-image":
 				void this.#handleFetchImage(frame.reqId, frame.imageId, frame.variant, fromPeer);
@@ -1062,6 +1075,10 @@ export class CollabHost {
 				state,
 				text: this.#speechText(),
 				status: this.#speechStatus || undefined,
+				level: this.#speechQuality?.level,
+				peak: this.#speechQuality?.peak,
+				quality: this.#speechQuality?.quality,
+				deviceName: this.#speechDeviceName || undefined,
 				final: options.final,
 				error: options.error,
 			},
@@ -1069,12 +1086,131 @@ export class CollabHost {
 		);
 	}
 
-	#speechOptions(peer: number): SttToggleOptions {
+	#speechConfig(): SpeechInputConfig {
+		const devices = listAudioInputDevices().map(device => ({
+			id: device.id,
+			name: device.name,
+			isDefault: device.isDefault,
+		}));
 		return {
-			// The desktop first release intentionally uses multilingual Whisper small
-			// in Chinese mode and never auto-sends recognized text.
-			modelName: "balanced",
+			devices,
+			deviceId: this.#ctx.settings.get("stt.inputDeviceId") ?? "",
+			mode: this.#ctx.settings.get("stt.desktopMode"),
+			hotwords: normalizeProjectHotwords(this.#ctx.settings.get("stt.projectHotwords")),
+		};
+	}
+
+	#sendSpeechConfig(peer: number, error?: string): void {
+		try {
+			this.#socket?.send({ t: "speech-config", config: this.#speechConfig(), error }, peer);
+		} catch (cause) {
+			const message = cause instanceof Error ? cause.message : String(cause);
+			this.#socket?.send(
+				{
+					t: "speech-config",
+					config: {
+						devices: [],
+						deviceId: this.#ctx.settings.get("stt.inputDeviceId") ?? "",
+						mode: this.#ctx.settings.get("stt.desktopMode"),
+						hotwords: normalizeProjectHotwords(this.#ctx.settings.get("stt.projectHotwords")),
+					},
+					error: error ?? this.#localizedSpeechError(message),
+				},
+				peer,
+			);
+		}
+	}
+
+	#queueSpeechConfigUpdate(
+		frame: { deviceId?: string; mode?: SpeechInputMode; hotwords?: string[] },
+		fromPeer: number,
+	): void {
+		const update = this.#speechConfigUpdates.then(() => this.#handleSpeechConfig(frame, fromPeer));
+		this.#speechConfigUpdates = update.catch(cause => {
+			logger.warn("speech config update failed", {
+				error: cause instanceof Error ? cause.message : String(cause),
+			});
+		});
+	}
+
+	async #handleSpeechConfig(
+		frame: { deviceId?: string; mode?: SpeechInputMode; hotwords?: string[] },
+		fromPeer: number,
+	): Promise<void> {
+		const peer = this.#peers.get(fromPeer);
+		if (!peer?.canWrite) {
+			this.#sendSpeechConfig(fromPeer, "当前会话为只读，无法修改语音设置。");
+			return;
+		}
+		if (this.#speechController.state !== "idle" || this.#speechPeer !== null) {
+			this.#sendSpeechConfig(fromPeer, "请先结束当前语音录入，再修改麦克风或识别模式。");
+			return;
+		}
+		try {
+			if (frame.deviceId !== undefined && typeof frame.deviceId !== "string") {
+				this.#sendSpeechConfig(fromPeer, "无效的麦克风设置。");
+				return;
+			}
+			if (frame.mode !== undefined && frame.mode !== "sensevoice-fast" && frame.mode !== "paraformer-zh") {
+				this.#sendSpeechConfig(fromPeer, "不支持的语音识别模式。");
+				return;
+			}
+			if (
+				frame.hotwords !== undefined &&
+				(!Array.isArray(frame.hotwords) || frame.hotwords.some(word => typeof word !== "string"))
+			) {
+				this.#sendSpeechConfig(fromPeer, "项目热词格式无效。");
+				return;
+			}
+
+			const requestedDeviceId = frame.deviceId?.trim();
+			const projectHotwords = frame.hotwords ? normalizeProjectHotwords(frame.hotwords) : undefined;
+			if (requestedDeviceId !== undefined) {
+				const devices: AudioInputDevice[] = listAudioInputDevices();
+				if (requestedDeviceId && !devices.some(device => device.id === requestedDeviceId)) {
+					this.#sendSpeechConfig(fromPeer, "所选麦克风已断开，请刷新设备列表后重试。");
+					return;
+				}
+				this.#ctx.settings.set("stt.inputDeviceId", requestedDeviceId);
+			}
+			if (frame.mode !== undefined) {
+				this.#ctx.settings.set("stt.desktopMode", frame.mode);
+			}
+			if (projectHotwords !== undefined) {
+				this.#ctx.settings.setProjectSttHotwords(projectHotwords);
+			}
+			// A speech-config reply is also the UI's save acknowledgement. Wait for
+			// both global and project YAML writes so "已保存" never means only an
+			// optimistic in-memory update.
+			await this.#ctx.settings.flush();
+			this.#sendSpeechConfig(fromPeer);
+		} catch (cause) {
+			this.#sendSpeechConfig(
+				fromPeer,
+				this.#localizedSpeechError(cause instanceof Error ? cause.message : String(cause)),
+			);
+		}
+	}
+
+	#speechOptions(peer: number): SttToggleOptions {
+		const deviceId = this.#ctx.settings.get("stt.inputDeviceId") ?? "";
+		const mode = this.#ctx.settings.get("stt.desktopMode");
+		const hotwords = normalizeProjectHotwords(this.#ctx.settings.get("stt.projectHotwords"));
+		try {
+			const devices = listAudioInputDevices();
+			const selected = deviceId ? devices.find(device => device.id === deviceId) : undefined;
+			this.#speechDeviceName = selected?.name ?? devices.find(device => device.isDefault)?.name ?? "";
+		} catch {
+			this.#speechDeviceName = "";
+		}
+		return {
+			// The desktop uses SenseVoice for fast multilingual dictation and
+			// never auto-sends recognized text. Whisper remains available as an
+			// optional model in the general STT settings.
+			modelName: mode === "paraformer-zh" ? "paraformer-zh" : "sensevoice",
 			language: "zh",
+			inputDeviceId: deviceId,
+			hotwords,
 			submitTrigger: "never",
 			showWarning: message => {
 				this.#speechStatus = "";
@@ -1092,6 +1228,11 @@ export class CollabHost {
 				if (state === "idle") this.#speechStatus = "";
 				this.#sendSpeechState(peer, state, { final: state === "idle" });
 				if (state === "idle" && this.#speechPeer === peer) this.#speechPeer = null;
+			},
+			onAudioQuality: quality => {
+				this.#speechQuality = quality;
+				const state = this.#speechController.state === "idle" ? "preparing" : this.#speechController.state;
+				this.#sendSpeechState(peer, state);
 			},
 			requestRender: () => {
 				const state = this.#speechController.state === "idle" ? "preparing" : this.#speechController.state;
@@ -1150,6 +1291,7 @@ export class CollabHost {
 			this.#speechPeer = fromPeer;
 			this.#speechCommitted = "";
 			this.#speechVolatile = "";
+			this.#speechQuality = undefined;
 			this.#speechStatus = "正在准备中文语音识别…";
 			this.#sendSpeechState(fromPeer, "preparing");
 			await this.#speechController.toggle(this.#speechEditor, this.#speechOptions(fromPeer));

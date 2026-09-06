@@ -624,6 +624,7 @@ function Session({ client, controlClient, onLeave, onRejoin, onBack }: SessionPr
 					connection={snap.phase}
 					model={snap.state?.model?.name}
 					context={contextLabel(snap)}
+					speechClient={client}
 					loadArchivedSessions={controlClient ? listArchivedSessions : undefined}
 					onRestoreArchivedSession={controlClient ? restoreArchivedSession : undefined}
 					onDeleteArchivedSession={controlClient ? deleteArchivedSession : undefined}

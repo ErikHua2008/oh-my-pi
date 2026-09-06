@@ -23,6 +23,8 @@ import type {
 	SessionEntry,
 	SessionHeader,
 	SessionState,
+	SpeechInputConfig,
+	SpeechInputMode,
 	SpeechInputSnapshot,
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
@@ -80,6 +82,11 @@ export interface GuestSnapshot {
 	historyLoading: boolean;
 	/** Host-side local microphone/STT state for the desktop composer. */
 	speech: SpeechInputSnapshot;
+	/** Host microphone/model preferences, loaded on demand by Settings. */
+	speechConfig: SpeechInputConfig | null;
+	speechConfigError: string | null;
+	/** Increments only when the host acknowledges a speech-config request. */
+	speechConfigRevision: number;
 	/** Capped at 50, newest last. */
 	notices: readonly Notice[];
 }
@@ -191,6 +198,9 @@ export class GuestClient {
 	#historyRemaining = 0;
 	#historyLoading = false;
 	#speech: SpeechInputSnapshot = { state: "idle", text: "" };
+	#speechConfig: SpeechInputConfig | null = null;
+	#speechConfigError: string | null = null;
+	#speechConfigRevision = 0;
 	#pendingChatSearch = new Map<number, PendingChatSearch>();
 	#notices: readonly Notice[] = [];
 	#snapshot: GuestSnapshot;
@@ -354,6 +364,18 @@ export class GuestClient {
 		if (this.#speech.state === "idle") return;
 		this.#socket.send({ t: "speech-input", action: "cancel" });
 		this.#speech = { state: "idle", text: "", final: true };
+		this.#commit();
+	}
+
+	requestSpeechConfig(): void {
+		this.#speechConfigError = null;
+		this.#socket.send({ t: "speech-config-get" });
+		this.#commit();
+	}
+
+	updateSpeechConfig(config: { deviceId?: string; mode?: SpeechInputMode; hotwords?: string[] }): void {
+		this.#speechConfigError = null;
+		this.#socket.send({ t: "speech-config-set", ...config });
 		this.#commit();
 	}
 
@@ -687,8 +709,18 @@ export class GuestClient {
 					text: frame.text,
 					status: frame.status,
 					error: frame.error,
+					level: frame.level,
+					peak: frame.peak,
+					quality: frame.quality,
+					deviceName: frame.deviceName,
 					final: frame.final,
 				};
+				if (frame.error) this.#pushNotice("error", frame.error);
+				break;
+			case "speech-config":
+				this.#speechConfig = frame.config;
+				this.#speechConfigError = frame.error ?? null;
+				this.#speechConfigRevision += 1;
 				if (frame.error) this.#pushNotice("error", frame.error);
 				break;
 			case "image": {
@@ -864,6 +896,9 @@ export class GuestClient {
 			historyRemaining: this.#historyRemaining,
 			historyLoading: this.#historyLoading,
 			speech: this.#speech,
+			speechConfig: this.#speechConfig,
+			speechConfigError: this.#speechConfigError,
+			speechConfigRevision: this.#speechConfigRevision,
 			notices: this.#notices,
 		};
 	}

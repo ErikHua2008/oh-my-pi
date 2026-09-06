@@ -21,6 +21,7 @@ import type {
 	ParsedCollabLink,
 	Participant,
 	SessionState,
+	SpeechInputConfig,
 	SpeechInputSnapshot,
 	AgentSnapshot as WireAgentSnapshot,
 	WireModel,
@@ -56,6 +57,8 @@ export type {
 	RelayControlToHost,
 	SessionStatus,
 	SessionSummary,
+	SpeechInputConfig,
+	SpeechInputMode,
 	SpeechInputSnapshot,
 	SpeechInputState,
 } from "@oh-my-pi/pi-wire";
@@ -137,6 +140,7 @@ export type CollabFrame =
 	  }
 	/** Targeted local microphone/STT lifecycle and incremental transcript. */
 	| ({ t: "speech-input-state" } & SpeechInputSnapshot)
+	| { t: "speech-config"; config: SpeechInputConfig; error?: string }
 	/** Targeted lazy-media reply for guests that advertised `mediaRefs`. */
 	| {
 			t: "image";
